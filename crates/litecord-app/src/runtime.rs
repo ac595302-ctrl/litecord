@@ -180,6 +180,11 @@ pub(crate) async fn maintenance(
                 if let Err(e) = memory.apply_retention(now, &cfg.retention) {
                     tracing::warn!(error = %e, "retention failed");
                 }
+                match memory.refresh_recent_summaries(now) {
+                    Ok(n) if n > 0 => tracing::debug!(written = n, "summaries refreshed"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "summary refresh failed"),
+                }
             }
         }
     }
