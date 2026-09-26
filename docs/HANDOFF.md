@@ -172,6 +172,14 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Memory footprint note (for UI performance work)
+
+`litecord demo --in-memory` (release, headless: full runtime, SQLite, demo
+hydration, memory extraction, context compile) reports **~9.5 MiB RSS** on
+Linux. The ~138 MiB measured for the GUI build is therefore almost entirely
+the GUI stack (egui/glow context, font atlases, window buffers) — optimize
+there first (e.g. renderer choice, font subsetting, texture sizes).
+
 ## Gotchas learned the hard way
 
 * Supersession and pending-reply expiry must follow **observation time**,
