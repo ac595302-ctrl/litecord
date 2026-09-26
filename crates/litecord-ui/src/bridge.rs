@@ -84,6 +84,13 @@ pub enum Command {
         String,
         litecord_types::provenance::DiscordIdentity,
     ),
+    /// Reply to a message with an explicitly displayed identity.
+    ReplyAs(
+        ConversationId,
+        MessageId,
+        String,
+        litecord_types::provenance::DiscordIdentity,
+    ),
     CreateTask(litecord_types::tasks::TaskDraft),
     SetTaskPriority(TaskId, litecord_types::tasks::TaskPriority),
     AddTaskComment(TaskId, String),
@@ -413,6 +420,17 @@ pub(crate) async fn execute(
         Command::Run(id, active) => c.effects = app.run_command(&id, active).await?,
         Command::SendAs(id, text, identity) => {
             match app.send_message_as(id, &text, identity).await? {
+                litecord_actions::ProposeOutcome::Executed { .. } => c.sent = Some((id, text)),
+                litecord_actions::ProposeOutcome::PendingApproval { .. } => {
+                    c.effects.push(UiEffect::Notice {
+                        message: "Message requires approval in Inbox; your draft is preserved."
+                            .into(),
+                    })
+                }
+            }
+        }
+        Command::ReplyAs(id, reply_to, text, identity) => {
+            match app.send_reply_as(id, reply_to, &text, identity).await? {
                 litecord_actions::ProposeOutcome::Executed { .. } => c.sent = Some((id, text)),
                 litecord_actions::ProposeOutcome::PendingApproval { .. } => {
                     c.effects.push(UiEffect::Notice {

@@ -331,6 +331,17 @@ mod tests {
     }
 
     #[test]
+    fn create_reply_references_the_message_without_pinging() {
+        let req = create_reply(ChannelId(1), "ok", MessageId(9));
+        assert_eq!(req.path, "/channels/1/messages");
+        let body = req.body.unwrap();
+        assert_eq!(body["message_reference"]["message_id"], "9");
+        assert_eq!(body["message_reference"]["channel_id"], "1");
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(body["allowed_mentions"]["replied_user"], false);
+    }
+
+    #[test]
     fn edit_and_delete_message_paths() {
         let edit = edit_message(ChannelId(1), MessageId(2), "new content");
         assert_eq!(edit.method, Method::Patch);

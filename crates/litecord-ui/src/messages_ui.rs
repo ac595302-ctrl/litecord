@@ -315,6 +315,25 @@ impl Workspace {
         private: bool,
     ) {
         response.context_menu(|ui| {
+            let reply = ui
+                .add_enabled(
+                    chat.capabilities.can_reply && !self.busy,
+                    egui::Button::new("Reply"),
+                )
+                .on_disabled_hover_text(
+                    "Replies need the bot identity; the Social SDK sends plain messages only",
+                );
+            if reply.clicked() {
+                self.replying = Some((
+                    chat.conversation_id,
+                    row.message_id,
+                    row.render.author_display.clone(),
+                ));
+                ui.memory_mut(|m| {
+                    m.request_focus(egui::Id::new(("composer", chat.conversation_id)))
+                });
+                ui.close();
+            }
             if ui.button("Open in Discord").clicked() {
                 ui.ctx()
                     .open_url(egui::OpenUrl::new_tab(message_url(chat, row)));
@@ -376,6 +395,35 @@ impl Workspace {
             (false, true) => format!("Message {title}"),
         };
         let busy = self.busy;
+        let reply_to = self
+            .replying
+            .as_ref()
+            .filter(|r| r.0 == id && chat.capabilities.can_reply)
+            .map(|r| (r.1, r.2.clone()));
+        if let Some((_, author)) = &reply_to {
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                crate::icons::glyph(
+                    ui.painter(),
+                    rect.center(),
+                    14.0,
+                    crate::icons::Glyph::Reply,
+                    theme::PRIMARY_TEXT,
+                );
+                let who = if private {
+                    "a message"
+                } else {
+                    author.as_str()
+                };
+                ui.label(theme::meta(format!("Replying to {who}")));
+                if crate::icons::icon_button(ui, crate::icons::Glyph::Close, "Cancel reply", true)
+                    .clicked()
+                {
+                    self.replying = None;
+                }
+            });
+        }
         let mut submit = false;
         let mut clicked = false;
         let draft_len;
@@ -445,7 +493,12 @@ impl Workspace {
         let can_send = !busy && can_send_here && !text.trim().is_empty() && count <= 2000;
         if can_send && (clicked || submit) {
             if let Some(identity) = identity {
-                self.send(Command::SendAs(id, text, identity));
+                match reply_to {
+                    Some((message_id, _)) => {
+                        self.send(Command::ReplyAs(id, message_id, text, identity))
+                    }
+                    None => self.send(Command::SendAs(id, text, identity)),
+                }
             }
         } else if submit {
             if let Some(d) = self.drafts.get_mut(&id) {

@@ -96,6 +96,9 @@ pub struct ConversationCapabilities {
     /// (`application_bot` for guild channels served by the bot). `None`
     /// when no connected identity can post here. Show this in the composer.
     pub send_identity: Option<DiscordIdentity>,
+    /// `send_identity` can reply to a message here (bot: yes; the Social
+    /// SDK sends plain messages only).
+    pub can_reply: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

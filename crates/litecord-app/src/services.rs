@@ -328,6 +328,7 @@ impl LitecordApp {
                         conversation_id: id,
                     }
                     .web_url(),
+                    can_reply: send_identity.is_some() && caps.is_usable(Capability::Replies),
                     send_identity,
                 },
                 agent_visibility: conv.visibility.unwrap_or(default_vis),

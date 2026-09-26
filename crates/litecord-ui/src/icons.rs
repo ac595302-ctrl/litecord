@@ -249,7 +249,6 @@ pub enum Glyph {
     Note,
     Sparkle,
     Message,
-    #[allow(dead_code)] // used by Stage D reply UI
     Reply,
     Close,
 }

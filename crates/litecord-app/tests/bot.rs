@@ -229,3 +229,96 @@ async fn agent_task_listings_respect_conversation_visibility() {
     assert!(!listed(tasks), "hidden conversation: task is withheld");
     assert!(!listed(gateway.read_resource("discord://tasks").unwrap()));
 }
+
+async fn wait_messages(
+    app: &LitecordApp,
+    id: litecord_types::ConversationId,
+) -> Vec<litecord_app::view::MessageRow> {
+    for _ in 0..200 {
+        let view = app.conversation_view(id, 50, None).unwrap();
+        if !view.messages.is_empty() {
+            return view.messages;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("conversation {id} did not hydrate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replies_go_through_the_bot_and_are_never_downgraded() {
+    let (app, user, bot) = start().await;
+    let convs = app.conversations_view(100).unwrap().conversations;
+    let channels: Vec<_> = convs
+        .iter()
+        .filter(|c| c.kind == ConversationKind::GuildChannel)
+        .collect();
+    let channel = channels[0].conversation_id;
+    let dm = convs
+        .iter()
+        .find(|c| c.kind == ConversationKind::DirectMessage)
+        .unwrap()
+        .conversation_id;
+    let target = wait_messages(&app, channel)
+        .await
+        .last()
+        .unwrap()
+        .message_id;
+
+    // Capabilities say who can reply where.
+    let view = app.conversation_view(channel, 10, None).unwrap();
+    assert!(
+        view.capabilities.can_reply,
+        "bot can reply in guild channels"
+    );
+    let dm_view = app.conversation_view(dm, 10, None).unwrap();
+    assert!(
+        !dm_view.capabilities.can_reply,
+        "the Social SDK cannot reply"
+    );
+
+    // A bot reply carries the reference.
+    let outcome = app
+        .send_reply_as(channel, target, "on it", DiscordIdentity::ApplicationBot)
+        .await
+        .unwrap();
+    let litecord_actions::ProposeOutcome::Executed { result, .. } = outcome else {
+        panic!("user reply as bot executes directly: {outcome:?}");
+    };
+    let Some(litecord_types::entity::EntityId::Message(sent)) = result.entity else {
+        panic!("reply produced a message");
+    };
+    let mut stored = None;
+    for _ in 0..100 {
+        stored = app
+            .database()
+            .read(|r| litecord_store::repos::messages::get(r, sent))
+            .unwrap();
+        if stored.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(stored.unwrap().message.reply_to, Some(target));
+    assert_eq!(bot.calls("send_message"), 1);
+
+    // A DM reply as the user is refused, not sent as a plain message.
+    let dm_target = wait_messages(&app, dm).await.last().unwrap().message_id;
+    assert!(app
+        .send_reply_as(dm, dm_target, "hi", DiscordIdentity::UserSocialSdk)
+        .await
+        .is_err());
+    assert_eq!(user.calls("send_message"), 0);
+
+    // The replied-to message must be in the same conversation.
+    assert!(app
+        .send_reply_as(
+            channel,
+            dm_target,
+            "wrong place",
+            DiscordIdentity::ApplicationBot
+        )
+        .await
+        .is_err());
+    assert_eq!(bot.calls("send_message"), 1);
+    app.shutdown().await;
+}

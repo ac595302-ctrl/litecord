@@ -22,6 +22,8 @@ pub struct Workspace {
     pub notice: Option<String>,
     pub busy: bool,
     pub editing_message: Option<(MessageId, String)>,
+    /// Composer reply target: conversation, message, author name.
+    pub replying: Option<(ConversationId, MessageId, String)>,
     pub deleting_message: Option<MessageId>,
     pub note_draft: Option<(UserId, String)>,
     pub profile: LayoutProfile,
@@ -101,6 +103,7 @@ impl Workspace {
             notice: None,
             busy: false,
             editing_message: None,
+            replying: None,
             deleting_message: None,
             note_draft: None,
             profile: LayoutProfile::new("profile_default".into(), "Default".into()),
@@ -289,6 +292,9 @@ impl Workspace {
                     self.request();
                 }
                 if let Some((id, text)) = c.sent {
+                    if self.replying.as_ref().is_some_and(|r| r.0 == id) {
+                        self.replying = None;
+                    }
                     if self.drafts.get(&id) == Some(&text) {
                         self.drafts.remove(&id);
                     }
