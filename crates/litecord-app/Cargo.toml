@@ -1,0 +1,31 @@
+[package]
+name = "litecord-app"
+description = "Litecord composition root: runtime wiring (event reactor, hydration, reminders, maintenance), application services and UI-framework-agnostic view models."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+litecord-memory.workspace = true
+litecord-hydrator.workspace = true
+litecord-retrieval.workspace = true
+litecord-context.workspace = true
+litecord-actions.workspace = true
+litecord-features.workspace = true
+discord-adapter.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

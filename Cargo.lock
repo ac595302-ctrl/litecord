@@ -264,6 +264,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "litecord-app"
+version = "0.1.0"
+dependencies = [
+ "discord-adapter",
+ "litecord-actions",
+ "litecord-context",
+ "litecord-core",
+ "litecord-features",
+ "litecord-hydrator",
+ "litecord-memory",
+ "litecord-retrieval",
+ "litecord-store",
+ "litecord-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "litecord-context"
 version = "0.1.0"
 dependencies = [

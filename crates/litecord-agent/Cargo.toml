@@ -1,0 +1,26 @@
+[package]
+name = "litecord-agent"
+description = "Harness-neutral agent gateway: logical read tools, local-write tools and action proposals over unified memory. No vendor lock-in, no raw SQL, no credentials."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+litecord-retrieval.workspace = true
+litecord-context.workspace = true
+litecord-actions.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+discord-adapter.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
