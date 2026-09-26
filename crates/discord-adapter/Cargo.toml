@@ -1,0 +1,27 @@
+[package]
+name = "discord-adapter"
+description = "Discord backend implementations of litecord-core::ports::SocialBackend: a deterministic in-memory mock/demo backend, and (behind a feature) a skeleton over the real Discord Social SDK via discord-ffi."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables `social_sdk::SocialSdkBackend`, a skeleton that links the real
+# Discord Social SDK through discord-ffi. See src/social_sdk.rs: it is not yet
+# verified against the SDK and never fakes data.
+discord-social-sdk = ["discord-ffi/discord-social-sdk"]
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+discord-ffi.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true
