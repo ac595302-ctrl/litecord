@@ -66,8 +66,8 @@ impl FakeDriver {
     /// Replies with a fixed, clearly labelled demo message.
     pub fn demo() -> Self {
         Self::new(|_| FakeTurn {
-            reply: "This is the demo harness, not a model. Sign in to Codex or OpenCode in \
-                    Settings → Omni to get real answers."
+            reply: "This is the demo harness, not a model. Connect Codex or OpenCode in \
+                    Settings (Omni section) to get real answers."
                 .into(),
             ..FakeTurn::default()
         })

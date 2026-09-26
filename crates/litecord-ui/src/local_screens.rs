@@ -7,95 +7,16 @@ use crate::{bridge::Command, theme, workspace::Workspace};
 use eframe::egui::{self, Ui};
 use litecord_app::view::{SettingRow, SettingsViewModel};
 use litecord_features::feature::{FeatureInfo, SettingKind};
-use litecord_types::{provenance::Origin, social::SessionState, tasks::Task};
+use litecord_types::social::SessionState;
 use serde_json::Value;
 
 impl Workspace {
-    /// Render pending task candidates and confirmed open tasks.
+    /// Render the Tasks destination (see `tasks_ui`).
     pub fn tasks_screen(&mut self, ui: &mut Ui) {
-        let Some(snapshot) = self.snapshot.clone() else {
-            ui.spinner();
-            ui.label("Loading tasks…");
-            return;
-        };
-
-        egui::ScrollArea::vertical()
-            .id_salt("tasks_screen")
-            .show(ui, |ui| {
-                ui.heading("Tasks");
-                ui.label(
-                    egui::RichText::new("Review suggestions, then track confirmed tasks here.")
-                        .color(theme::MUTED),
-                );
-                ui.add_space(12.0);
-
-                theme::section_label(
-                    ui,
-                    &format!("Pending review · {}", snapshot.tasks.candidates.len()),
-                );
-                if snapshot.tasks.candidates.is_empty() {
-                    quiet_empty(ui, "No task suggestions need review.");
-                } else {
-                    for task in &snapshot.tasks.candidates {
-                        task_card(self, ui, task, true);
-                    }
-                }
-
-                ui.add_space(16.0);
-                theme::section_label(ui, &format!("Open · {}", snapshot.tasks.open.len()));
-                if snapshot.tasks.open.is_empty() {
-                    quiet_empty(ui, "No open tasks.");
-                } else {
-                    for task in &snapshot.tasks.open {
-                        task_card(self, ui, task, false);
-                    }
-                }
-            });
+        self.render_tasks_screen(ui);
     }
 
     /// Render recent memory with provenance and explicit candidate review.
-    pub fn memory_screen(&mut self, ui: &mut Ui) {
-        let Some(snapshot) = self.snapshot.clone() else {
-            ui.spinner();
-            ui.label("Loading memory…");
-            return;
-        };
-
-        egui::ScrollArea::vertical()
-            .id_salt("memory_screen")
-            .show(ui, |ui| {
-                ui.heading("Memory");
-                ui.label(
-                    egui::RichText::new(
-                        "Review what Litecord has retained, including its source and confidence.",
-                    )
-                    .color(theme::MUTED),
-                );
-                ui.add_space(12.0);
-
-                let candidates = snapshot
-                    .memory
-                    .memories
-                    .iter()
-                    .filter(|item| item.status == litecord_types::memory::MemoryStatus::Candidate)
-                    .count();
-                theme::section_label(
-                    ui,
-                    &format!(
-                        "Recent records · {} · {candidates} to review",
-                        snapshot.memory.memories.len()
-                    ),
-                );
-                if snapshot.memory.memories.is_empty() {
-                    quiet_empty(ui, "No memory records are available in this snapshot.");
-                } else {
-                    for item in &snapshot.memory.memories {
-                        memory_card(self, ui, item);
-                    }
-                }
-            });
-    }
-
     /// Render settings described by the compiled feature schema and backend
     /// diagnostics reported by the current snapshot.
     pub fn settings_screen(&mut self, ui: &mut Ui) {
@@ -119,6 +40,13 @@ impl Workspace {
                 );
                 ui.add_space(12.0);
 
+                if self.settings_section.as_deref().is_none_or(|s| s == "Omni") {
+                    self.omni_settings(ui, &snapshot.omni);
+                    ui.add_space(12.0);
+                }
+                if self.settings_section.as_deref() == Some("Omni") {
+                    return;
+                }
                 if settings.sections.is_empty() {
                     quiet_empty(ui, "No settings are registered in this build.");
                 }
@@ -167,143 +95,6 @@ impl Workspace {
                 backend_diagnostics(ui, &settings, &snapshot.diagnostics);
             });
     }
-}
-
-fn task_card(workspace: &mut Workspace, ui: &mut Ui, task: &Task, candidate: bool) {
-    egui::Frame::new()
-        .fill(theme::SIDEBAR)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(egui::CornerRadius::same(8))
-        .show(ui, |ui| {
-            if ui
-                .selectable_label(workspace.selected_task == Some(task.id), "Task details")
-                .clicked()
-            {
-                workspace.selected_task = Some(task.id);
-            }
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(workspace.display(&task.title))
-                            .strong()
-                            .color(theme::TEXT),
-                    );
-                    if let Some(description) = task.description.as_deref().filter(|s| !s.is_empty())
-                    {
-                        ui.label(
-                            egui::RichText::new(workspace.display(description))
-                                .color(theme::SECONDARY),
-                        );
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        theme::chip(ui, &pretty_origin(task.origin), theme::MUTED);
-                        if let Some(due) = task.due_at.and_then(relative_deadline) {
-                            theme::chip(ui, &due, theme::PRIORITY);
-                        }
-                        if let Some(source) = &task.source {
-                            if let Some(note) = source.note.as_deref() {
-                                if !note.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Source · {}",
-                                            workspace.display(note)
-                                        ))
-                                        .size(12.0)
-                                        .color(theme::MUTED),
-                                    );
-                                }
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Source linked")
-                                        .size(12.0)
-                                        .color(theme::MUTED),
-                                );
-                            }
-                        }
-                    });
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let enabled = !workspace.busy;
-                    if candidate {
-                        if ui
-                            .add_enabled(enabled, egui::Button::new("Dismiss"))
-                            .clicked()
-                        {
-                            workspace.send(Command::DismissTask(task.id));
-                        }
-                        if ui
-                            .add_enabled(enabled, egui::Button::new("Confirm"))
-                            .clicked()
-                        {
-                            workspace.send(Command::ConfirmTask(task.id));
-                        }
-                    } else if ui
-                        .add_enabled(enabled, egui::Button::new("Complete"))
-                        .clicked()
-                    {
-                        workspace.send(Command::CompleteTask(task.id));
-                    }
-                });
-            });
-        });
-    ui.add_space(6.0);
-}
-
-fn memory_card(workspace: &mut Workspace, ui: &mut Ui, item: &litecord_types::memory::MemoryItem) {
-    egui::Frame::new()
-        .fill(theme::SIDEBAR)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(egui::CornerRadius::same(8))
-        .show(ui, |ui| {
-            if ui
-                .selectable_label(workspace.selected_memory == Some(item.id), "Memory details")
-                .clicked()
-            {
-                workspace.selected_memory = Some(item.id);
-            }
-            ui.label(
-                egui::RichText::new(workspace.display(&item.content))
-                    .strong()
-                    .color(theme::TEXT),
-            );
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                theme::chip(ui, item.kind.as_str(), theme::MUTED);
-                theme::chip(ui, item.status.as_str(), theme::PRIMARY);
-                theme::chip(ui, &pretty_origin(item.origin), theme::MUTED);
-                theme::chip(
-                    ui,
-                    &format!("Confidence · {:.0}%", item.confidence.get() * 100.0),
-                    theme::OMNI,
-                );
-                ui.label(
-                    egui::RichText::new(format!("{} source reference(s)", item.source_refs.len()))
-                        .size(12.0)
-                        .color(theme::MUTED),
-                );
-            });
-
-            if item.status == litecord_types::memory::MemoryStatus::Candidate {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let enabled = !workspace.busy;
-                    if ui
-                        .add_enabled(enabled, egui::Button::new("Confirm"))
-                        .clicked()
-                    {
-                        workspace.send(Command::ConfirmMemory(item.id));
-                    }
-                    if ui
-                        .add_enabled(enabled, egui::Button::new("Reject"))
-                        .clicked()
-                    {
-                        workspace.send(Command::RejectMemory(item.id));
-                    }
-                });
-            }
-        });
-    ui.add_space(6.0);
 }
 
 fn feature_row(workspace: &mut Workspace, ui: &mut Ui, feature: &FeatureInfo) {
@@ -580,34 +371,6 @@ fn setting_value(text: &str, kind: &SettingKind) -> Option<Value> {
 fn is_feature_enabled_key(key: &str) -> bool {
     key.strip_prefix("features.")
         .is_some_and(|rest| rest.ends_with(".enabled"))
-}
-
-fn pretty_origin(origin: Origin) -> String {
-    origin.as_str().replace('_', " ")
-}
-
-fn relative_deadline(deadline: litecord_types::Timestamp) -> Option<String> {
-    if deadline.as_millis() <= 0 {
-        return None;
-    }
-    let now = litecord_types::Timestamp::now();
-    let (amount, future) = if deadline > now {
-        (deadline.since(now).as_millis(), true)
-    } else {
-        (now.since(deadline).as_millis(), false)
-    };
-    let (value, unit) = if amount >= 86_400_000 {
-        (amount / 86_400_000, "d")
-    } else if amount >= 3_600_000 {
-        (amount / 3_600_000, "h")
-    } else {
-        ((amount / 60_000).max(1), "m")
-    };
-    Some(if future {
-        format!("Due in {value}{unit}")
-    } else {
-        format!("Overdue {value}{unit}")
-    })
 }
 
 fn backend_label(mode: litecord_types::capability::BackendMode) -> &'static str {

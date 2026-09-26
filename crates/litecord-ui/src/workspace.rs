@@ -1,6 +1,6 @@
 use crate::{
     bridge::{Bridge, Command, Selection, Snapshot},
-    theme,
+    layout_editor, theme,
 };
 use eframe::egui::{self, Align2, FontId, Rect, Sense, Stroke, Ui};
 use litecord_app::{view::UiEffect, LitecordApp};
@@ -31,7 +31,7 @@ pub struct Workspace {
     pub profile_manager: bool,
     pub drag_source: Option<(bool, String)>,
     pub pending_dock: Option<(bool, String, String, litecord_layout::Placement)>,
-    pub resize: Option<(bool, String, Vec<f32>)>,
+    pub resize: Option<crate::layout_editor::QueuedResize>,
     pub saving_layout: bool,
     pub layout_dirty: bool,
     pub selected_guild: Option<GuildId>,
@@ -46,6 +46,19 @@ pub struct Workspace {
     pub lobby_text: String,
     pub selected_memory: Option<MemoryId>,
     pub selected_task: Option<TaskId>,
+    /// Omni slide-over panel (available on every destination).
+    pub omni_open: bool,
+    pub omni_draft: String,
+    /// Tasks screen: new-task form and comment drafts.
+    pub task_title_draft: String,
+    pub task_priority_draft: litecord_types::tasks::TaskPriority,
+    pub task_comment_draft: String,
+    /// Memory screen filters.
+    pub memory_kind_filter: Option<litecord_types::memory::MemoryKind>,
+    pub memory_status_filter: Option<litecord_types::memory::MemoryStatus>,
+    pub memory_search: String,
+    /// Inbox filter (0 = all).
+    pub inbox_filter: usize,
     pub relationship_confirmation:
         Option<(UserId, litecord_types::actions::RelationshipAction, String)>,
     #[cfg(feature = "screenshots")]
@@ -54,6 +67,10 @@ pub struct Workspace {
     screenshot_requested: bool,
     #[cfg(feature = "screenshots")]
     started: std::time::Instant,
+    /// A finished normal-mode splitter drag waits to be persisted.
+    pub layout_save_pending: bool,
+    /// Edit Layout menu-based docking selection.
+    pub dock_menu: crate::layout_editor::DockMenu,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -103,6 +120,15 @@ impl Workspace {
             lobby_text: String::new(),
             selected_memory: None,
             selected_task: None,
+            omni_open: false,
+            omni_draft: String::new(),
+            task_title_draft: String::new(),
+            task_priority_draft: litecord_types::tasks::TaskPriority::default(),
+            task_comment_draft: String::new(),
+            memory_kind_filter: None,
+            memory_status_filter: None,
+            memory_search: String::new(),
+            inbox_filter: 0,
             relationship_confirmation: None,
             #[cfg(feature = "screenshots")]
             screenshot_path: None,
@@ -110,6 +136,8 @@ impl Workspace {
             screenshot_requested: false,
             #[cfg(feature = "screenshots")]
             started: std::time::Instant::now(),
+            layout_save_pending: false,
+            dock_menu: crate::layout_editor::DockMenu::default(),
         }
     }
     pub fn request(&mut self) {
@@ -121,12 +149,18 @@ impl Workspace {
         self.filter.clear();
         self.request();
     }
+    /// Discard the Edit Layout draft. Shared by the header Cancel, Escape, the
+    /// shortcut toggle and the profile dialog, so queued work never leaks out.
     pub fn cancel_edit(&mut self) {
         if let Some(original) = self.edit_original.take() {
             self.profile = original;
         }
         self.layout_dirty = false;
+        self.layout_save_pending = false;
         self.drag_source = None;
+        self.pending_dock = None;
+        self.resize = None;
+        self.dock_menu = crate::layout_editor::DockMenu::default();
     }
     pub fn apply_edit(&mut self) {
         if self.busy {
@@ -235,6 +269,16 @@ impl Workspace {
                         self.deleting_message = None;
                     }
                 }
+                if let Some(id) = c.task_created {
+                    self.selected_task = Some(id);
+                    self.selection.task = Some(id);
+                    self.request();
+                }
+                if let Some(id) = c.omni_session {
+                    self.selection.omni_session = Some(id);
+                    self.omni_open = true;
+                    self.request();
+                }
                 if let Some((id, text)) = c.sent {
                     if self.drafts.get(&id) == Some(&text) {
                         self.drafts.remove(&id);
@@ -276,13 +320,20 @@ impl Workspace {
     }
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("LITECORD").strong().color(theme::TEXT));
-            ui.add_space(16.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(
+                egui::RichText::new("Litecord")
+                    .size(15.0)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.add_space(8.0);
             if self.edit_original.is_some() {
                 if ui
                     .add_enabled(
                         !self.busy,
-                        egui::Button::new("Apply layout").fill(theme::PRIMARY),
+                        egui::Button::new(egui::RichText::new("Apply layout").color(theme::SHELL))
+                            .fill(theme::PRIMARY_TEXT),
                     )
                     .clicked()
                 {
@@ -295,26 +346,92 @@ impl Workspace {
                     self.cancel_edit();
                 }
             }
-            if ui.button("Search & commands   Ctrl+K").clicked() {
+            // Layout controls and status get their space first (right side);
+            // the search field adapts to what is left.
+            let right_reserve = 430.0;
+            let search_width = (ui.available_width() - right_reserve).clamp(140.0, 380.0);
+            let (rect, search) =
+                ui.allocate_exact_size(egui::vec2(search_width, 28.0), Sense::click());
+            if ui.is_rect_visible(rect) {
+                let painter = ui.painter();
+                painter.rect(
+                    rect,
+                    6.0,
+                    if search.hovered() {
+                        theme::RAISED
+                    } else {
+                        theme::WORKSPACE
+                    },
+                    Stroke::new(1.0, theme::BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    rect.left_center() + egui::vec2(10.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    if search_width > 220.0 {
+                        "Search or run a command…"
+                    } else {
+                        "Search…"
+                    },
+                    FontId::proportional(13.0),
+                    theme::MUTED,
+                );
+                painter.text(
+                    rect.right_center() - egui::vec2(10.0, 0.0),
+                    Align2::RIGHT_CENTER,
+                    "Ctrl+K",
+                    FontId::proportional(11.0),
+                    theme::MUTED,
+                );
+            }
+            let search = search.on_hover_text("Command palette (Ctrl/Cmd+K)");
+            search.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search or run a command")
+            });
+            if search.clicked() {
                 self.palette_open = true;
                 self.palette_focus_requested = true;
             }
-            if let Some(s) = &self.snapshot {
-                theme::chip(
-                    ui,
-                    match s.diagnostics.backend_mode {
-                        litecord_types::capability::BackendMode::Demo => "Demo · synthetic",
-                        _ => "Discord",
-                    },
-                    theme::MUTED,
-                );
-                ui.label(
-                    egui::RichText::new(format!("{:?}", s.diagnostics.session))
-                        .size(12.0)
-                        .color(theme::MUTED),
-                );
+            if let Some(s) = self.snapshot.clone() {
+                connection_status(ui, &s.diagnostics.session, "Discord");
+                if let Some(bot) = &s.diagnostics.bot {
+                    connection_status(ui, &bot.session, "Bot");
+                }
+                if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::Demo {
+                    theme::chip(ui, "Demo data", theme::WARNING);
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (badge, running) = self.snapshot.as_ref().map_or((0, false), |s| {
+                    (
+                        s.omni.requests.len() + s.omni.checkins.len(),
+                        s.omni.sessions.iter().any(|x| x.running),
+                    )
+                });
+                let label = match (badge, running) {
+                    (0, false) => "Omni".to_owned(),
+                    (0, true) => "Omni · working".to_owned(),
+                    (n, _) => format!("Omni · {n}"),
+                };
+                let omni = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(label).color(if self.omni_open {
+                            theme::SHELL
+                        } else {
+                            theme::OMNI
+                        }))
+                        .fill(if self.omni_open {
+                            theme::OMNI
+                        } else {
+                            theme::OMNI.gamma_multiply(0.12)
+                        })
+                        .stroke(Stroke::new(1.0, theme::OMNI.gamma_multiply(0.5))),
+                    )
+                    .on_hover_text("Ask Omni (Ctrl+J)");
+                if omni.clicked() {
+                    self.omni_open = !self.omni_open;
+                }
                 if ui.button("Layouts").clicked() {
                     self.profile_manager = !self.profile_manager;
                 }
@@ -353,26 +470,7 @@ impl Workspace {
                             self.render_tree(ui, &t, rect, false);
                         }
                     }
-                    if self.edit_original.is_some() {
-                        if let Some((source_shell, source)) = &self.drag_source {
-                            if *source_shell && source != id {
-                                if let Some(pointer) =
-                                    ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p))
-                                {
-                                    let placement = edge(rect, pointer);
-                                    ui.painter().rect_filled(
-                                        drop_rect(rect, placement),
-                                        4.0,
-                                        theme::PRIMARY.gamma_multiply(0.25),
-                                    );
-                                    if ui.input(|i| i.pointer.any_released()) {
-                                        self.pending_dock =
-                                            Some((true, source.clone(), id.clone(), placement));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.docking_preview(ui, shell, id, panel, rect);
                     return;
                 }
                 let fill = if matches!(panel.as_str(), "primary_navigation" | "user_controls") {
@@ -385,7 +483,7 @@ impl Workspace {
                 } else {
                     theme::WORKSPACE
                 };
-                ui.painter().rect_filled(rect, 0.0, fill);
+                theme::surface(ui, rect, fill);
                 ui.painter().line_segment(
                     [rect.right_top(), rect.right_bottom()],
                     Stroke::new(1.0_f32, theme::BORDER),
@@ -412,29 +510,22 @@ impl Workspace {
                         FontId::proportional(12.0),
                         theme::TEXT,
                     );
-                    if response.drag_started() {
+                    if response.drag_started() && !self.layout_busy() {
                         self.drag_source = Some((shell, id.clone()));
                     }
-                    content.min.y += 28.0;
-                    if let Some((source_shell, source)) = &self.drag_source {
-                        if *source_shell == shell && source != id {
-                            if let Some(pointer) =
-                                ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p))
-                            {
-                                let placement = edge(rect, pointer);
-                                let target = drop_rect(rect, placement);
-                                ui.painter().rect_filled(
-                                    target,
-                                    4.0,
-                                    theme::PRIMARY.gamma_multiply(0.25),
-                                );
-                                if ui.input(|i| i.pointer.any_released()) {
-                                    self.pending_dock =
-                                        Some((shell, source.clone(), id.clone(), placement));
-                                }
-                            }
-                        }
+                    if self
+                        .drag_source
+                        .as_ref()
+                        .is_some_and(|(s, source)| *s == shell && source == id)
+                    {
+                        ui.painter().rect_stroke(
+                            rect.shrink(1.0),
+                            0.0,
+                            Stroke::new(1.5, theme::PRIMARY),
+                            egui::StrokeKind::Inside,
+                        );
                     }
+                    content.min.y += 28.0;
                 }
                 let mut child = ui.new_child(
                     egui::UiBuilder::new()
@@ -449,6 +540,8 @@ impl Workspace {
                     registry::orientation(panel, *placement, *orientation)
                         .unwrap_or(Orientation::Vertical),
                 );
+                // Drawn after the panel body so the preview sits on top of it.
+                self.docking_preview(ui, shell, id, panel, rect);
             }
             LayoutNode::Split { id, axis, children } => {
                 let horizontal = *axis == Axis::Horizontal;
@@ -514,7 +607,8 @@ impl Workspace {
                             });
                             ui.painter().rect_filled(splitter, 0.0, theme::PRIMARY);
                         }
-                        if response.dragged() && !a.below_minimum {
+                        // No new geometry mutation while a save is in flight.
+                        if response.dragged() && !a.below_minimum && !self.layout_busy() {
                             let delta = ui.input(|inp| {
                                 if horizontal {
                                     inp.pointer.delta().x
@@ -522,16 +616,21 @@ impl Workspace {
                                     inp.pointer.delta().y
                                 }
                             });
-                            let mut sizes = a.sizes.clone();
-                            let delta =
-                                delta.clamp(minima[i] - sizes[i], sizes[i + 1] - minima[i + 1]);
-                            sizes[i] += delta;
-                            sizes[i + 1] -= delta;
-                            self.resize = Some((shell, id.clone(), sizes));
-                            self.layout_dirty = true;
+                            let sizes = layout_editor::drag_splitter(&a.sizes, &minima, i, delta);
+                            if delta != 0.0 && sizes.iter().all(|s| *s > 0.0) {
+                                // Sizes are measured on the projected tree; they are
+                                // keyed by projected child ID and mapped back onto the
+                                // saved tree by `resize_projected`.
+                                self.resize = Some(layout_editor::QueuedResize {
+                                    shell,
+                                    split_id: id.clone(),
+                                    sizes: layout_editor::projected_sizes(children, &sizes),
+                                });
+                            }
                         }
                         if response.drag_stopped() && self.edit_original.is_none() {
-                            self.apply_edit();
+                            // Persisted after the queued resize is applied in `draw`.
+                            self.layout_save_pending = true;
                         }
                         offset += gap;
                     }
@@ -599,6 +698,20 @@ impl Workspace {
                 });
             });
         }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::J)) {
+            self.omni_open = !self.omni_open;
+        }
+        if self.omni_open {
+            egui::Panel::right("omni_panel")
+                .exact_size(400.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::SIDEBAR)
+                        .stroke(Stroke::new(1.0, theme::BORDER))
+                        .inner_margin(egui::Margin::symmetric(14, 10)),
+                )
+                .show_inside(root, |ui| self.omni_panel(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::SHELL))
             .show_inside(root, |ui| {
@@ -607,34 +720,9 @@ impl Workspace {
                     self.render_tree(ui, &t, ui.max_rect(), true);
                 }
             });
-        if let Some((shell, id, weights)) = self.resize.take() {
-            let tree = if shell {
-                Some(&mut self.profile.shell)
-            } else {
-                self.profile
-                    .destinations
-                    .get_mut(&self.selection.destination)
-            };
-            if let Some(t) = tree {
-                if let Err(e) = t.resize(&id, &weights) {
-                    self.notice = Some(e.to_string());
-                }
-            }
-        }
-        if let Some((shell, source, target, placement)) = self.pending_dock.take() {
-            let tree = if shell {
-                Some(&mut self.profile.shell)
-            } else {
-                self.profile
-                    .destinations
-                    .get_mut(&self.selection.destination)
-            };
-            if let Some(t) = tree {
-                if let Err(e) = t.dock(&source, &target, placement) {
-                    self.notice = Some(e.to_string());
-                }
-            }
-        }
+        self.edit_toolbar(&ctx);
+        self.apply_queued_layout_changes(&ctx);
+        self.drag_ghost(&ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             self.drag_source = None;
         }
@@ -681,6 +769,35 @@ impl Workspace {
     }
 }
 
+/// Colored dot + text for a connection state; hover explains errors.
+fn connection_status(ui: &mut Ui, state: &litecord_types::social::SessionState, who: &str) {
+    use litecord_types::social::SessionState as S;
+    let (color, text) = match state {
+        S::Ready => (theme::SUCCESS, "Connected"),
+        S::Hydrating => (theme::WARNING, "Syncing…"),
+        S::Connecting | S::Authorizing => (theme::WARNING, "Connecting…"),
+        S::Reconnecting => (theme::WARNING, "Reconnecting…"),
+        S::Offline => (theme::PRIORITY, "Offline"),
+        S::LoggedOut => (theme::MUTED, "Signed out"),
+        S::Error { .. } => (theme::PRIORITY, "Error"),
+    };
+    let r = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, color);
+            ui.label(
+                egui::RichText::new(format!("{who} · {text}"))
+                    .size(12.0)
+                    .color(theme::SECONDARY),
+            );
+        })
+        .response;
+    if let S::Error { message } = state {
+        r.on_hover_text(message.as_str());
+    }
+}
+
 fn hide(t: &mut LayoutNode, p: &str) {
     match t {
         LayoutNode::Panel { panel, visible, .. } if panel == p => *visible = false,
@@ -690,27 +807,5 @@ fn hide(t: &mut LayoutNode, p: &str) {
             }
         }
         _ => {}
-    }
-}
-fn edge(rect: Rect, p: egui::Pos2) -> litecord_layout::Placement {
-    let distances = [
-        (p.x - rect.left(), litecord_layout::Placement::Left),
-        (rect.right() - p.x, litecord_layout::Placement::Right),
-        (p.y - rect.top(), litecord_layout::Placement::Top),
-        (rect.bottom() - p.y, litecord_layout::Placement::Bottom),
-    ];
-    distances
-        .into_iter()
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|x| x.1)
-        .unwrap_or(litecord_layout::Placement::Left)
-}
-fn drop_rect(r: Rect, p: litecord_layout::Placement) -> Rect {
-    use litecord_layout::Placement::*;
-    match p {
-        Left => Rect::from_min_max(r.min, egui::pos2(r.center().x, r.bottom())),
-        Right => Rect::from_min_max(egui::pos2(r.center().x, r.top()), r.max),
-        Top => Rect::from_min_max(r.min, egui::pos2(r.right(), r.center().y)),
-        _ => Rect::from_min_max(egui::pos2(r.left(), r.center().y), r.max),
     }
 }

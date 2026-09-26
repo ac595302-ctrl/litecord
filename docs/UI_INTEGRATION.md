@@ -14,6 +14,66 @@ provides the available end-to-end behavior and is labelled `Demo · synthetic`.
 `UI_SCREEN_MATRIX.md` remains useful for app view-model shapes and backend
 capability limits; this file records current UI behavior.
 
+## September 26, 2026 update: Omni and screen overhaul
+
+- **Omni panel** (`omni_ui.rs`, Ctrl+J or the header button): right-side
+  panel on every destination.
+  - Setup states: no harness, signed out, signing in, error.
+  - Chat transcript. Streaming text comes from `Bridge::omni_stream`, one
+    delta at a time, without taking a snapshot.
+  - Approval cards for local commands and file changes.
+  - Remember (saves the reply to Memory as a candidate) and Copy.
+  - New chat by mode (Assistant / Workspace / Computer use), History, Stop,
+    Compact and Archive.
+- **Settings, Omni section**: choose the harness, sign in and out, and turn
+  scheduled check-ins on or off.
+- **Inbox**:
+  - sidebar filters (All / Replies / Approvals / Omni / Suggestions);
+  - Omni check-ins and Omni's local-command requests;
+  - the acting identity ("Acts as you" / "Acts as your bot") on every
+    approval.
+- **Messages** (`messages_ui.rs`):
+  - a single measuring pass sizes every row;
+  - consecutive messages from one author collapse into one group;
+  - UTC day separators;
+  - author names truncate before the timestamp;
+  - attachment and embed metadata cards;
+  - per-message "Open in Discord" links;
+  - the composer shows and uses `send_identity` through `Command::SendAs`.
+
+  The inspector adds shared files from `conversation_files_view()` and
+  plain-language Omni access options.
+- **Memory** (`memory_ui.rs`):
+  - "To review" and "Remembered" groups;
+  - where each item came from ("From your messages", "From Omni", "You");
+  - a confidence meter and inline confirm/reject;
+  - sidebar status/kind filters and search;
+  - an inspector whose source links open the conversation or the Omni chat.
+- **Tasks** (`tasks_ui.rs`): quick add with priority, suggested/open/reminder
+  sections, and an inspector using `task_detail_view()` (priority, subtasks,
+  comments, source conversation).
+- **Shell**:
+  - connection status per source (Discord, and Bot when present) with a
+    colored dot; a Demo data chip;
+  - a search field that adapts to the space left after the layout controls;
+  - status-aware presence markers (online, idle, do not disturb, offline);
+  - deterministic avatar colors and a darker navy palette with a subtle
+    panel gradient.
+- **Layout editor** (`layout_editor.rs`):
+  - resizing uses `resize_projected`, so hidden panels keep their size;
+  - docking preview validated on a cloned profile, with labelled edges;
+  - a menu-based move as an alternative to dragging;
+  - one shared cancel; no layout changes while a save is in progress.
+
+  Not done: live reflow of neighbouring panels during a drag, and keyboard
+  splitter resizing.
+
+Screens were checked headlessly with
+`xvfb-run ./target/debug/litecord --data-dir <tmp> gui --screenshot out.png --screen <Destination> [--omni] [--omni-ask "…"]`
+(feature `screenshots`). The palette approximates the reference PDF. It has
+not been matched pixel by pixel against the mockups, because the PDF is not
+in the repository.
+
 ## 1. Where the UI lives
 
 Follow `UI_DESIGN.md` for the supplied mock PDF's visual language and
@@ -108,7 +168,7 @@ profile updates.
 
 | Screen | Read | Current controls and limits |
 |---|---|---|
-| Home | Account identity plus conversation, friend, task, inbox, and diagnostics snapshots | Actual-count metric cards, selected activity previews, and restrained Omni status; generative replies are unavailable. |
+| Home | Account identity plus conversation, friend, task, inbox, and diagnostics snapshots | Inline "Ask Omni" box (or setup prompt), clickable metric tiles, "Waiting on you" and recent conversations; sidebar shows who is online and what is coming up. |
 | Messages | `conversations_view(limit)` and `conversation_view(id, 200, before)` | Canonical message list with variable-height virtualization and paged windows; send clears the draft only after successful execution. Edit/delete use confirmation dialogs; context actions run through app intents. |
 | Friends | `friends_view()` plus canonical account/contact snapshots | Presence, contact details, and local notes use app data. Accept/decline incoming requests, remove/block friends, and unblock contacts through capability-gated controls and the typed `change_relationship` service. Per-conversation agent access is controlled by `set_conversation_visibility`; it is separate from presentation Privacy Mode. |
 | Servers | `guilds_view()` → guild/channel metadata, access labels, and Discord URLs | Select guilds/channels and open the selected channel in Discord. There is no native channel message service. |

@@ -82,7 +82,7 @@ Setup for Codex/OpenCode: [`docs/MCP.md`](docs/MCP.md).
 Messages and Friends use canonical app snapshots through a bounded background
 bridge, with event refresh and periodic cross-process polling. Workspace
 profiles drive the shell and panels. Room/channel metadata can link to Discord;
-native channel messages, generative Omni replies and transcription, device
+native channel messages, transcription, device
 discovery, and rich remote-media download are not implemented. The demo backend
 is synthetic and labelled in the UI. The guide and current feature limits are in
 [`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md).

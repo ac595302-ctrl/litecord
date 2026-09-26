@@ -15,6 +15,10 @@ pub struct Selection {
     pub contact: Option<UserId>,
     pub before: Option<Timestamp>,
     pub palette_query: String,
+    /// Task shown in the task inspector (loads its detail view).
+    pub task: Option<TaskId>,
+    /// Omni session shown in the Omni panel (None = most recent chat).
+    pub omni_session: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,11 +40,14 @@ pub struct Snapshot {
     pub shortcuts: Vec<litecord_features::command::CommandMatch>,
     pub account: litecord_app::people::AccountViewModel,
     pub contact: Option<litecord_app::people::ContactViewModel>,
+    /// Shared files for the open conversation (application Files API).
+    pub files: Option<FilesViewModel>,
+    pub task_detail: Option<TaskDetailViewModel>,
+    pub omni: litecord_app::OmniViewModel,
 }
 
 #[derive(Debug)]
 pub enum Command {
-    Send(ConversationId, String),
     Edit(MessageId, String),
     Delete(MessageId),
     Intents(Vec<AppIntent>),
@@ -65,6 +72,35 @@ pub enum Command {
     ResetProfile(String, String),
     ResetAll(String),
     Run(String, Option<ConversationId>),
+    /// Send with an explicitly displayed identity (user or application bot).
+    SendAs(
+        ConversationId,
+        String,
+        litecord_types::provenance::DiscordIdentity,
+    ),
+    CreateTask(litecord_types::tasks::TaskDraft),
+    SetTaskPriority(TaskId, litecord_types::tasks::TaskPriority),
+    AddTaskComment(TaskId, String),
+    Omni(OmniCommand),
+}
+
+/// Omni panel and settings commands.
+#[derive(Debug)]
+pub enum OmniCommand {
+    Send(Option<i64>, String),
+    New(litecord_app::harness::OmniMode),
+    Interrupt(i64),
+    Compact(i64),
+    Archive(i64),
+    Answer(String, litecord_app::harness::Decision),
+    Remember(i64, u32),
+    Select(litecord_app::harness::HarnessKind),
+    SignIn,
+    SignOut,
+    Refresh,
+    Heartbeats(bool),
+    CheckNow,
+    DismissCheckins,
 }
 
 #[derive(Debug, Default)]
@@ -73,6 +109,9 @@ pub struct Completion {
     pub sent: Option<(ConversationId, String)>,
     pub message_changed: Option<MessageId>,
     pub relationship_changed: Option<UserId>,
+    /// Omni session to show after the command (e.g. a new chat).
+    pub omni_session: Option<i64>,
+    pub task_created: Option<TaskId>,
     pub error: Option<String>,
 }
 
@@ -82,6 +121,9 @@ pub struct Bridge {
     pub completions: mpsc::Receiver<Completion>,
     pub snapshots: watch::Receiver<Result<Snapshot, String>>,
     pub selection: watch::Sender<Selection>,
+    /// Live Omni reply text `(session, text so far)`; cleared when the turn
+    /// completes. Updated per streamed delta without a full snapshot.
+    pub omni_stream: watch::Receiver<Option<(i64, String)>>,
     worker: tokio::task::JoinHandle<()>,
 }
 
@@ -100,12 +142,16 @@ impl Bridge {
             contact: None,
             before: None,
             palette_query: String::new(),
+            task: None,
+            omni_session: None,
         };
         let (selection_tx, mut selection_rx) = watch::channel(selection);
         let (command_tx, mut commands) = mpsc::channel(32);
         let (completion_tx, completions) = mpsc::channel(32);
         let (snapshot_tx, snapshots) = watch::channel(Err("Loading workspace…".into()));
         let mut events = app.subscribe();
+        let mut omni_events = app.omni().subscribe();
+        let (stream_tx, omni_stream) = watch::channel(None::<(i64, String)>);
         let worker = runtime.spawn(async move {
             let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
@@ -135,6 +181,23 @@ impl Bridge {
                             if matches!(events.try_recv(),Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed)) {break;}
                         }
                     }
+                    event = omni_events.recv() => match event {
+                        Ok(litecord_app::OmniEvent::Delta { session_id, text }) => {
+                            stream_tx.send_modify(|s| match s {
+                                Some((id, buf)) if *id == session_id => buf.push_str(&text),
+                                other => *other = Some((session_id, text)),
+                            });
+                            ctx.request_repaint();
+                            // Deltas never trigger a full snapshot.
+                            continue;
+                        }
+                        Ok(litecord_app::OmniEvent::Changed { .. }) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                            while omni_events.try_recv().is_ok() {}
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
                     _ = poll.tick() => {}
                 }
             }
@@ -144,6 +207,7 @@ impl Bridge {
             completions,
             snapshots,
             selection: selection_tx,
+            omni_stream,
             worker,
         }
     }
@@ -189,6 +253,12 @@ pub(crate) fn snapshot(
             .map(|id| app.contact_view(id))
             .transpose()?
             .flatten(),
+        files: selection
+            .conversation
+            .map(|id| app.conversation_files_view(id, 30, None))
+            .transpose()?,
+        task_detail: selection.task.and_then(|id| app.task_detail_view(id).ok()),
+        omni: app.omni().view(selection.omni_session)?,
         selection,
         conversations,
         chat,
@@ -201,14 +271,6 @@ pub(crate) async fn execute(
 ) -> litecord_core::Result<Completion> {
     let mut c = Completion::default();
     match command {
-        Command::Send(id, text) => match app.send_message(id, &text).await? {
-            litecord_actions::ProposeOutcome::Executed { .. } => c.sent = Some((id, text)),
-            litecord_actions::ProposeOutcome::PendingApproval { .. } => {
-                c.effects.push(UiEffect::Notice {
-                    message: "Message requires approval in Inbox; your draft is preserved.".into(),
-                })
-            }
-        },
         Command::Edit(id, text) => match app.edit_message(id, &text).await? {
             litecord_actions::ProposeOutcome::Executed { .. } => c.message_changed = Some(id),
             _ => c.effects.push(UiEffect::Notice {
@@ -260,6 +322,81 @@ pub(crate) async fn execute(
         Command::ResetProfile(id, t) => app.reset_layout_profile(&id, &t)?,
         Command::ResetAll(t) => app.reset_all_layout_profiles(&t)?,
         Command::Run(id, active) => c.effects = app.run_command(&id, active).await?,
+        Command::SendAs(id, text, identity) => {
+            match app.send_message_as(id, &text, identity).await? {
+                litecord_actions::ProposeOutcome::Executed { .. } => c.sent = Some((id, text)),
+                litecord_actions::ProposeOutcome::PendingApproval { .. } => {
+                    c.effects.push(UiEffect::Notice {
+                        message: "Message requires approval in Inbox; your draft is preserved."
+                            .into(),
+                    })
+                }
+            }
+        }
+        Command::CreateTask(draft) => {
+            if let litecord_actions::ProposeOutcome::Executed {
+                result:
+                    litecord_actions::ExecutionOutcome {
+                        entity: Some(litecord_types::entity::EntityId::Task(id)),
+                        ..
+                    },
+                ..
+            } = app.create_task(draft).await?
+            {
+                c.task_created = Some(id);
+            }
+        }
+        Command::SetTaskPriority(id, p) => {
+            app.set_task_priority(id, p)?;
+        }
+        Command::AddTaskComment(id, body) => {
+            app.add_task_comment(id, &body)?;
+        }
+        Command::Omni(cmd) => omni(app, cmd, &mut c).await?,
     }
     Ok(c)
+}
+
+async fn omni(
+    app: &LitecordApp,
+    cmd: OmniCommand,
+    c: &mut Completion,
+) -> litecord_core::Result<()> {
+    use litecord_app::harness::LoginState;
+    let omni = app.omni();
+    match cmd {
+        OmniCommand::Send(session, text) => c.omni_session = Some(omni.send(session, &text).await?),
+        OmniCommand::New(mode) => c.omni_session = Some(omni.new_session(mode, "New chat")?),
+        OmniCommand::Interrupt(id) => omni.interrupt(id).await?,
+        OmniCommand::Compact(id) => omni.compact(id).await?,
+        OmniCommand::Archive(id) => omni.archive(id)?,
+        OmniCommand::Answer(id, decision) => omni.answer(&id, decision).await?,
+        OmniCommand::Remember(session, seq) => {
+            omni.remember(session, seq)?;
+            c.effects.push(UiEffect::Notice {
+                message: "Saved to Memory for review.".into(),
+            });
+        }
+        OmniCommand::Select(kind) => omni.select(kind).await?,
+        OmniCommand::SignIn => {
+            if let LoginState::SigningIn { url: Some(url), .. } = omni.sign_in().await? {
+                c.effects.push(UiEffect::OpenUrl { url });
+            }
+        }
+        OmniCommand::SignOut => omni.sign_out().await?,
+        OmniCommand::Refresh => {
+            omni.refresh_login().await?;
+        }
+        OmniCommand::Heartbeats(on) => omni.set_heartbeat_enabled(on)?,
+        OmniCommand::CheckNow => match omni.heartbeat(true).await? {
+            litecord_app::HeartbeatOutcome::Sent { .. } => c.effects.push(UiEffect::Notice {
+                message: "Omni is checking in.".into(),
+            }),
+            litecord_app::HeartbeatOutcome::Skipped(why) => c.effects.push(UiEffect::Notice {
+                message: format!("Check-in skipped: {why}."),
+            }),
+        },
+        OmniCommand::DismissCheckins => omni.dismiss_checkins()?,
+    }
+    Ok(())
 }

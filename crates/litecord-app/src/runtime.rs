@@ -39,6 +39,10 @@ pub(crate) struct ReactorCtx {
     pub reducer: ReducerConfig,
 }
 
+/// Conversations whose recent history is fetched after a conversation list
+/// arrives (background priority, only when stale).
+const WARM_CONVERSATIONS: usize = 8;
+
 impl ReactorCtx {
     fn handle(&self, env: litecord_core::events::SourceEnvelope) {
         let kind = env.event.kind();
@@ -48,6 +52,23 @@ impl ReactorCtx {
             (Some(bot), true) => bot,
             _ => &self.hydrator,
         };
+        // Warm the most recent conversations' history in the background, so
+        // lists show real previews without opening each conversation.
+        if let litecord_core::events::DiscordEvent::ConversationsSnapshot { conversations } =
+            &env.event
+        {
+            let mut recent: Vec<_> = conversations.iter().collect();
+            recent.sort_by_key(|c| std::cmp::Reverse(c.last_activity_at));
+            for c in recent.into_iter().take(WARM_CONVERSATIONS) {
+                hydrator.request_if_stale(
+                    litecord_core::events::HydrationKey::DmConversation {
+                        conversation_id: c.id,
+                    },
+                    litecord_hydrator::Priority::Background,
+                    HydrationReason::Startup,
+                );
+            }
+        }
         let committed = match reducer::apply(&self.db, &env, &self.reducer) {
             Ok(c) => c,
             Err(e) => {

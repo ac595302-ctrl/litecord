@@ -66,6 +66,13 @@ enum Command {
         #[cfg(feature = "screenshots")]
         #[arg(long, hide = true, default_value_t = 1586.0)]
         width: f32,
+        /// Start with the Omni panel open.
+        #[arg(long)]
+        omni: bool,
+        /// Screenshot aid: send this to Omni at startup.
+        #[cfg(feature = "screenshots")]
+        #[arg(long, hide = true)]
+        omni_ask: Option<String>,
     },
     /// Run the demo backend end to end and print summaries.
     Demo {
@@ -140,16 +147,25 @@ async fn main() -> std::process::ExitCode {
             screen,
             #[cfg(feature = "screenshots")]
             width,
+            omni,
+            #[cfg(feature = "screenshots")]
+            omni_ask,
         } => {
             #[cfg(not(feature = "screenshots"))]
-            let options = litecord_ui::WindowOptions::default();
+            let options = litecord_ui::WindowOptions {
+                omni_open: omni,
+                ..Default::default()
+            };
             #[cfg(feature = "screenshots")]
             let options = litecord_ui::WindowOptions {
                 screenshot,
                 destination: litecord_layout_destination(&screen),
                 size: Some([width, 992.0]),
+                omni_open: omni,
             };
-            gui(cfg, options).await
+            #[cfg(not(feature = "screenshots"))]
+            let omni_ask: Option<String> = None;
+            gui(cfg, options, omni_ask).await
         }
         Command::Demo { in_memory, ask } => demo(cfg, in_memory, &ask).await,
         Command::Mcp { harness } => mcp(cfg, &harness).await,
@@ -168,10 +184,19 @@ async fn main() -> std::process::ExitCode {
 async fn gui(
     cfg: LitecordConfig,
     options: litecord_ui::WindowOptions,
+    omni_ask: Option<String>,
 ) -> litecord_core::Result<()> {
     let app = with_omni(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)
         .start()
         .await?;
+    if let Some(text) = omni_ask {
+        let a = app.clone();
+        tokio::spawn(async move {
+            if let Err(e) = a.omni().send(None, &text).await {
+                tracing::warn!(error = %e, "omni-ask failed");
+            }
+        });
+    }
     let result =
         litecord_ui::run_with_options(app.clone(), tokio::runtime::Handle::current(), options);
     let report = app.shutdown().await;

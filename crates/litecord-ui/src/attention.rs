@@ -4,110 +4,185 @@ use litecord_app::view::{InboxItem, PendingActionRow};
 use litecord_layout::Destination;
 use litecord_types::{
     actions::{ActionStatus, CapabilityClass},
-    provenance::Origin,
-    social::PresenceStatus,
+    provenance::{DiscordIdentity, Origin},
 };
 
 impl Workspace {
     pub fn home_screen(&mut self, ui: &mut Ui) {
         let Some(snapshot) = self.snapshot.clone() else {
             ui.spinner();
-            ui.label("Loading workspace data…");
             return;
         };
         let identity = self.display(&snapshot.account.display_name);
-        let conversation_count = snapshot.conversations.conversations.len();
-        let online_count = snapshot.friends.online.len();
-        let open_task_count = snapshot.tasks.open.len();
-        let review_count = snapshot.inbox.pending_actions.len();
-
         egui::ScrollArea::vertical()
             .id_salt("home_screen")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("Welcome back, {identity}"))
+                        .size(20.0)
+                        .color(theme::TEXT),
+                );
+                ui.add_space(8.0);
+                self.home_omni_card(ui, &snapshot);
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                let replies: Vec<_> = snapshot
+                    .inbox
+                    .needs_attention
+                    .iter()
+                    .filter_map(|i| match i {
+                        InboxItem::PendingReply {
+                            conversation_id,
+                            from,
+                            preview,
+                            ..
+                        } => Some((*conversation_id, from.clone(), preview.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                ui.horizontal_wrapped(|ui| {
+                    let tiles = [
+                        ("Waiting on you", replies.len(), Destination::Inbox),
+                        (
+                            "Friends online",
+                            snapshot.friends.online.len(),
+                            Destination::Friends,
+                        ),
+                        ("Open tasks", snapshot.tasks.open.len(), Destination::Tasks),
+                        (
+                            "To review",
+                            snapshot.inbox.pending_actions.len()
+                                + snapshot.tasks.candidates.len()
+                                + snapshot
+                                    .memory
+                                    .counts_by_status
+                                    .iter()
+                                    .find(|(s, _)| {
+                                        *s == litecord_types::memory::MemoryStatus::Candidate
+                                    })
+                                    .map_or(0, |(_, n)| *n as usize),
+                            Destination::Memory,
+                        ),
+                    ];
+                    for (label, count, dest) in tiles {
+                        if metric_card(ui, label, count).clicked() {
+                            self.navigate(dest);
+                        }
+                    }
+                });
+                ui.add_space(14.0);
+                let half = ((ui.available_width() - 16.0) / 2.0).max(240.0);
+                ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("Welcome back, {identity}"))
-                                .size(22.0)
-                                .strong()
-                                .color(theme::TEXT),
-                        );
-                        ui.label(
-                            egui::RichText::new("Your workspace at a glance.")
-                                .size(13.0)
-                                .color(theme::SECONDARY),
-                        );
+                        ui.set_width(half);
+                        theme::section_label(ui, "Waiting on you");
+                        if replies.is_empty() {
+                            ui.label(theme::meta("You're all caught up."));
+                        }
+                        for (conv, from, preview) in replies.iter().take(5) {
+                            if attention_row(
+                                ui,
+                                "Reply",
+                                &self.display(from),
+                                &self.display(preview),
+                                "Open",
+                            ) {
+                                self.navigate(Destination::Messages);
+                                self.open_conversation(*conv);
+                            }
+                        }
                     });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Open inbox").clicked() {
-                            self.navigate(Destination::Inbox);
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(half);
+                        theme::section_label(ui, "Recent conversations");
+                        for c in snapshot.conversations.conversations.iter().take(5) {
+                            let title = self.display(&c.title);
+                            let r = ui
+                                .horizontal(|ui| {
+                                    theme::avatar_presence(
+                                        ui,
+                                        &title,
+                                        30.0,
+                                        c.recipient_status.map_or(theme::Presence::None, |p| {
+                                            theme::Presence::from_status(p.as_str())
+                                        }),
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(&title).color(theme::TEXT));
+                                        ui.add(
+                                            egui::Label::new(theme::meta(
+                                                self.display(
+                                                    c.last_message_preview
+                                                        .as_deref()
+                                                        .unwrap_or("No messages cached yet"),
+                                                ),
+                                            ))
+                                            .truncate(),
+                                        );
+                                    });
+                                })
+                                .response
+                                .interact(egui::Sense::click());
+                            if r.clicked() {
+                                self.navigate(Destination::Messages);
+                                self.open_conversation(c.conversation_id);
+                            }
+                            ui.add_space(4.0);
                         }
                     });
                 });
-
-                ui.add_space(16.0);
-                omni_availability(ui);
-                ui.add_space(16.0);
-
-                ui.horizontal_wrapped(|ui| {
-                    metric_card(ui, "Conversations", conversation_count);
-                    metric_card(ui, "Friends online", online_count);
-                    metric_card(ui, "Open tasks", open_task_count);
-                    metric_card(ui, "Awaiting review", review_count);
-                });
-
-                ui.add_space(22.0);
-                theme::section_label(ui, "Recent conversations");
-                ui.add_space(8.0);
-                if snapshot.conversations.conversations.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Recent conversations will appear here.")
-                            .color(theme::MUTED),
-                    );
-                } else {
-                    for conversation in snapshot.conversations.conversations.iter().take(3) {
-                        let title = self.display(&conversation.title);
-                        let preview = self.display(
-                            conversation
-                                .last_message_preview
-                                .as_deref()
-                                .unwrap_or("No recent message."),
-                        );
-                        ui.horizontal(|ui| {
-                            theme::avatar(
-                                ui,
-                                &title,
-                                36.0,
-                                conversation.recipient_status == Some(PresenceStatus::Online),
-                            );
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&title).strong().color(theme::TEXT));
-                                ui.label(
-                                    egui::RichText::new(&preview)
-                                        .size(12.0)
-                                        .color(theme::SECONDARY),
-                                );
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if conversation.awaiting_reply {
-                                        theme::chip(ui, "Reply needed", theme::PRIMARY);
-                                    }
-                                    if ui.button("Open").clicked() {
-                                        self.open_conversation(conversation.conversation_id);
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(6.0);
-                        ui.separator();
-                    }
-                }
             });
     }
 
+    fn home_omni_card(&mut self, ui: &mut Ui, snapshot: &crate::bridge::Snapshot) {
+        use litecord_app::harness::LoginState;
+        let status = &snapshot.omni.status;
+        egui::Frame::new()
+            .fill(theme::OMNI.gamma_multiply(0.07))
+            .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.35)))
+            .corner_radius(8)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Omni").color(theme::OMNI).strong());
+                    let ready =
+                        matches!(status.login, LoginState::Ready { .. } | LoginState::Stopped)
+                            && status.unavailable.is_none();
+                    if ready {
+                        let w = (ui.available_width() - 80.0).max(120.0);
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.omni_draft)
+                                .desired_width(w)
+                                .hint_text("Ask about your people, messages and tasks…"),
+                        );
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let text = self.omni_draft.trim().to_owned();
+                        if (ui
+                            .add_enabled(!text.is_empty() && !self.busy, egui::Button::new("Ask"))
+                            .clicked()
+                            || enter && !text.is_empty())
+                            && !self.busy
+                        {
+                            self.send(Command::Omni(crate::bridge::OmniCommand::Send(None, text)));
+                            self.omni_draft.clear();
+                            self.omni_open = true;
+                        }
+                    } else {
+                        let msg = if status.selected.is_none() {
+                            "Connect Codex or OpenCode to ask questions about your conversations."
+                        } else {
+                            "Sign in to your agent harness to start asking."
+                        };
+                        ui.label(egui::RichText::new(msg).color(theme::SECONDARY));
+                        if ui.button("Set up Omni").clicked() {
+                            self.omni_open = true;
+                        }
+                    }
+                });
+            });
+    }
     pub fn inbox_screen(&mut self, ui: &mut Ui) {
         let Some(snapshot) = self.snapshot.clone() else {
             ui.spinner();
@@ -120,45 +195,77 @@ impl Workspace {
         egui::ScrollArea::vertical()
             .id_salt("inbox_screen")
             .show(ui, |ui| {
-                ui.add_space(12.0);
-                ui.label(
-                    egui::RichText::new("Inbox")
-                        .size(22.0)
-                        .strong()
-                        .color(theme::TEXT),
+                theme::page_header(
+                    ui,
+                    "Inbox",
+                    Some("Replies you owe, suggestions to review, and actions waiting for your approval."),
                 );
-                ui.label(
-                    egui::RichText::new(
-                        "Items that need your attention and actions awaiting review.",
-                    )
-                    .size(13.0)
-                    .color(theme::SECONDARY),
-                );
-                ui.add_space(18.0);
-
-                ui.horizontal(|ui| {
-                    theme::section_label(ui, "Today");
-                    ui.label(
-                        egui::RichText::new(format!("Owner: {owner}"))
-                            .size(12.0)
-                            .color(theme::MUTED),
-                    );
-                });
-                ui.add_space(8.0);
-
-                if snapshot.inbox.needs_attention.is_empty()
-                    && snapshot.inbox.pending_actions.is_empty()
-                {
-                    ui.label(
-                        egui::RichText::new("Nothing needs your attention right now.")
-                            .color(theme::MUTED),
-                    );
+                let _ = &owner;
+                let filter = self.inbox_filter;
+                let show = |f: usize| filter == 0 || filter == f;
+                let attention: Vec<&InboxItem> =
+                    crate::context_ui::visible_attention(&snapshot.inbox.needs_attention)
+                        .into_iter()
+                    .filter(|i| match i {
+                        InboxItem::PendingReply { .. } | InboxItem::ReminderDue { .. } => show(1),
+                        InboxItem::TaskCandidate { .. } | InboxItem::Commitment { .. } => show(4),
+                    })
+                    .collect();
+                let approvals = show(2);
+                let checkins = show(3);
+                let empty = attention.is_empty()
+                    && (!approvals
+                        || snapshot.inbox.pending_actions.is_empty() && snapshot.omni.requests.is_empty())
+                    && (!checkins || snapshot.omni.checkins.is_empty());
+                if empty {
+                    theme::empty_state(ui, "All clear", "Nothing here needs your attention right now.");
                 }
-
-                if !snapshot.inbox.needs_attention.is_empty() {
+                if approvals && !snapshot.omni.requests.is_empty() {
+                    theme::section_label(ui, "Omni wants to run on this computer");
+                    ui.add_space(4.0);
+                    for req in snapshot.omni.requests.clone() {
+                        self.inbox_omni_request(ui, &req);
+                    }
+                    ui.add_space(8.0);
+                }
+                if checkins && !snapshot.omni.checkins.is_empty() {
+                    ui.horizontal(|ui| {
+                        theme::section_label(ui, "From Omni's check-ins");
+                        if ui.small_button("Dismiss all").clicked() {
+                            self.send(Command::Omni(crate::bridge::OmniCommand::DismissCheckins));
+                        }
+                    });
+                    for c in &snapshot.omni.checkins {
+                        egui::Frame::new()
+                            .fill(theme::OMNI.gamma_multiply(0.06))
+                            .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.3)))
+                            .corner_radius(8)
+                            .inner_margin(10)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(egui::RichText::new(self.display(&c.text)).color(theme::TEXT));
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Continue in Omni").clicked() {
+                                        self.selection.omni_session = Some(c.session_id);
+                                        self.omni_open = true;
+                                        self.request();
+                                    }
+                                    if ui.small_button("Remember").clicked() {
+                                        self.send(Command::Omni(crate::bridge::OmniCommand::Remember(
+                                            c.session_id,
+                                            c.seq,
+                                        )));
+                                    }
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(8.0);
+                }
+                if !attention.is_empty() {
                     theme::section_label(ui, "Needs attention");
                     ui.add_space(8.0);
-                    for item in &snapshot.inbox.needs_attention {
+                    for item in attention {
                         match item {
                             InboxItem::PendingReply {
                                 conversation_id,
@@ -171,9 +278,9 @@ impl Workspace {
                                 if attention_row(
                                     ui,
                                     "Reply needed",
-                                    &format!("From {from}"),
+                                    &from,
                                     &preview,
-                                    "Open conversation",
+                                    "Reply",
                                 ) {
                                     self.open_conversation(*conversation_id);
                                 }
@@ -197,7 +304,7 @@ impl Workspace {
                                     ui,
                                     source,
                                     &title,
-                                    "Review this task suggestion in Tasks.",
+                                    "",
                                     "Open tasks",
                                 ) {
                                     self.navigate(Destination::Tasks);
@@ -220,9 +327,9 @@ impl Workspace {
                     }
                 }
 
-                if !snapshot.inbox.pending_actions.is_empty() {
+                if approvals && !snapshot.inbox.pending_actions.is_empty() {
                     ui.add_space(10.0);
-                    theme::section_label(ui, "Pending actions");
+                    theme::section_label(ui, "Waiting for your approval");
                     ui.add_space(8.0);
                     for action in &snapshot.inbox.pending_actions {
                         self.pending_action_card(ui, action, privacy);
@@ -230,6 +337,46 @@ impl Workspace {
                     }
                 }
             });
+    }
+
+    fn inbox_omni_request(&mut self, ui: &mut Ui, req: &litecord_app::omni::OmniRequestRow) {
+        use litecord_app::harness::{Decision, RequestKind};
+        let detail = match &req.request {
+            RequestKind::Command { command, .. } => format!("Run: {command}"),
+            RequestKind::FileChange { summary } => format!("Change files: {summary}"),
+            RequestKind::Permission { title } => title.clone(),
+        };
+        egui::Frame::new()
+            .fill(theme::SIDEBAR)
+            .stroke(egui::Stroke::new(1.0, theme::WARNING.gamma_multiply(0.5)))
+            .corner_radius(8)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::chip(ui, "Local · this computer", theme::WARNING);
+                    ui.label(egui::RichText::new(detail).monospace().color(theme::TEXT));
+                });
+                if let Some(reason) = &req.reason {
+                    ui.label(theme::meta(reason.as_str()));
+                }
+                ui.horizontal(|ui| {
+                    let answer =
+                        |d| Command::Omni(crate::bridge::OmniCommand::Answer(req.id.clone(), d));
+                    if ui.button("Allow once").clicked() {
+                        self.send(answer(Decision::Accept));
+                    }
+                    if ui.button("Decline").clicked() {
+                        self.send(answer(Decision::Decline));
+                    }
+                    if ui.small_button("View chat").clicked() {
+                        self.selection.omni_session = Some(req.session_id);
+                        self.omni_open = true;
+                        self.request();
+                    }
+                });
+            });
+        ui.add_space(6.0);
     }
 
     fn pending_action_card(&mut self, ui: &mut Ui, action: &PendingActionRow, privacy: bool) {
@@ -269,6 +416,14 @@ impl Workspace {
                                 .color(theme::TEXT),
                         );
                         ui.horizontal(|ui| {
+                            match action.identity {
+                                DiscordIdentity::ApplicationBot => {
+                                    theme::chip(ui, "Acts as your bot", theme::WARNING)
+                                }
+                                DiscordIdentity::UserSocialSdk => {
+                                    theme::chip(ui, "Acts as you", theme::PRIMARY)
+                                }
+                            }
                             theme::chip(ui, &class, action_class_color(action.class));
                             theme::chip(ui, &status, theme::MUTED);
                         });
@@ -361,69 +516,73 @@ impl Workspace {
     }
 }
 
-fn omni_availability(ui: &mut Ui) {
-    egui::Frame::new()
-        .fill(theme::OMNI.gamma_multiply(0.09))
-        .stroke(egui::Stroke::new(
-            1.0_f32,
-            theme::OMNI.gamma_multiply(0.28),
-        ))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                theme::chip(ui, "OMNI", theme::OMNI);
-                ui.label(
-                    egui::RichText::new(
-                        "Generative replies are unavailable in this build. Inbox suggestions retain their source and proposals require your review.",
-                    )
-                    .size(12.0)
-                    .color(theme::SECONDARY),
-                );
-            });
-        });
+fn metric_card(ui: &mut Ui, label: &str, count: usize) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(170.0, 60.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            8.0,
+            if response.hovered() {
+                theme::HOVER
+            } else {
+                theme::RAISED
+            },
+            egui::Stroke::new(1.0, theme::BORDER),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(12.0, 8.0),
+            egui::Align2::LEFT_TOP,
+            count.to_string(),
+            egui::FontId::proportional(22.0),
+            theme::TEXT,
+        );
+        painter.text(
+            rect.left_bottom() + egui::vec2(12.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::proportional(12.0),
+            theme::SECONDARY,
+        );
+    }
+    let text = format!("{label}: {count}");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &text));
+    response
 }
 
-fn metric_card(ui: &mut Ui, label: &str, count: usize) {
-    egui::Frame::new()
-        .fill(theme::SIDEBAR)
-        .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_min_width(142.0);
-            ui.set_min_height(68.0);
-            ui.label(
-                egui::RichText::new(count.to_string())
-                    .size(22.0)
-                    .strong()
-                    .color(theme::TEXT),
-            );
-            ui.label(egui::RichText::new(label).size(12.0).color(theme::MUTED));
-        });
-}
-
+/// One compact attention row: category chip, title, one-line body, action.
 fn attention_row(ui: &mut Ui, category: &str, title: &str, body: &str, action: &str) -> bool {
     let mut clicked = false;
     egui::Frame::new()
-        .fill(theme::SIDEBAR)
+        .fill(theme::WORKSPACE)
         .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 18.0],
+                    egui::Label::new(egui::RichText::new(category).size(11.0).color(theme::MUTED))
+                        .truncate(),
+                );
+                let w = (ui.available_width() - 150.0).max(80.0);
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(category).size(12.0).color(theme::MUTED));
-                    });
-                    ui.label(egui::RichText::new(title).strong().color(theme::TEXT));
-                    ui.label(egui::RichText::new(body).size(12.0).color(theme::SECONDARY));
+                    ui.set_width(w);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(title).color(theme::TEXT)).truncate(),
+                    );
+                    if !body.is_empty() {
+                        ui.add(egui::Label::new(theme::meta(body)).truncate());
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     clicked = ui.button(action).clicked();
                 });
             });
         });
+    ui.add_space(2.0);
     clicked
 }
 
@@ -431,8 +590,8 @@ fn origin_label(origin: Origin) -> &'static str {
     match origin {
         Origin::DiscordSocialSdk | Origin::DiscordBotGateway => "Observed from Discord",
         Origin::UserProvided => "Added by you",
-        Origin::LocalApplication => "Local heuristic",
-        Origin::AgentDerived => "Agent suggestion",
+        Origin::LocalApplication => "Suggested task",
+        Origin::AgentDerived => "From Omni",
         Origin::Imported => "Imported suggestion",
         Origin::Synthetic => "Synthetic demo item",
     }

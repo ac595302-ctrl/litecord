@@ -89,6 +89,8 @@ fn selection(
         contact: Some(contact_id),
         before: None,
         palette_query: String::new(),
+        task: None,
+        omni_session: None,
     }
 }
 

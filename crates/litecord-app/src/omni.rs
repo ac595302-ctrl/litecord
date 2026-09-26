@@ -23,7 +23,8 @@ use litecord_harness::{
 };
 use litecord_memory::MemoryService;
 use litecord_store::repos;
-use litecord_store::repos::omni::{NewSession, OmniItem, OmniSession};
+use litecord_store::repos::omni::NewSession;
+pub use litecord_store::repos::omni::{OmniItem, OmniSession};
 use litecord_store::Database;
 use litecord_types::entity::{EntityId, LocalEntityKind};
 use litecord_types::memory::{MemoryKind, NewMemory};

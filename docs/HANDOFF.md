@@ -172,6 +172,29 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Omni implemented + UI overhaul + Astra review (September 26, 2026)
+
+- Omni backend: `litecord-harness` (Codex/OpenCode/fake drivers) and
+  `OmniService` (see the status table at the top of `docs/AGENT_HARNESS.md`).
+  The drivers have not been checked against real harness binaries.
+- UI overhaul: see "September 26, 2026 update" in `docs/UI_INTEGRATION.md`.
+- A GPT model ("Astra") reviewed local changes that are not in this
+  repository. Each item was re-implemented on main:
+  - projected resize (`resize_projected`) and the UI wiring;
+  - FFI string views with lifetimes. Found in review: the native bridge
+    reuses scratch buffers per query, so the queries now take `&mut self`.
+  - docking preview, menu-based docking, shared cancel;
+  - theme foundations;
+  - Messages improvements, using the app's Files API;
+  - status-aware navigation;
+  - header connection status;
+  - bot identity in the composer and in approvals.
+- Backend: after a conversation list arrives, the 8 most recent
+  conversations' history is fetched in the background if stale, so lists
+  show real previews.
+- Disk: `target/debug/incremental` grows past 10 GB quickly. Clear it when
+  space runs low.
+
 ### Omni on Codex/OpenCode — design (September 26, 2026)
 
 Design in [`docs/AGENT_HARNESS.md`](AGENT_HARNESS.md): the user's own

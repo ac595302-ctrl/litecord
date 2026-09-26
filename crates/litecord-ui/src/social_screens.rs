@@ -1,7 +1,7 @@
 use crate::{bridge::Command, theme, workspace::Workspace};
 use eframe::egui::{self, Rect, Ui};
 use litecord_core::ports::VoiceControl;
-use litecord_layout::{Destination, Orientation};
+use litecord_layout::Orientation;
 
 impl Workspace {
     pub fn server_list(&mut self, ui: &mut Ui, orientation: Orientation) {
@@ -456,26 +456,5 @@ impl Workspace {
                     ui.label(self.display(name));
                 }
             });
-    }
-    pub fn destination_inspector(&mut self, ui: &mut Ui) {
-        if self.details(ui) {
-            return;
-        }
-        if self.selection.destination == Destination::Messages
-            || self.selection.destination == Destination::Friends
-        {
-            self.inspector(ui);
-            return;
-        }
-        if self.selection.destination == Destination::Voice {
-            theme::section_label(ui, "Room context");
-            ui.label("Voice controls stay inside the room when you move this panel.");
-            return;
-        }
-        theme::section_label(ui, "Omni & memory");
-        ui.label("Local context is available in Memory and Inbox.");
-        if ui.button("Open Memory").clicked() {
-            self.navigate(Destination::Memory);
-        }
     }
 }

@@ -1,14 +1,19 @@
 //! Native presentation. All data and writes go through `LitecordApp`.
 mod attention;
 mod bridge;
-mod details;
+mod context_ui;
 mod icons;
+mod layout_editor;
 mod local_screens;
+mod memory_ui;
+mod messages_ui;
+mod omni_ui;
 mod overlays;
 #[cfg(test)]
 mod render_tests;
 mod screens;
 mod social_screens;
+mod tasks_ui;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -21,6 +26,8 @@ pub use litecord_layout::Destination;
 pub struct WindowOptions {
     pub size: Option<[f32; 2]>,
     pub destination: Option<litecord_layout::Destination>,
+    /// Start with the Omni panel open.
+    pub omni_open: bool,
     #[cfg(feature = "screenshots")]
     pub screenshot: Option<std::path::PathBuf>,
 }
@@ -50,6 +57,7 @@ pub fn run_with_options(
             if let Some(destination) = options.destination {
                 workspace.navigate(destination);
             }
+            workspace.omni_open = options.omni_open;
             #[cfg(feature = "screenshots")]
             {
                 workspace.screenshot_path = options.screenshot;

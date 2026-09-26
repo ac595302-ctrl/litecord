@@ -1,17 +1,23 @@
 use eframe::egui::{self, Align2, Color32, FontId, Stroke, Ui};
 
-pub const SHELL: Color32 = Color32::from_rgb(17, 23, 34);
-pub const SIDEBAR: Color32 = Color32::from_rgb(21, 29, 43);
-pub const WORKSPACE: Color32 = Color32::from_rgb(23, 31, 44);
-pub const RAISED: Color32 = Color32::from_rgb(32, 42, 60);
-pub const BORDER: Color32 = Color32::from_rgb(45, 58, 80);
+// Darker navy/charcoal surfaces derived from the A01 reference. Contrast
+// against TEXT/SECONDARY stays above 4.5:1 on every surface.
+pub const SHELL: Color32 = Color32::from_rgb(14, 19, 28);
+pub const SIDEBAR: Color32 = Color32::from_rgb(18, 24, 36);
+pub const WORKSPACE: Color32 = Color32::from_rgb(21, 28, 41);
+pub const RAISED: Color32 = Color32::from_rgb(30, 39, 56);
+pub const HOVER: Color32 = Color32::from_rgb(35, 46, 66);
+pub const BORDER: Color32 = Color32::from_rgb(41, 53, 74);
 pub const TEXT: Color32 = Color32::from_rgb(231, 236, 245);
 pub const SECONDARY: Color32 = Color32::from_rgb(176, 189, 210);
 pub const MUTED: Color32 = Color32::from_rgb(142, 156, 180);
 pub const PRIMARY: Color32 = Color32::from_rgb(77, 125, 255);
-pub const SELECTED: Color32 = Color32::from_rgb(38, 57, 87);
+/// Primary hue lightened for text on dark fills (contrast ≥ 4.5:1).
+pub const PRIMARY_TEXT: Color32 = Color32::from_rgb(143, 176, 255);
+pub const SELECTED: Color32 = Color32::from_rgb(36, 54, 84);
 pub const OMNI: Color32 = Color32::from_rgb(80, 210, 193);
 pub const PRIORITY: Color32 = Color32::from_rgb(240, 139, 145);
+pub const WARNING: Color32 = Color32::from_rgb(232, 184, 90);
 pub const SUCCESS: Color32 = Color32::from_rgb(85, 215, 160);
 
 /// Apply the shared dark palette, typography, spacing, and corner radii.
@@ -54,14 +60,7 @@ pub fn apply(ctx: &egui::Context) {
         BORDER,
         6,
     );
-    set_widget(
-        &mut visuals.widgets.hovered,
-        SELECTED,
-        SELECTED,
-        TEXT,
-        PRIMARY,
-        6,
-    );
+    set_widget(&mut visuals.widgets.hovered, HOVER, HOVER, TEXT, PRIMARY, 6);
     set_widget(
         &mut visuals.widgets.active,
         SELECTED,
@@ -96,8 +95,8 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.window_margin = egui::Margin::same(16);
     style.spacing.menu_margin = egui::Margin::same(8);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
-    style.spacing.interact_size = egui::vec2(40.0, 32.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.interact_size = egui::vec2(32.0, 28.0);
     ctx.set_style_of(egui::Theme::Dark, style);
 }
 
@@ -117,8 +116,83 @@ fn set_widget(
     widget.expansion = 0.0;
 }
 
-/// Draw a text-based avatar fallback with a deterministic surface tint.
+/// Presence shown on an avatar: shape and color both carry the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Online,
+    Idle,
+    Dnd,
+    Offline,
+    /// No presence indicator (e.g. yourself in compact lists, bots).
+    None,
+}
+
+impl Presence {
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            "online" => Self::Online,
+            "idle" => Self::Idle,
+            "dnd" => Self::Dnd,
+            "offline" | "invisible" => Self::Offline,
+            _ => Self::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Idle => "idle",
+            Self::Dnd => "do not disturb",
+            Self::Offline => "offline",
+            Self::None => "",
+        }
+    }
+
+    pub fn color(self) -> Color32 {
+        match self {
+            Self::Online => SUCCESS,
+            Self::Idle => WARNING,
+            Self::Dnd => PRIORITY,
+            Self::Offline | Self::None => MUTED,
+        }
+    }
+}
+
+/// Muted hues for fallback avatars: distinct, but calm on navy surfaces and
+/// dark enough for light initials (≥ 4.5:1 with TEXT).
+const AVATAR_HUES: [Color32; 8] = [
+    Color32::from_rgb(52, 86, 150),
+    Color32::from_rgb(38, 110, 104),
+    Color32::from_rgb(112, 70, 132),
+    Color32::from_rgb(140, 78, 70),
+    Color32::from_rgb(58, 108, 64),
+    Color32::from_rgb(128, 96, 40),
+    Color32::from_rgb(84, 76, 150),
+    Color32::from_rgb(40, 96, 128),
+];
+
+/// Deterministic fallback color for a name.
+pub fn avatar_color(label: &str) -> Color32 {
+    AVATAR_HUES[(stable_hash(label.trim()) as usize) % AVATAR_HUES.len()]
+}
+
+/// Text avatar with a deterministic color; `online` shows a presence dot.
 pub fn avatar(ui: &mut Ui, label: &str, size: f32, online: bool) -> egui::Response {
+    avatar_presence(
+        ui,
+        label,
+        size,
+        if online {
+            Presence::Online
+        } else {
+            Presence::None
+        },
+    )
+}
+
+/// Text avatar with a status-aware presence marker: filled dot (online),
+/// crescent-like ring (idle), bar (dnd) or hollow ring (offline).
+pub fn avatar_presence(ui: &mut Ui, label: &str, size: f32, presence: Presence) -> egui::Response {
     let display_name = if label.trim().is_empty() {
         "Unknown user"
     } else {
@@ -129,30 +203,60 @@ pub fn avatar(ui: &mut Ui, label: &str, size: f32, online: bool) -> egui::Respon
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
 
     if ui.is_rect_visible(rect) {
-        let backgrounds = [RAISED, SELECTED, SIDEBAR];
-        let fill = backgrounds[(stable_hash(display_name) as usize) % backgrounds.len()];
         let painter = ui.painter();
-        painter.circle_filled(rect.center(), size * 0.5, fill);
-        painter.circle_stroke(rect.center(), size * 0.5, Stroke::new(1.0_f32, BORDER));
+        painter.circle_filled(rect.center(), size * 0.5, avatar_color(display_name));
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             initials,
-            FontId::proportional((size * 0.36).max(8.0).min(size * 0.48)),
+            FontId::proportional((size * 0.38).clamp(8.0, size * 0.48)),
             TEXT,
         );
-
-        if online {
-            let radius = (size * 0.16).max(2.0);
-            let center = egui::pos2(rect.right() - radius, rect.bottom() - radius);
-            painter.circle_filled(center, radius, SUCCESS);
-            painter.circle_stroke(center, radius, Stroke::new(1.5_f32, WORKSPACE));
+        if presence != Presence::None {
+            let radius = (size * 0.14).max(3.0);
+            let center = egui::pos2(rect.right() - radius * 0.9, rect.bottom() - radius * 0.9);
+            let color = presence.color();
+            painter.circle_filled(center, radius + 1.5, SHELL);
+            match presence {
+                Presence::Online => {
+                    painter.circle_filled(center, radius, color);
+                }
+                Presence::Idle => {
+                    painter.circle_filled(center, radius, color);
+                    painter.circle_filled(
+                        center + egui::vec2(-radius * 0.45, -radius * 0.45),
+                        radius * 0.6,
+                        SHELL,
+                    );
+                }
+                Presence::Dnd => {
+                    painter.circle_filled(center, radius, color);
+                    painter.line_segment(
+                        [
+                            center - egui::vec2(radius * 0.55, 0.0),
+                            center + egui::vec2(radius * 0.55, 0.0),
+                        ],
+                        Stroke::new((radius * 0.45).max(1.0), SHELL),
+                    );
+                }
+                Presence::Offline | Presence::None => {
+                    painter.circle_stroke(center, radius * 0.8, Stroke::new(1.5_f32, color));
+                }
+            }
         }
     }
 
-    let presence = if online { "online" } else { "offline" };
-    let accessible_label = format!("Avatar for {display_name}, {presence}");
-    let response = response.on_hover_text(format!("{display_name} · {presence}"));
+    let presence_text = presence.label();
+    let accessible_label = if presence_text.is_empty() {
+        format!("Avatar for {display_name}")
+    } else {
+        format!("Avatar for {display_name}, {presence_text}")
+    };
+    let response = response.on_hover_text(if presence_text.is_empty() {
+        display_name.to_owned()
+    } else {
+        format!("{display_name} · {presence_text}")
+    });
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Image, true, accessible_label.clone())
     });
@@ -199,6 +303,106 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) {
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(12.0).color(SECONDARY));
+            ui.label(egui::RichText::new(text).size(12.0).color(chip_text(color)));
         });
+}
+
+/// Readable text color for a chip of `color`: the hue itself for light
+/// hues, a lightened variant for the primary blue.
+pub fn chip_text(color: Color32) -> Color32 {
+    if color == PRIMARY {
+        PRIMARY_TEXT
+    } else if color == MUTED || color == BORDER {
+        SECONDARY
+    } else {
+        color
+    }
+}
+
+/// Subtle vertical gradient behind a panel (top slightly lighter).
+pub fn surface(ui: &Ui, rect: egui::Rect, base: Color32) {
+    let top = lighten(base, 6);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), base);
+    mesh.colored_vertex(rect.left_bottom(), base);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+fn lighten(c: Color32, by: u8) -> Color32 {
+    Color32::from_rgb(
+        c.r().saturating_add(by),
+        c.g().saturating_add(by),
+        c.b().saturating_add(by),
+    )
+}
+
+/// Compact secondary text.
+pub fn meta(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).size(12.0).color(MUTED)
+}
+
+/// Title for a destination's center panel plus an optional subtitle.
+pub fn page_header(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
+    ui.label(egui::RichText::new(title).size(20.0).color(TEXT));
+    if let Some(sub) = subtitle {
+        ui.label(egui::RichText::new(sub).size(13.0).color(SECONDARY));
+    }
+    ui.add_space(4.0);
+}
+
+/// Honest empty state: what's missing and what to do about it.
+pub fn empty_state(ui: &mut Ui, title: &str, body: &str) {
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new(title).size(14.0).color(SECONDARY));
+    ui.label(egui::RichText::new(body).size(12.0).color(MUTED));
+    ui.add_space(12.0);
+}
+
+/// A selectable sidebar/filter row with an optional trailing count.
+pub fn nav_row(ui: &mut Ui, label: &str, count: Option<usize>, selected: bool) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            SELECTED
+        } else if response.hovered() {
+            HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 6.0, fill);
+        if selected {
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 6.0), egui::vec2(3.0, 18.0)),
+                2.0,
+                PRIMARY,
+            );
+        }
+        painter.text(
+            rect.left_center() + egui::vec2(12.0, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(14.0),
+            if selected { TEXT } else { SECONDARY },
+        );
+        if let Some(n) = count {
+            painter.text(
+                rect.right_center() - egui::vec2(10.0, 0.0),
+                Align2::RIGHT_CENTER,
+                n.to_string(),
+                FontId::proportional(12.0),
+                MUTED,
+            );
+        }
+    }
+    let label = label.to_owned();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label)
+    });
+    response
 }

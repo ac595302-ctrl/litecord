@@ -69,6 +69,8 @@ fn selection(
         contact: Some(contact_id),
         before,
         palette_query: String::new(),
+        task: None,
+        omni_session: None,
     }
 }
 
@@ -116,9 +118,16 @@ async fn bridge_send_and_selection_snapshots_preserve_app_state() {
         .all(|message| message.sent_at < before));
 
     let content = "bridge send canonical marker";
-    let completion = execute(&app, Command::Send(conversation_id, content.into()))
-        .await
-        .unwrap();
+    let completion = execute(
+        &app,
+        Command::SendAs(
+            conversation_id,
+            content.into(),
+            litecord_types::provenance::DiscordIdentity::UserSocialSdk,
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(completion.sent, Some((conversation_id, content.into())));
     wait_for_sent_message(&app, conversation_id, content).await;
 
@@ -184,7 +193,11 @@ async fn failed_bridge_send_returns_error_without_a_sent_completion() {
     );
     bridge
         .commands
-        .send(Command::Send(conversation_id, String::new()))
+        .send(Command::SendAs(
+            conversation_id,
+            String::new(),
+            litecord_types::provenance::DiscordIdentity::UserSocialSdk,
+        ))
         .await
         .unwrap();
     let completion = timeout(Duration::from_secs(5), bridge.completions.recv())
