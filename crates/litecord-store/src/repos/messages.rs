@@ -390,6 +390,38 @@ pub struct MessageHit {
     pub bm25: f64,
 }
 
+/// Permanently delete messages with `sent_at < before`, for raw-message
+/// retention.
+///
+/// This is bulk maintenance, not an individually-observed write: unlike
+/// every other write in this module it emits **no** `UnifiedEvent` per row
+/// (a purge is not something an agent or the UI needs to be nudged about,
+/// and one event per pruned row would flood the event log for exactly the
+/// data retention exists to shrink). The `messages_fts_ad` trigger still
+/// fires per deleted row and keeps `messages_fts` consistent with the base
+/// table, so pruned content stops matching [`search`] immediately.
+///
+/// When `keep_bookmarked` is set, messages the user bookmarked
+/// ([`crate::repos::notes::add_bookmark`]) are kept regardless of age —
+/// bookmarking is an explicit signal to retain, and a bookmark pointing at a
+/// vanished message would be a dangling reference.
+///
+/// Applies to both live and already soft-deleted rows (deletion here is
+/// unconditional removal, not the `deleted` flag `mark_deleted` sets).
+/// Returns the number of rows removed.
+pub fn prune_before(
+    tx: &WriteTx<'_>,
+    before: Timestamp,
+    keep_bookmarked: bool,
+) -> StoreResult<usize> {
+    let sql = if keep_bookmarked {
+        "DELETE FROM messages WHERE sent_at < ?1 AND id NOT IN (SELECT message_id FROM bookmarks)"
+    } else {
+        "DELETE FROM messages WHERE sent_at < ?1"
+    };
+    Ok(tx.execute(sql, params![before.as_millis()])?)
+}
+
 /// Search non-deleted messages by content, best match first.
 pub fn search(conn: &Connection, q: &MessageSearch<'_>) -> StoreResult<Vec<MessageHit>> {
     let Some(expr) = match_expr(q.query, q.mode, false) else {
@@ -563,6 +595,100 @@ mod tests {
         let rec = db.read(|r| get(r, MessageId(1))).unwrap().unwrap();
         assert!(rec.deleted);
         assert_eq!(rec.message.content.as_ref(), "");
+    }
+
+    #[test]
+    fn prune_before_removes_rows_and_fts_entries_but_keeps_bookmarks() {
+        use crate::repos::notes;
+        use litecord_types::notes::Bookmark;
+
+        let db = Database::open_in_memory().unwrap();
+        db.write(|tx| {
+            upsert(
+                tx,
+                &msg(1, 1, 2, "ancient unicorn tale", 10),
+                Origin::Synthetic,
+                Timestamp::from_millis(1),
+            )
+        })
+        .unwrap();
+        db.write(|tx| {
+            upsert(
+                tx,
+                &msg(2, 1, 2, "ancient bookmarked tale", 20),
+                Origin::Synthetic,
+                Timestamp::from_millis(1),
+            )
+        })
+        .unwrap();
+        db.write(|tx| {
+            upsert(
+                tx,
+                &msg(3, 1, 2, "recent unicorn tale", 1_000),
+                Origin::Synthetic,
+                Timestamp::from_millis(1),
+            )
+        })
+        .unwrap();
+        db.write(|tx| {
+            notes::add_bookmark(
+                tx,
+                &Bookmark {
+                    message_id: MessageId(2),
+                    conversation_id: ConversationId(1),
+                    note: None,
+                    created_at: Timestamp::from_millis(1),
+                },
+                Origin::UserProvided,
+            )
+        })
+        .unwrap();
+
+        let pruned = db
+            .write(|tx| prune_before(tx, Timestamp::from_millis(500), true))
+            .unwrap()
+            .value;
+        assert_eq!(pruned, 1, "only the non-bookmarked old message is pruned");
+
+        assert!(db.read(|r| get(r, MessageId(1))).unwrap().is_none());
+        assert!(db.read(|r| get(r, MessageId(2))).unwrap().is_some());
+        assert!(db.read(|r| get(r, MessageId(3))).unwrap().is_some());
+
+        let hits = db
+            .read(|r| {
+                search(
+                    r,
+                    &MessageSearch {
+                        query: "unicorn",
+                        conversation_ids: None,
+                        exclude_conversation_ids: &[],
+                        author_id: None,
+                        guild_id: None,
+                        since: None,
+                        until: None,
+                        origins: None,
+                        mode: crate::repos::fts::FtsMode::Any,
+                        limit: 10,
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the pruned message must no longer be searchable"
+        );
+        assert_eq!(hits[0].record.message.id, MessageId(3));
+
+        let all_pruned = db
+            .write(|tx| prune_before(tx, Timestamp::from_millis(2_000), false))
+            .unwrap()
+            .value;
+        assert_eq!(
+            all_pruned, 2,
+            "without keep_bookmarked everything qualifying is removed"
+        );
+        assert!(db.read(|r| get(r, MessageId(2))).unwrap().is_none());
     }
 
     #[test]
