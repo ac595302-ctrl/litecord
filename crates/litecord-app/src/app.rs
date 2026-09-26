@@ -34,6 +34,8 @@ pub struct AppBuilder {
     bot: Option<Arc<dyn SocialBackend>>,
     clock: SharedClock,
     in_memory: bool,
+    omni_launchers: Vec<Arc<dyn litecord_harness::HarnessLauncher>>,
+    omni_mcp_command: Option<std::path::PathBuf>,
 }
 
 impl AppBuilder {
@@ -44,7 +46,23 @@ impl AppBuilder {
             bot: None,
             clock: Arc::new(SystemClock),
             in_memory: false,
+            omni_launchers: Vec::new(),
+            omni_mcp_command: None,
         }
+    }
+
+    /// Offer a harness for Omni (Codex, OpenCode, or the demo harness).
+    pub fn omni_launcher(mut self, launcher: Arc<dyn litecord_harness::HarnessLauncher>) -> Self {
+        self.omni_launchers.push(launcher);
+        self
+    }
+
+    /// The Litecord executable the harness runs as its MCP server
+    /// (`<exe> --db <path> mcp`). Without it (or with an in-memory
+    /// database) Omni reports itself unavailable.
+    pub fn omni_mcp_command(mut self, exe: std::path::PathBuf) -> Self {
+        self.omni_mcp_command = Some(exe);
+        self
     }
 
     /// Use a specific backend instead of the one selected by configuration.
@@ -205,6 +223,45 @@ impl AppBuilder {
             b.connect(ingest.clone()).await?;
             h.initial_hydration();
         }
+        let omni_ctx = match (&self.omni_mcp_command, self.in_memory) {
+            (Some(exe), false) => Some(omni_launch_context(&cfg, exe)?),
+            _ => None,
+        };
+        let omni = crate::omni::OmniService::new(
+            db.clone(),
+            memory.clone(),
+            cfg.omni.clone(),
+            self.omni_launchers,
+            omni_ctx,
+        );
+        {
+            let o = omni.clone();
+            supervisor.spawn("omni-idle", move |t| async move {
+                loop {
+                    tokio::select! {
+                        _ = t.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => o.stop_if_idle().await,
+                    }
+                }
+                o.stop().await;
+                Ok(())
+            });
+            let o = omni.clone();
+            supervisor.spawn("omni-heartbeat", move |t| async move {
+                loop {
+                    tokio::select! {
+                        _ = t.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                            match o.heartbeat(false).await {
+                                Ok(outcome) => tracing::debug!(?outcome, "omni heartbeat"),
+                                Err(e) => tracing::debug!(error = %e, "omni heartbeat failed"),
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
         tracing::info!(mode = ?backend.mode(), bot = bot.is_some(), "litecord started");
 
         Ok(LitecordApp {
@@ -220,6 +277,7 @@ impl AppBuilder {
                 memory,
                 actions,
                 metrics,
+                omni,
                 supervisor,
                 features: RwLock::new(features),
                 commands: RwLock::new(commands),
@@ -240,6 +298,7 @@ pub(crate) struct AppInner {
     pub tasks: TaskService,
     pub actions: ActionEngine,
     pub metrics: Arc<Metrics>,
+    pub omni: crate::omni::OmniService,
     pub supervisor: TaskSupervisor,
     pub features: RwLock<FeatureRegistry>,
     pub commands: RwLock<CommandRegistry>,
@@ -299,6 +358,11 @@ impl LitecordApp {
         &self.inner.metrics
     }
 
+    /// Omni, the in-app assistant on the user's own harness.
+    pub fn omni(&self) -> &crate::omni::OmniService {
+        &self.inner.omni
+    }
+
     /// Stop all runtime tasks and disconnect the backend.
     pub async fn shutdown(&self) -> ShutdownReport {
         if let Err(e) = self.inner.backend.disconnect().await {
@@ -332,6 +396,44 @@ impl LitecordApp {
             Some(self.inner.metrics.clone()),
         )
     }
+}
+
+/// Absolute paths for the harness: it runs with the Omni workspace as its
+/// working directory, so relative paths would point elsewhere.
+fn omni_launch_context(
+    cfg: &LitecordConfig,
+    exe: &std::path::Path,
+) -> Result<litecord_harness::LaunchContext> {
+    let abs = |p: std::path::PathBuf| {
+        std::path::absolute(&p).map_err(|e| {
+            Error::new(
+                ErrorKind::Configuration,
+                format!("path {}: {e}", p.display()),
+            )
+        })
+    };
+    let data_dir = abs(cfg.data_dir.clone())?;
+    let db = abs(cfg.database_path())?;
+    let workspace = data_dir.join("omni-workspace");
+    std::fs::create_dir_all(&workspace)
+        .map_err(|e| Error::new(ErrorKind::Configuration, format!("omni workspace: {e}")))?;
+    Ok(litecord_harness::LaunchContext {
+        // The workspace lives beside the database, so the harness cwd is
+        // never the data directory itself; drivers deny reads of
+        // `protected_dir` where the harness supports it.
+        workspace,
+        protected_dir: data_dir,
+        mcp: litecord_harness::McpLaunch {
+            command: exe.to_path_buf(),
+            args: vec![
+                "--db".into(),
+                db.display().to_string(),
+                "mcp".into(),
+                "--harness".into(),
+                "omni".into(),
+            ],
+        },
+    })
 }
 
 /// Build an agent gateway over a database without a running app — used by

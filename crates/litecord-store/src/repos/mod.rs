@@ -44,6 +44,7 @@ pub mod tasks;
 // Action engine and agents
 pub mod actions;
 pub mod agent_runs;
+pub mod omni;
 
 // Shared FTS helpers
 pub mod fts;

@@ -19,6 +19,7 @@ litecord-retrieval = { version = "0.1.0", path = "crates/litecord-retrieval" }
 litecord-context = { version = "0.1.0", path = "crates/litecord-context" }
 litecord-actions = { version = "0.1.0", path = "crates/litecord-actions" }
 litecord-agent = { version = "0.1.0", path = "crates/litecord-agent" }
+litecord-harness = { version = "0.1.0", path = "crates/litecord-harness" }
 litecord-mcp = { version = "0.1.0", path = "crates/litecord-mcp" }
 litecord-features = { version = "0.1.0", path = "crates/litecord-features" }
 litecord-app = { version = "0.1.0", path = "crates/litecord-app" }

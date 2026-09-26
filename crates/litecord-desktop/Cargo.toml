@@ -17,6 +17,7 @@ litecord-store.workspace = true
 litecord-app.workspace = true
 litecord-mcp.workspace = true
 litecord-agent.workspace = true
+litecord-harness.workspace = true
 serde.workspace = true
 litecord-types.workspace = true
 clap.workspace = true
@@ -30,7 +31,10 @@ workspace = true
 
 [features]
 default = []
-gui = ["dep:litecord-ui"]
+gui = ["dep:litecord-ui", "omni-codex", "omni-opencode"]
+# Omni harness drivers (the harness binaries themselves are not bundled).
+omni-codex = ["litecord-harness/codex"]
+omni-opencode = ["litecord-harness/opencode"]
 screenshots = ["gui", "litecord-ui/screenshots"]
 # Real application-bot source; enabled at runtime by LITECORD_BOT_TOKEN.
 discord-bot = ["dep:discord-adapter", "discord-adapter/discord-bot"]

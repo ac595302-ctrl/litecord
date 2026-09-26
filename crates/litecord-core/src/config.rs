@@ -39,6 +39,7 @@ pub struct LitecordConfig {
     pub cache: CacheConfig,
     pub retention: RetentionConfig,
     pub agent: AgentConfig,
+    pub omni: OmniConfig,
     pub logging: LoggingConfig,
 }
 
@@ -53,6 +54,7 @@ impl Default for LitecordConfig {
             cache: CacheConfig::default(),
             retention: RetentionConfig::default(),
             agent: AgentConfig::default(),
+            omni: OmniConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -223,6 +225,71 @@ impl Default for RetentionConfig {
             purge_deleted_messages: true,
             hot_hours: 24,
             warm_days: 14,
+        }
+    }
+}
+
+/// Omni on an external harness (docs/AGENT_HARNESS.md). Which harness is
+/// selected is a user preference stored by the app, not configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OmniConfig {
+    /// Explicit harness binaries; unset = search `PATH`.
+    pub codex_path: Option<PathBuf>,
+    pub opencode_path: Option<PathBuf>,
+    /// Model passed to the harness; unset = the harness's default.
+    pub model: Option<String>,
+    /// Stop the sidecar after this long without use.
+    pub idle_shutdown_secs: u64,
+    /// Unanswered harness approval requests are declined after this long.
+    pub approval_timeout_secs: u64,
+    /// Archived sessions kept (with transcripts); older ones are deleted.
+    pub keep_archived_sessions: u32,
+    pub heartbeat: HeartbeatConfig,
+}
+
+impl Default for OmniConfig {
+    fn default() -> Self {
+        Self {
+            codex_path: None,
+            opencode_path: None,
+            model: None,
+            idle_shutdown_secs: 600,
+            approval_timeout_secs: 120,
+            keep_archived_sessions: 50,
+            heartbeat: HeartbeatConfig::default(),
+        }
+    }
+}
+
+/// Scheduled Omni check-ins (docs/AGENT_HARNESS.md §8). Off by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeartbeatConfig {
+    pub enabled: bool,
+    /// Minimum minutes between check-ins.
+    pub min_interval_mins: u32,
+    pub max_per_hour: u32,
+    /// Local writes (tasks, reminders, drafts) allowed per check-in.
+    pub max_actions: u32,
+    /// Let check-ins propose Discord actions (still approved by the user).
+    pub allow_proposals: bool,
+    /// No check-ins from `quiet_start_hour` to `quiet_end_hour` (UTC hours,
+    /// 0-23). Equal values disable quiet hours.
+    pub quiet_start_hour: u8,
+    pub quiet_end_hour: u8,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_interval_mins: 60,
+            max_per_hour: 2,
+            max_actions: 3,
+            allow_proposals: false,
+            quiet_start_hour: 22,
+            quiet_end_hour: 7,
         }
     }
 }

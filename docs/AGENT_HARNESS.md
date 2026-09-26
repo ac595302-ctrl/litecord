@@ -1,8 +1,27 @@
 # Omni on Codex / OpenCode — harness integration design
 
-Status: **design, not implemented**, except the prompts
-(`crates/litecord-agent/prompts/`, exposed as `litecord_agent::prompts`) and
-the MCP `instructions`, which ship today. Build order is in §12.
+Status (September 26, 2026): **backend implemented; UI in progress.**
+
+| Piece | Where | Verified by |
+|---|---|---|
+| Driver trait, types, env allowlist, scripted fake | `crates/litecord-harness` | unit tests |
+| Codex `app-server` driver (feature `codex`) | `litecord-harness/src/codex.rs` | scripted JSON-RPC peer tests |
+| OpenCode `serve` driver (feature `opencode`) | `litecord-harness/src/opencode.rs` | fake HTTP/SSE server tests |
+| `OmniService`: lazy sidecar, idle stop, sessions, capped transcripts, approval bridge by mode, "remember" into memory, heartbeats | `litecord-app/src/omni.rs`, `migrations/0003_omni.sql` | `litecord-app/tests/omni.rs` |
+| Desktop wiring (launchers, `litecord mcp --harness`) | `litecord-desktop` | builds |
+
+**Not yet verified against real binaries.** No Codex or OpenCode binary was
+available where this was built. Method, event and field names are constants
+at the top of each driver. Before relying on them, check them against the
+installed version (`codex app-server generate-json-schema`, OpenCode
+`GET /doc`). Known gaps:
+- OpenCode providers whose OAuth sign-in needs a pasted code are not
+  supported yet; the UI points to `opencode auth login`.
+- Codex has no confirmed per-thread switch to turn off its shell tool.
+  Assistant mode therefore relies on `sandbox: read-only`,
+  `approvalPolicy: untrusted`, and Litecord declining every command request.
+- A "safe" read-only command Codex runs without asking could still read local
+  files.
 
 ## 1. Goal
 

@@ -77,7 +77,11 @@ enum Command {
         ask: String,
     },
     /// Serve MCP over stdio.
-    Mcp,
+    Mcp {
+        /// Label recorded as the acting harness in the audit log.
+        #[arg(long, default_value = "mcp")]
+        harness: String,
+    },
     /// Print database status.
     Status,
 }
@@ -148,7 +152,7 @@ async fn main() -> std::process::ExitCode {
             gui(cfg, options).await
         }
         Command::Demo { in_memory, ask } => demo(cfg, in_memory, &ask).await,
-        Command::Mcp => mcp(cfg).await,
+        Command::Mcp { harness } => mcp(cfg, &harness).await,
         Command::Status => status(&cfg),
     };
     match result {
@@ -165,7 +169,9 @@ async fn gui(
     cfg: LitecordConfig,
     options: litecord_ui::WindowOptions,
 ) -> litecord_core::Result<()> {
-    let app = with_bot(LitecordApp::builder(cfg))?.start().await?;
+    let app = with_omni(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)
+        .start()
+        .await?;
     let result =
         litecord_ui::run_with_options(app.clone(), tokio::runtime::Handle::current(), options);
     let report = app.shutdown().await;
@@ -251,10 +257,10 @@ async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core:
     Ok(())
 }
 
-async fn mcp(cfg: LitecordConfig) -> litecord_core::Result<()> {
+async fn mcp(cfg: LitecordConfig, harness: &str) -> litecord_core::Result<()> {
     let db = Database::open(cfg.database_path(), &cfg.database)?;
     let gateway = standalone_gateway(db, &cfg)?;
-    let mut server = McpServer::new(gateway, "mcp");
+    let mut server = McpServer::new(gateway, harness);
     tracing::info!(db = %cfg.database_path().display(), "MCP server on stdio");
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     litecord_mcp::serve(&mut server, stdin, tokio::io::stdout())
@@ -275,6 +281,41 @@ fn status(cfg: &LitecordConfig) -> litecord_core::Result<()> {
     })?;
     print_json(&v);
     Ok(())
+}
+
+/// Offer Omni harnesses: Codex and OpenCode when compiled in (used only if
+/// installed), plus the clearly labelled demo harness on the demo backend.
+/// The harness runs this executable as its MCP server.
+#[cfg(feature = "gui")]
+fn with_omni(
+    mut builder: litecord_app::AppBuilder,
+    cfg: &LitecordConfig,
+) -> litecord_app::AppBuilder {
+    use std::sync::Arc;
+    #[cfg(feature = "omni-codex")]
+    {
+        builder = builder.omni_launcher(Arc::new(litecord_harness::codex::CodexLauncher {
+            path: cfg.omni.codex_path.clone(),
+        }));
+    }
+    #[cfg(feature = "omni-opencode")]
+    {
+        builder = builder.omni_launcher(Arc::new(litecord_harness::opencode::OpenCodeLauncher {
+            path: cfg.omni.opencode_path.clone(),
+        }));
+    }
+    if cfg.backend.kind == BackendKind::Demo {
+        builder = builder.omni_launcher(Arc::new(litecord_harness::FakeLauncher::new(
+            litecord_harness::FakeDriver::demo(),
+        )));
+    }
+    match std::env::current_exe() {
+        Ok(exe) => builder.omni_mcp_command(exe),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot locate own executable; Omni unavailable");
+            builder
+        }
+    }
 }
 
 /// Attach the real application-bot source when built with `discord-bot` and

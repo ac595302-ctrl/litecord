@@ -7,6 +7,7 @@
 
 mod app;
 pub mod freshness;
+pub mod omni;
 pub mod people;
 mod recovery;
 pub mod rooms;
@@ -16,3 +17,5 @@ pub mod view;
 pub mod workspace;
 
 pub use app::{standalone_gateway, AppBuilder, LitecordApp};
+pub use litecord_harness as harness;
+pub use omni::{HeartbeatOutcome, OmniCheckin, OmniEvent, OmniService, OmniStatus, OmniViewModel};

@@ -22,6 +22,7 @@ fn parse_kind(s: &str) -> Result<LocalEntityKind, ValidationError> {
         "project" => Ok(LocalEntityKind::Project),
         "person" => Ok(LocalEntityKind::Person),
         "entity" => Ok(LocalEntityKind::Other),
+        "omni_session" => Ok(LocalEntityKind::OmniSession),
         _ => Err(ValidationError::Parse {
             what: "LocalEntityKind",
             input: s.to_owned(),

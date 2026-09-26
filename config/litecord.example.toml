@@ -56,6 +56,23 @@ allow_relationship_proposals = false
 auto_approve_local_writes = true
 default_token_budget = 8000
 
+[omni]
+# codex_path = "/usr/local/bin/codex"       # unset = search PATH
+# opencode_path = "/usr/local/bin/opencode"
+# model = "gpt-5-codex"                      # unset = the harness default
+idle_shutdown_secs = 600
+approval_timeout_secs = 120
+keep_archived_sessions = 50
+
+[omni.heartbeat]
+enabled = false
+min_interval_mins = 60
+max_per_hour = 2
+max_actions = 3
+allow_proposals = false
+quiet_start_hour = 22   # UTC; equal start/end disables quiet hours
+quiet_end_hour = 7
+
 [logging]
 filter = "info"
 log_message_content = false

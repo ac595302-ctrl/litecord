@@ -58,6 +58,24 @@ pub fn since(conn: &Connection, after: Revision, limit: u32) -> StoreResult<Vec<
     Ok(out)
 }
 
+/// Content-free change summary: `(kind, count)` of events with
+/// `revision > after`, excluding events whose origin is `exclude_source`
+/// (e.g. `agent_derived`, so an agent's own writes don't wake it again).
+pub fn kind_counts_since(
+    conn: &Connection,
+    after: Revision,
+    exclude_source: &str,
+) -> StoreResult<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, COUNT(*) FROM events WHERE revision > ?1 AND source != ?2 \
+         GROUP BY kind ORDER BY kind",
+    )?;
+    let rows = stmt.query_map(params![after.get() as i64, exclude_source], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Events about `entity`, newest first.
 pub fn for_entity(
     conn: &Connection,

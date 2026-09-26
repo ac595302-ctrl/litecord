@@ -1,0 +1,30 @@
+[package]
+name = "litecord-harness"
+description = "Drivers that let Omni run on the user's own agent harness (Codex app-server, OpenCode server) as a lazily started sidecar. No provider credentials pass through Litecord."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Codex `app-server` over stdio JSON-RPC.
+codex = ["tokio/process"]
+# OpenCode `serve` over loopback HTTP + SSE.
+opencode = ["tokio/process", "dep:reqwest", "dep:futures-util", "dep:getrandom"]
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest = { workspace = true, optional = true, features = ["stream"] }
+futures-util = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -21,6 +21,8 @@ pub enum LocalEntityKind {
     Project,
     Person,
     Other,
+    /// An Omni session (the source of Omni-derived memories).
+    OmniSession,
 }
 
 impl LocalEntityKind {
@@ -30,6 +32,7 @@ impl LocalEntityKind {
             LocalEntityKind::Project => "project",
             LocalEntityKind::Person => "person",
             LocalEntityKind::Other => "entity",
+            LocalEntityKind::OmniSession => "omni_session",
         }
     }
 }
@@ -125,6 +128,7 @@ impl FromStr for EntityId {
             "project" => EntityId::Local(LocalEntityKind::Project, raw.parse()?),
             "person" => EntityId::Local(LocalEntityKind::Person, raw.parse()?),
             "entity" => EntityId::Local(LocalEntityKind::Other, raw.parse()?),
+            "omni_session" => EntityId::Local(LocalEntityKind::OmniSession, raw.parse()?),
             _ => return Err(err()),
         })
     }
