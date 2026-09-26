@@ -3,12 +3,16 @@
 Agreed September 26, 2026. Each stage ships separately with tests and an
 entry in `HANDOFF.md`.
 
-## Not planned: user-account session (self-bot)
+## Stage B: experimental read-only account connection
 
-Litecord will not connect as the user's own account through the Gateway or
-REST with a user token. Discord prohibits automating user accounts outside
-OAuth2 and the bot API. Account breadth comes from the supported sources
-below instead.
+The user-requested Part B architecture is implemented behind the opt-in
+`discord-user-session` feature. Owner-supplied credentials, OS keyring storage,
+distinct source identity, bounded ingest, atomic history/recovery checkpoints,
+and account isolation are covered by scripted tests. Live account protocol
+compatibility remains unverified. This source does not add account writes or
+claim supported Social SDK access. Discord's account-automation restrictions
+are surfaced in Settings. Technical details and build commands:
+[`PART_B_ACCOUNT_PIPELINE.md`](PART_B_ACCOUNT_PIPELINE.md).
 
 ## 1. Omni: full Codex/OpenCode integration and automations (done)
 
@@ -70,10 +74,14 @@ below instead.
 - **Process:** a resumable background job whose results go through the
   reducer.
 
-## 5. Multi-source provenance
+## 5. Multi-source provenance (message observations implemented)
 
 A message observed by more than one source (SDK, bot, import) is stored once,
 and every source that observed it is recorded.
+
+Migration 0008 adds per-message/per-origin observation times and deletion
+observations; canonical content remains one row. Migration 0007 scopes guild
+and channel membership retirement to the source that supplied the snapshot.
 
 ## 6. Stage D: identity-aware writes (done: replies)
 

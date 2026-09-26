@@ -1,0 +1,24 @@
+# Run from the repository root. This account source gets its own database;
+# do not point it at a data directory already used for synthetic demo data.
+# Credentials are entered in Settings and stored through the OS keyring. None
+# belong in this file.
+data_dir = ".litecord-account"
+
+[backend]
+kind = "user_session"
+demo_bot = false
+
+[runtime]
+event_queue_capacity = 1024
+event_queue_max_bytes = 8388608
+broadcast_capacity = 256
+memory_soft_limit_mb = 256
+
+[hydration]
+max_concurrent_jobs = 2
+history_page_size = 100
+history_page_interval_ms = 750
+history_idle_after_ms = 5000
+
+[retention]
+max_database_mb = 2048

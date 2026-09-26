@@ -19,6 +19,8 @@ use crate::ValidationError;
 pub enum Origin {
     /// Observed through the official Discord Social SDK (user identity).
     DiscordSocialSdk,
+    /// Observed through a user-owned Discord client session.
+    DiscordUserSession,
     /// Observed through an authorized application bot (bot identity).
     DiscordBotGateway,
     /// Typed or confirmed by the local user.
@@ -34,8 +36,9 @@ pub enum Origin {
 }
 
 impl Origin {
-    pub const ALL: [Origin; 7] = [
+    pub const ALL: [Origin; 8] = [
         Origin::DiscordSocialSdk,
+        Origin::DiscordUserSession,
         Origin::DiscordBotGateway,
         Origin::UserProvided,
         Origin::LocalApplication,
@@ -47,6 +50,7 @@ impl Origin {
     pub const fn as_str(self) -> &'static str {
         match self {
             Origin::DiscordSocialSdk => "discord_social_sdk",
+            Origin::DiscordUserSession => "discord_user_session",
             Origin::DiscordBotGateway => "discord_bot_gateway",
             Origin::UserProvided => "user_provided",
             Origin::LocalApplication => "local_application",
@@ -68,7 +72,10 @@ impl Origin {
 
     /// Whether this origin represents directly observed Discord data.
     pub const fn is_observed_discord(self) -> bool {
-        matches!(self, Origin::DiscordSocialSdk | Origin::DiscordBotGateway)
+        matches!(
+            self,
+            Origin::DiscordSocialSdk | Origin::DiscordUserSession | Origin::DiscordBotGateway
+        )
     }
 }
 
@@ -83,6 +90,8 @@ impl fmt::Display for Origin {
 #[serde(rename_all = "snake_case")]
 pub enum DiscordSource {
     SocialSdk,
+    /// Authorized user-owned Discord session.
+    UserSession,
     BotGateway,
     /// Mock/demo backend. Persisted with `Origin::Synthetic` so it can never be
     /// mistaken for real Discord content.
@@ -96,6 +105,7 @@ impl DiscordSource {
     pub const fn origin(self) -> Origin {
         match self {
             DiscordSource::SocialSdk => Origin::DiscordSocialSdk,
+            DiscordSource::UserSession => Origin::DiscordUserSession,
             DiscordSource::BotGateway => Origin::DiscordBotGateway,
             DiscordSource::Synthetic | DiscordSource::SyntheticBot => Origin::Synthetic,
         }
@@ -105,6 +115,7 @@ impl DiscordSource {
     pub const fn identity(self) -> DiscordIdentity {
         match self {
             DiscordSource::SocialSdk | DiscordSource::Synthetic => DiscordIdentity::UserSocialSdk,
+            DiscordSource::UserSession => DiscordIdentity::UserSession,
             DiscordSource::BotGateway | DiscordSource::SyntheticBot => {
                 DiscordIdentity::ApplicationBot
             }
@@ -119,6 +130,7 @@ impl DiscordSource {
 pub enum DiscordIdentity {
     #[default]
     UserSocialSdk,
+    UserSession,
     ApplicationBot,
 }
 
@@ -126,6 +138,7 @@ impl DiscordIdentity {
     pub const fn as_str(self) -> &'static str {
         match self {
             DiscordIdentity::UserSocialSdk => "user_social_sdk",
+            DiscordIdentity::UserSession => "user_session",
             DiscordIdentity::ApplicationBot => "application_bot",
         }
     }
@@ -202,6 +215,51 @@ mod tests {
         assert_eq!(
             DiscordSource::BotGateway.identity(),
             DiscordIdentity::ApplicationBot
+        );
+    }
+
+    #[test]
+    fn user_session_source_keeps_user_session_provenance() {
+        assert_eq!(
+            DiscordSource::UserSession.origin(),
+            Origin::DiscordUserSession
+        );
+        assert_eq!(
+            DiscordSource::UserSession.identity(),
+            DiscordIdentity::UserSession
+        );
+        assert!(Origin::DiscordUserSession.is_observed_discord());
+        assert_eq!(Origin::DiscordUserSession.as_str(), "discord_user_session");
+        assert_eq!(DiscordIdentity::UserSession.as_str(), "user_session");
+    }
+
+    #[test]
+    fn user_session_types_serde_roundtrip() {
+        let origin = Origin::DiscordUserSession;
+        assert_eq!(
+            serde_json::to_string(&origin).unwrap(),
+            "\"discord_user_session\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Origin>("\"discord_user_session\"").unwrap(),
+            origin
+        );
+
+        let source = DiscordSource::UserSession;
+        assert_eq!(serde_json::to_string(&source).unwrap(), "\"user_session\"");
+        assert_eq!(
+            serde_json::from_str::<DiscordSource>("\"user_session\"").unwrap(),
+            source
+        );
+
+        let identity = DiscordIdentity::UserSession;
+        assert_eq!(
+            serde_json::to_string(&identity).unwrap(),
+            "\"user_session\""
+        );
+        assert_eq!(
+            serde_json::from_str::<DiscordIdentity>("\"user_session\"").unwrap(),
+            identity
         );
     }
 

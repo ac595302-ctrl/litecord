@@ -16,7 +16,6 @@ use litecord_store::Database;
 use litecord_types::entity::EntityId;
 use litecord_types::ids::*;
 use litecord_types::memory::{MemoryItem, MemoryStatus};
-use litecord_types::provenance::DiscordIdentity;
 use litecord_types::tasks::{ReminderStatus, TaskStatus};
 use litecord_types::trust::{AgentVisibility, TrustLevel};
 use litecord_types::{DurationMs, Timestamp};
@@ -145,7 +144,7 @@ impl ContextCompiler {
         let mut excluded = ExclusionStats::default();
 
         // 1. Identity.
-        let me = repos::accounts::current(r, DiscordIdentity::UserSocialSdk)?.map(|a| a.user_id);
+        let me = repos::accounts::current_user(r)?.map(|a| a.user_id);
         let identity = match me {
             Some(id) => Some(UserContext {
                 user_id: id,

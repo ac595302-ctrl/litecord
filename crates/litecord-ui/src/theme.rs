@@ -468,7 +468,7 @@ pub fn pill(ui: &mut Ui, label: &str, badge: Option<usize>, selected: bool) -> e
 pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
     egui::Frame::new()
         .fill(WORKSPACE)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .corner_radius(8)
         .inner_margin(egui::Margin {
             left: 28,

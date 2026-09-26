@@ -779,7 +779,7 @@ fn task_action(args: &Value) -> Result<AgentAction, ToolError> {
 // ---- rendering helpers ----
 
 fn current_user(conn: &Connection) -> Result<Option<UserId>, ToolError> {
-    Ok(repos::accounts::current(conn, DiscordIdentity::UserSocialSdk)?.map(|a| a.user_id))
+    Ok(repos::accounts::current_user(conn)?.map(|a| a.user_id))
 }
 
 fn user_name(conn: &Connection, id: UserId) -> Result<String, ToolError> {

@@ -161,7 +161,7 @@ impl Workspace {
             let painter = ui.painter();
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                Stroke::new(1.0, theme::BORDER),
+                Stroke::new(1.0_f32, theme::BORDER),
             );
             let text =
                 painter.layout_no_wrap(day.clone(), FontId::proportional(12.0), theme::MUTED);
@@ -275,7 +275,7 @@ impl Workspace {
             } else {
                 theme::RAISED
             },
-            Stroke::new(1.0, theme::BORDER),
+            Stroke::new(1.0_f32, theme::BORDER),
             egui::StrokeKind::Inside,
         );
         painter.text(
@@ -432,7 +432,7 @@ impl Workspace {
             draft_len = draft.trim().chars().count();
             egui::Frame::new()
                 .fill(theme::RAISED)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .stroke(Stroke::new(1.0_f32, theme::BORDER))
                 .corner_radius(10)
                 .inner_margin(egui::Margin {
                     left: 12,
@@ -477,6 +477,7 @@ impl Workspace {
             let who = match identity {
                 Some(DiscordIdentity::ApplicationBot) => "Sending as your bot",
                 Some(DiscordIdentity::UserSocialSdk) => "Sending as you",
+                Some(DiscordIdentity::UserSession) => "User session (read only)",
                 None => "Read only here · use Open in Discord to reply",
             };
             ui.label(theme::meta(who));

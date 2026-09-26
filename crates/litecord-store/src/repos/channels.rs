@@ -66,7 +66,18 @@ pub fn upsert(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
-    guilds::ensure_stub(tx, channel.guild_id, origin, observed_at)?;
+    upsert_from_source(tx, channel, origin, origin.as_str(), observed_at)
+}
+
+/// Upsert a channel and record that `source` currently retains it.
+pub fn upsert_from_source(
+    tx: &WriteTx<'_>,
+    channel: &Channel,
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
+    guilds::ensure_stub_from_source(tx, channel.guild_id, origin, source, observed_at)?;
     let n = tx.execute(
         "INSERT INTO channels (id, guild_id, name, kind, position, parent_id, access, capabilities, removed, origin, observed_at, revision)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11)
@@ -104,8 +115,15 @@ pub fn upsert(
             tx.revision().get() as i64,
         ],
     )?;
-    let changed = n > 0;
-    if changed {
+    let membership_changed = tx.execute(
+        "INSERT INTO channel_source_memberships (source, guild_id, channel_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(source, channel_id) DO UPDATE SET guild_id = excluded.guild_id
+         WHERE channel_source_memberships.guild_id IS NOT excluded.guild_id",
+        params![source, channel.guild_id.to_sql(), channel.id.to_sql()],
+    )? > 0;
+    let canonical_changed = n > 0;
+    if canonical_changed {
         tx.emit(
             UnifiedEvent::ChannelObserved {
                 channel_id: channel.id,
@@ -113,7 +131,7 @@ pub fn upsert(
             origin,
         )?;
     }
-    Ok(changed)
+    Ok(canonical_changed || membership_changed)
 }
 
 /// Replace the authoritative channel list for one guild: upsert every
@@ -126,17 +144,33 @@ pub fn replace_for_guild(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
+    replace_for_guild_from_source(tx, guild_id, channels, origin, origin.as_str(), observed_at)
+}
+
+/// Replace one source's channel membership for a guild. A channel remains
+/// globally active while any source still retains it.
+pub fn replace_for_guild_from_source(
+    tx: &WriteTx<'_>,
+    guild_id: GuildId,
+    channels: &[Channel],
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
     let mut changed = false;
     let mut keep: Vec<ChannelId> = Vec::with_capacity(channels.len());
     for c in channels {
         keep.push(c.id);
-        if upsert(tx, c, origin, observed_at)? {
+        if upsert_from_source(tx, c, origin, source, observed_at)? {
             changed = true;
         }
     }
-    let existing: Vec<ChannelId> = {
-        let mut stmt = tx.prepare("SELECT id FROM channels WHERE guild_id = ?1 AND removed = 0")?;
-        let rows = stmt.query_map(params![guild_id.to_sql()], |r| {
+    let source_channels: Vec<ChannelId> = {
+        let mut stmt = tx.prepare(
+            "SELECT channel_id FROM channel_source_memberships
+             WHERE source = ?1 AND guild_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![source, guild_id.to_sql()], |r| {
             Ok(ChannelId::from_sql(r.get(0)?))
         })?;
         let mut out = Vec::new();
@@ -145,10 +179,72 @@ pub fn replace_for_guild(
         }
         out
     };
-    for id in existing {
-        if keep.contains(&id) {
-            continue;
+    for id in source_channels {
+        if !keep.contains(&id)
+            && remove_source_for_channel(tx, id, guild_id, origin, source, observed_at)?
+        {
+            changed = true;
         }
+    }
+    Ok(changed)
+}
+
+/// Remove all channel memberships for a source within a guild. Used when the
+/// source itself leaves that guild. Global channel rows are retired only when
+/// no other source retains them.
+pub fn remove_source_for_guild(
+    tx: &WriteTx<'_>,
+    guild_id: GuildId,
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
+    let ids: Vec<ChannelId> = {
+        let mut stmt = tx.prepare(
+            "SELECT channel_id FROM channel_source_memberships
+             WHERE source = ?1 AND guild_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![source, guild_id.to_sql()], |r| {
+            Ok(ChannelId::from_sql(r.get(0)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out
+    };
+    let mut changed = false;
+    for id in ids {
+        if remove_source_for_channel(tx, id, guild_id, origin, source, observed_at)? {
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn remove_source_for_channel(
+    tx: &WriteTx<'_>,
+    id: ChannelId,
+    guild_id: GuildId,
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
+    let membership_removed = tx.execute(
+        "DELETE FROM channel_source_memberships
+         WHERE source = ?1 AND channel_id = ?2 AND guild_id = ?3",
+        params![source, id.to_sql(), guild_id.to_sql()],
+    )? > 0;
+    if !membership_removed {
+        return Ok(false);
+    }
+
+    let retained: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM channel_source_memberships WHERE channel_id = ?1)",
+        params![id.to_sql()],
+        |r| Ok(r.get::<_, i64>(0)? != 0),
+    )?;
+    if !retained {
         let n = tx.execute(
             "UPDATE channels SET removed = 1, origin = ?1, observed_at = ?2, revision = ?3
              WHERE id = ?4 AND removed = 0",
@@ -160,11 +256,10 @@ pub fn replace_for_guild(
             ],
         )?;
         if n > 0 {
-            changed = true;
             tx.emit(UnifiedEvent::ChannelRemoved { channel_id: id }, origin)?;
         }
     }
-    Ok(changed)
+    Ok(true)
 }
 
 /// Look up one channel.

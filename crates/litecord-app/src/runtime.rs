@@ -44,7 +44,10 @@ pub(crate) struct ReactorCtx {
 const WARM_CONVERSATIONS: usize = 8;
 
 impl ReactorCtx {
-    fn handle(&self, env: litecord_core::events::SourceEnvelope) {
+    fn handle(
+        &self,
+        env: litecord_core::events::SourceEnvelope,
+    ) -> Result<litecord_types::Revision, litecord_core::bus::IngestCommitError> {
         let kind = env.event.kind();
         // Follow-ups go back to the source that produced the event.
         let is_bot = env.source.identity() == DiscordIdentity::ApplicationBot;
@@ -73,7 +76,7 @@ impl ReactorCtx {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(kind, error = %e, "reducer failed; event skipped");
-                return;
+                return Err(litecord_core::bus::IngestCommitError);
             }
         };
         self.metrics.events_ingested.inc();
@@ -117,6 +120,7 @@ impl ReactorCtx {
                 }
             }
         }
+        Ok(committed.revision)
     }
 }
 
@@ -128,21 +132,24 @@ pub(crate) async fn event_reactor(
     loop {
         let env = tokio::select! {
             _ = token.cancelled() => break,
-            env = rx.recv() => env,
+            env = rx.recv_delivery() => env,
         };
         let Some(env) = env else { break };
-        ctx.handle(env);
+        env.reduce(|env| ctx.handle(env));
         if rx.take_overflow() {
             tracing::warn!("ingest overflow detected; requesting resync");
             ctx.bus.publish(ApplicationEvent::ResyncRequired {
                 reason: "event queue overflow".into(),
             });
             ctx.hydrator.on_resync_required();
+            if let Some(bot) = &ctx.bot_hydrator {
+                bot.on_resync_required();
+            }
         }
     }
     // Drain what is already queued so shutdown does not lose observed state.
-    while let Some(env) = rx.try_recv() {
-        ctx.handle(env);
+    while let Some(env) = rx.try_recv_delivery() {
+        env.reduce(|env| ctx.handle(env));
     }
     Ok(())
 }

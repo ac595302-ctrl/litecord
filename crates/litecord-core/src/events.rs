@@ -171,6 +171,13 @@ pub enum DiscordEvent {
         conversation_id: ConversationId,
         messages: Vec<Message>,
     },
+    /// A verified forward REST page. Its independent recovery cursor commits
+    /// with the rows; it never changes Stage C's backward-history checkpoint.
+    MessagesCatchupPage {
+        conversation_id: ConversationId,
+        messages: Vec<Message>,
+        has_more: bool,
+    },
     /// The adapter knows something changed but could not resolve it; the
     /// hydrator should fetch `key`.
     Invalidated {
@@ -202,6 +209,7 @@ impl DiscordEvent {
             DiscordEvent::ConversationsSnapshot { .. } => "conversations_snapshot",
             DiscordEvent::MessagesSnapshot { .. } => "messages_snapshot",
             DiscordEvent::MessagesPage { .. } => "messages_page",
+            DiscordEvent::MessagesCatchupPage { .. } => "messages_catchup_page",
             DiscordEvent::Invalidated { .. } => "invalidated",
         }
     }
@@ -331,7 +339,8 @@ impl DiscordEvent {
                 conversations.iter().map(conversation_bytes).sum()
             }
             DiscordEvent::MessagesSnapshot { messages, .. }
-            | DiscordEvent::MessagesPage { messages, .. } => {
+            | DiscordEvent::MessagesPage { messages, .. }
+            | DiscordEvent::MessagesCatchupPage { messages, .. } => {
                 messages.iter().map(message_approx_bytes).sum()
             }
         };
@@ -386,6 +395,13 @@ pub enum UnifiedEvent {
         conversation_id: ConversationId,
     },
     MessageCreated {
+        message_id: MessageId,
+        conversation_id: ConversationId,
+    },
+    /// A message first learned from a historical snapshot or backfill page.
+    /// Kept distinct from live creation so event-triggered automations do not
+    /// treat old history as a newly received message.
+    MessageImported {
         message_id: MessageId,
         conversation_id: ConversationId,
     },
@@ -484,6 +500,7 @@ impl UnifiedEvent {
             UnifiedEvent::ChannelRemoved { .. } => "channel_removed",
             UnifiedEvent::ConversationObserved { .. } => "conversation_observed",
             UnifiedEvent::MessageCreated { .. } => "message_created",
+            UnifiedEvent::MessageImported { .. } => "message_imported",
             UnifiedEvent::MessageUpdated { .. } => "message_updated",
             UnifiedEvent::MessageDeleted { .. } => "message_deleted",
             UnifiedEvent::LobbyUpdated { .. } => "lobby_updated",
@@ -531,6 +548,7 @@ impl UnifiedEvent {
                 EntityId::Conversation(*conversation_id)
             }
             UnifiedEvent::MessageCreated { message_id, .. }
+            | UnifiedEvent::MessageImported { message_id, .. }
             | UnifiedEvent::MessageUpdated { message_id, .. }
             | UnifiedEvent::MessageDeleted { message_id, .. }
             | UnifiedEvent::BookmarkChanged { message_id } => EntityId::Message(*message_id),
@@ -621,5 +639,12 @@ mod tests {
         };
         assert_eq!(e.entity(), Some(EntityId::Message(MessageId(5))));
         assert_eq!(UnifiedEvent::SessionChanged.entity(), None);
+
+        let imported = UnifiedEvent::MessageImported {
+            message_id: MessageId(7),
+            conversation_id: ConversationId(8),
+        };
+        assert_eq!(imported.kind(), "message_imported");
+        assert_eq!(imported.entity(), Some(EntityId::Message(MessageId(7))));
     }
 }

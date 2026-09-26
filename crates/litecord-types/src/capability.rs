@@ -95,9 +95,27 @@ impl CapabilitySet {
 #[serde(rename_all = "snake_case")]
 pub enum BackendMode {
     FullSocialSdk,
+    UserSession,
     PresenceOnly,
     Demo,
     BotBridge,
+}
+
+#[cfg(test)]
+mod backend_mode_tests {
+    use super::BackendMode;
+
+    #[test]
+    fn user_session_backend_mode_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&BackendMode::UserSession).unwrap(),
+            "\"user_session\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BackendMode>("\"user_session\"").unwrap(),
+            BackendMode::UserSession
+        );
+    }
 }
 
 /// Where to send the user when content is only available in Discord itself.
@@ -188,7 +206,25 @@ mod tests {
 pub enum AuthStep {
     /// Credentials are already valid; nothing to do.
     AlreadySignedIn,
+    /// A user-owned session credential is required (distinct from OAuth).
+    SessionCredential { label: String },
     /// Open `url` in the system browser (always a user action), then pass
     /// the redirect URL Discord sends back to `complete_sign_in`.
     OpenBrowser { url: String, redirect_uri: String },
+}
+
+#[cfg(test)]
+mod auth_step_tests {
+    use super::AuthStep;
+
+    #[test]
+    fn session_credential_step_serde_roundtrip() {
+        let step = AuthStep::SessionCredential {
+            label: "Discord user session".into(),
+        };
+        let encoded = serde_json::to_string(&step).unwrap();
+        assert_eq!(serde_json::from_str::<AuthStep>(&encoded).unwrap(), step);
+        assert!(encoded.contains("session_credential"));
+        assert!(encoded.contains("Discord user session"));
+    }
 }

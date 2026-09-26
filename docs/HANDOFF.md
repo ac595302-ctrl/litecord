@@ -31,7 +31,7 @@ log tracks the remaining work.
   writes (no row changes, no events) roll back and do not bump. Reads run in a
   deferred tx (consistent WAL snapshot) and expose `ReadTx::revision()`.
 * Canonical Discord tables can only be written by the reducer from a
-  `DiscordSource` (SocialSdk | BotGateway | Synthetic). Demo data is
+  `DiscordSource` (SocialSdk | UserSession | BotGateway | Synthetic). Demo data is
   `Origin::Synthetic`.
 * All SQL lives in `litecord-store::repos`. FTS5 external-content tables are
   kept in sync by triggers (see `migrations/0001_initial.sql`). Untrusted query
@@ -309,3 +309,61 @@ there first (e.g. renderer choice, font subsetting, texture sizes).
   worktrees (`git worktree remove`) or the disk fills and linking fails.
 * Internally tagged serde enums cannot wrap bare strings or nest another
   internally tagged enum in a tuple variant — use struct variants.
+
+## Part B — experimental account pipeline (September 26, 2026)
+
+Implemented the user-requested architecture from `message(3).txt` on top of
+main's Stage A/C/D work. The opt-in `discord-user-session` desktop feature adds
+an owner-supplied, read-only account adapter; it does not use or complete the
+Social SDK skeleton. The native Settings card submits a masked Secret to an
+explicit authentication method. Windows Credential Manager stores it under a
+namespace derived from the database path. Saved credentials are verified
+against the pinned account before hydration can read any account data.
+
+Gateway/REST events use distinct UserSession identity and origin, the existing
+count/byte bounded queue, and the canonical reducer. Critical live mutations
+await commit acknowledgement; metadata overflow requests reconciliation.
+Logout clears the credential and advances its epoch atomically before joining
+the driver; guarded old deliveries cannot commit as current-session work.
+Stage C pages now await commit. The account-recovery worker has a separate
+REST watermark which live events never advance over gaps. Migrations 0006–8
+add delete-before-history tombstones, source-scoped guild/channel memberships,
+forward recovery checkpoints, and per-source message observations. Historical
+insertions emit MessageImported and do not trigger new-message automations.
+User-session writes are rejected by both capability/action routing and GET-only
+HTTP enforcement. No voice/media subsystem or second data store was added.
+
+Verification at this checkpoint: account create/edit/delete/logout integration
+passed; three saved-credential/account-isolation regressions passed; core queue
+ack/epoch tests passed; GUI+account workspace compilation passed. Full-feature
+workspace tests, strict Clippy, release packaging, and screenshot review are
+being finalized in the next batch. Real account authentication/protocol and
+native keyring round-trip have not been exercised with an owner credential.
+Build/run/schema/limits are described in `PART_B_ACCOUNT_PIPELINE.md`.
+
+## Part B verification and merged-main submission
+
+Merged remote main through `3df029e`, retaining the other model's Stage A/C/D
+measurements, narrow-panel fixes, and actual-window-size reporting. Resolved
+the roadmap conflict by retaining both the account pipeline and Stage D reply
+status. The merged workspace tests pass with GUI and account network features;
+strict all-target/all-feature Clippy passes with `-D warnings` (the proprietary
+Social SDK bridge build script still notes the intentionally absent SDK).
+Rust 1.98 UI float literals were made explicit without changing the design.
+
+Account regressions: 3 scripted lifecycle/reconnect tests, 3 isolation tests,
+and 5 store recovery/provenance tests pass. Windows native Credential Manager
+save/read/remove passed with a temporary dummy entry outside the sandbox;
+that entry was removed. An account-mode Settings screenshot starts with a
+fresh database, applies all eight migrations, and closes all ten supervised
+tasks without aborts. The screenshot was checked against mock PDF page 15;
+existing theme/layout remain, with a new connection card and accurate empty
+account state. This is not a claim of pixel-perfect recreation of every mock.
+
+No real Discord credential was supplied or used. Live account Identify,
+subscriptions, permissions, and long disconnected edit/delete gaps still need
+owner-driven validation. Forward recovery verifies cached conversations and
+selected backfill; it does not promise an exhaustive account archive. Disk
+quota gates background history/recovery, not live-ingest hard storage size.
+The release submission bundles the executable, separate account/demo launchers,
+example config, architecture guide, test/lint evidence, and GUI screenshots.

@@ -1,7 +1,7 @@
 # Litecord
 
-A native, lightweight Discord social client written in Rust on Discord's
-**official** Social SDK, with a first-class **Unified Memory and Agent layer**:
+A native, lightweight Discord workspace written in Rust, with a first-class
+**Unified Memory and Agent layer**:
 local, provenance-tracked knowledge that external agents (Codex, OpenCode, …)
 can query through MCP, with every Discord-side action gated by explicit user
 approval.
@@ -23,11 +23,19 @@ marked skeleton (the SDK is proprietary and not vendored). See
 [`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md) for current behavior and
 limits, and [`docs/HANDOFF.md`](docs/HANDOFF.md) for next steps.
 
+Part B adds an opt-in **experimental read-only account source** over Gateway
+and REST, with OS credential storage, account isolation, live message
+ingestion, and durable history/reconnect recovery. Its automated tests use
+scripted transports; a real Discord account handshake has not been verified.
+See [`docs/PART_B_ACCOUNT_PIPELINE.md`](docs/PART_B_ACCOUNT_PIPELINE.md) for
+the complete pipeline, protocol limits, and submission/run instructions.
+
 ## Quick start
 
 ```sh
 cargo test --workspace                       # no credentials needed
 cargo run -p litecord-desktop --features gui -- gui
+cargo run -p litecord-desktop --features gui,discord-user-session -- --config config/litecord.account.example.toml gui
 cargo run -p litecord-desktop -- demo --in-memory  # headless synthetic demo
 cargo run -p litecord-desktop -- mcp --data-dir .litecord   # MCP server on stdio
 ```
@@ -68,7 +76,8 @@ this is exercised through the mock backend.
 |---|---|
 | Mock/demo backend | complete, deterministic, labelled synthetic |
 | Social SDK backend + FFI bridge | skeleton (unverified against the SDK) |
-| Bot gateway adapter | not started (provenance/identity plumbing exists) |
+| Bot gateway adapter | implemented; optional `discord-bot` network feature |
+| Read-only user-session source | experimental; scripted end-to-end tests, live protocol unverified |
 | Summaries / LLM extraction | not started (non-LLM heuristics work) |
 
 ## MCP

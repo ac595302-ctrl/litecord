@@ -45,6 +45,7 @@ pub mod convert;
 pub mod fixtures;
 pub mod mock;
 pub mod oauth;
+pub mod user_session;
 
 #[cfg(feature = "discord-social-sdk")]
 pub mod social_sdk;

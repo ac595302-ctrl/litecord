@@ -23,6 +23,7 @@ pub mod users;
 pub mod voice;
 
 // Event log and hydration bookkeeping
+pub mod account_catchup;
 pub mod events;
 pub mod history_sync;
 pub mod hydration_jobs;

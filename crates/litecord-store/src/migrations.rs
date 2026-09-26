@@ -46,6 +46,21 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "history_sync",
         sql: include_str!("../../../migrations/0005_history_sync.sql"),
     },
+    Migration {
+        version: 6,
+        name: "message_tombstones",
+        sql: include_str!("../../../migrations/0006_message_tombstones.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "source_memberships",
+        sql: include_str!("../../../migrations/0007_source_memberships.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "account_recovery",
+        sql: include_str!("../../../migrations/0008_account_recovery.sql"),
+    },
 ];
 
 pub fn latest_version() -> u32 {
@@ -122,7 +137,7 @@ mod tests {
         .unwrap();
 
         let applied = run(&mut conn).unwrap();
-        assert_eq!(applied, vec![2, 3, 4, 5]);
+        assert_eq!(applied, vec![2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(current_version(&conn).unwrap(), latest_version());
 
         let priority: String = conn
@@ -144,7 +159,8 @@ mod tests {
         assert_eq!(parent_id, None);
     }
 
-    /// A v4 database gains the (empty) `history_sync` table.
+    /// A v4 database gains history, message tombstones and source membership
+    /// tables, including backfills for existing canonical rows.
     #[test]
     fn upgrade_from_v4_adds_history_sync() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -164,10 +180,75 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(run(&mut conn).unwrap(), vec![5]);
+        conn.execute(
+            "INSERT INTO conversations (id, kind, origin, observed_at, revision)
+             VALUES (10, 'dm', 'synthetic', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages
+                (id, conversation_id, author_id, content, sent_at, deleted, origin, observed_at, revision)
+             VALUES (99, 10, 20, '', 1, 1, 'synthetic', 2, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO guilds (id, name, departed, origin, observed_at, revision)
+             VALUES (20, 'guild', 0, 'discord_user_session', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO channels
+                (id, guild_id, name, kind, position, access, capabilities, removed, origin, observed_at, revision)
+             VALUES (200, 20, 'general', 'text', 0, 'native', 1, 0, 'discord_bot_gateway', 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(run(&mut conn).unwrap(), vec![5, 6, 7, 8]);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM history_sync", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+        let tombstones: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 1);
+        let tombstone_conversation: i64 = conn
+            .query_row(
+                "SELECT conversation_id FROM message_tombstones WHERE message_id = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstone_conversation, 10);
+        let guild_membership: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM guild_source_memberships
+                 WHERE source = 'discord_user_session' AND guild_id = 20",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(guild_membership, 1);
+        let channel_guild_membership: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM guild_source_memberships
+                 WHERE source = 'discord_bot_gateway' AND guild_id = 20",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(channel_guild_membership, 1);
+        let channel_membership: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_source_memberships
+                 WHERE source = 'discord_bot_gateway' AND channel_id = 200",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(channel_membership, 1);
     }
 }

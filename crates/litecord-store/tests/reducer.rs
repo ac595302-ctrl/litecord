@@ -7,15 +7,15 @@
 use litecord_core::events::{DiscordEvent, HydrationKey, SourceEnvelope, UnifiedEvent};
 use litecord_types::provenance::{DiscordSource, Origin};
 use litecord_types::social::{
-    Conversation, ConversationKind, Message, Presence, PresenceStatus, Relationship,
-    RelationshipKind,
+    Channel, ChannelAccess, ChannelCapabilities, ChannelKind, Conversation, ConversationKind,
+    Guild, Message, Presence, PresenceStatus, Relationship, RelationshipKind,
 };
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{ConversationId, MessageId, Revision, Timestamp, UserId};
 
 use litecord_store::reducer::{self, Followup, ReducerConfig};
 use litecord_store::repos::fts::FtsMode;
-use litecord_store::repos::{conversations, messages, sync_state, users};
+use litecord_store::repos::{channels, conversations, guilds, messages, sync_state, users};
 use litecord_store::repos::{hydration_jobs, messages::MessageSearch};
 use litecord_store::Database;
 
@@ -29,6 +29,27 @@ fn msg(id: u64, conv: u64, author: u64, content: &str, sent_at: i64) -> Message 
         edited_at: None,
         reply_to: None,
         extras: Vec::new(),
+    }
+}
+
+fn guild(id: u64, name: &str) -> Guild {
+    Guild {
+        id: litecord_types::GuildId(id),
+        name: name.into(),
+        icon_url: None,
+    }
+}
+
+fn channel(id: u64, guild_id: u64, name: &str) -> Channel {
+    Channel {
+        id: litecord_types::ChannelId(id),
+        guild_id: litecord_types::GuildId(guild_id),
+        name: name.into(),
+        kind: ChannelKind::Text,
+        position: 0,
+        parent_id: None,
+        access: ChannelAccess::Native,
+        capabilities: ChannelCapabilities::READABLE,
     }
 }
 
@@ -81,6 +102,10 @@ fn message_created_persists_advances_revision_and_follows_up() {
         message_id: MessageId(1),
         conversation_id: ConversationId(10),
     }));
+    assert!(!committed
+        .events
+        .iter()
+        .any(|event| matches!(event, UnifiedEvent::MessageImported { .. })));
 
     let followups = &committed.value.followups;
     assert!(followups.contains(&Followup::ExtractMemory {
@@ -547,7 +572,7 @@ fn messages_page_upserts_never_deletes_and_advances_cursor() {
     let recent: Vec<Message> = (100..105)
         .map(|i| msg(i, 10, 20, "recent", now - DAY + i as i64))
         .collect();
-    reducer::apply(
+    let snapshot = reducer::apply(
         &db,
         &envelope(
             DiscordSource::Synthetic,
@@ -560,6 +585,18 @@ fn messages_page_upserts_never_deletes_and_advances_cursor() {
         &cfg,
     )
     .unwrap();
+    assert_eq!(
+        snapshot
+            .events
+            .iter()
+            .filter(|event| matches!(event, UnifiedEvent::MessageImported { .. }))
+            .count(),
+        5
+    );
+    assert!(!snapshot
+        .events
+        .iter()
+        .any(|event| matches!(event, UnifiedEvent::MessageCreated { .. })));
     db.write(|tx| history_sync::request(tx, ConversationId(10)))
         .unwrap();
     let rec = db
@@ -580,12 +617,16 @@ fn messages_page_upserts_never_deletes_and_advances_cursor() {
     )
     .unwrap();
 
-    let created = committed
+    let imported = committed
         .events
         .iter()
-        .filter(|e| matches!(e, UnifiedEvent::MessageCreated { .. }))
+        .filter(|e| matches!(e, UnifiedEvent::MessageImported { .. }))
         .count();
-    assert_eq!(created, 10, "only the new messages produce events");
+    assert_eq!(imported, 10, "only the new messages produce events");
+    assert!(!committed
+        .events
+        .iter()
+        .any(|event| matches!(event, UnifiedEvent::MessageCreated { .. })));
     assert!(!committed.events.iter().any(|e| matches!(
         e,
         UnifiedEvent::MessageDeleted { .. } | UnifiedEvent::MessageUpdated { .. }
@@ -624,6 +665,248 @@ fn messages_page_upserts_never_deletes_and_advances_cursor() {
     .unwrap();
     assert!(committed.events.is_empty());
     assert!(committed.value.followups.is_empty());
+}
+
+#[test]
+fn message_delete_before_history_page_keeps_a_tombstone() {
+    let db = Database::open_in_memory().unwrap();
+    let cfg = ReducerConfig::default();
+    let deleted = reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::Synthetic,
+            100,
+            DiscordEvent::MessageDeleted {
+                message_id: MessageId(77),
+                conversation_id: ConversationId(10),
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(deleted.events.contains(&UnifiedEvent::MessageDeleted {
+        message_id: MessageId(77),
+        conversation_id: ConversationId(10),
+    }));
+
+    let page = reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::Synthetic,
+            200,
+            page(10, vec![msg(77, 10, 20, "late history", 50)]),
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(!page.events.iter().any(|event| matches!(
+        event,
+        UnifiedEvent::MessageCreated {
+            message_id: MessageId(77),
+            ..
+        } | UnifiedEvent::MessageImported {
+            message_id: MessageId(77),
+            ..
+        } | UnifiedEvent::MessageUpdated {
+            message_id: MessageId(77),
+            ..
+        }
+    )));
+    assert!(db
+        .read(|r| messages::get(r, MessageId(77)))
+        .unwrap()
+        .is_none());
+    let tombstones: i64 = db
+        .read(|r| {
+            Ok::<_, litecord_store::StoreError>(r.query_row(
+                "SELECT COUNT(*) FROM message_tombstones WHERE message_id = ?1",
+                [MessageId(77).to_sql()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(tombstones, 1);
+}
+
+#[test]
+fn stale_historical_edit_does_not_overwrite_newer_message() {
+    let db = Database::open_in_memory().unwrap();
+    let cfg = ReducerConfig::default();
+    let mut live = msg(88, 10, 20, "current edit", 50);
+    live.edited_at = Some(Timestamp::from_millis(300));
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::Synthetic,
+            400,
+            DiscordEvent::MessageUpdated {
+                message: live.clone(),
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+
+    let mut stale = msg(88, 10, 20, "older history", 50);
+    stale.edited_at = Some(Timestamp::from_millis(200));
+    let page = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, 500, page(10, vec![stale])),
+        &cfg,
+    )
+    .unwrap();
+    assert!(!page.events.iter().any(|event| matches!(
+        event,
+        UnifiedEvent::MessageUpdated {
+            message_id: MessageId(88),
+            ..
+        }
+    )));
+    let record = db
+        .read(|r| messages::get(r, MessageId(88)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.message.content.as_ref(), "current edit");
+    assert_eq!(record.message.edited_at, live.edited_at);
+}
+
+#[test]
+fn source_snapshots_only_retire_their_own_guilds_and_channels() {
+    let db = Database::open_in_memory().unwrap();
+    let cfg = ReducerConfig::default();
+
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::UserSession,
+            100,
+            DiscordEvent::GuildsSnapshot {
+                guilds: vec![guild(10, "shared"), guild(20, "user only")],
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::UserSession,
+            110,
+            DiscordEvent::GuildChannelsSnapshot {
+                guild_id: litecord_types::GuildId(10),
+                channels: vec![channel(101, 10, "one"), channel(102, 10, "two")],
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+
+    // The bot sees only the shared guild and one of its channels. Its
+    // snapshots must not retire the user session's additional memberships.
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::BotGateway,
+            120,
+            DiscordEvent::GuildsSnapshot {
+                guilds: vec![guild(10, "shared")],
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::BotGateway,
+            130,
+            DiscordEvent::GuildChannelsSnapshot {
+                guild_id: litecord_types::GuildId(10),
+                channels: vec![channel(101, 10, "one")],
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(
+        !db.read(|r| guilds::get(r, litecord_types::GuildId(20)))
+            .unwrap()
+            .unwrap()
+            .departed
+    );
+    assert!(
+        !db.read(|r| channels::get(r, litecord_types::ChannelId(102)))
+            .unwrap()
+            .unwrap()
+            .removed
+    );
+
+    // The user session drops channel 101, but the bot still retains it.
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::UserSession,
+            140,
+            DiscordEvent::GuildChannelsSnapshot {
+                guild_id: litecord_types::GuildId(10),
+                channels: vec![channel(102, 10, "two")],
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(
+        !db.read(|r| channels::get(r, litecord_types::ChannelId(101)))
+            .unwrap()
+            .unwrap()
+            .removed
+    );
+
+    // A direct departure from the bot removes only its membership. The guild
+    // remains active until the user session leaves as well.
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::BotGateway,
+            150,
+            DiscordEvent::GuildRemoved {
+                guild_id: litecord_types::GuildId(10),
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(
+        !db.read(|r| guilds::get(r, litecord_types::GuildId(10)))
+            .unwrap()
+            .unwrap()
+            .departed
+    );
+    assert!(
+        db.read(|r| channels::get(r, litecord_types::ChannelId(101)))
+            .unwrap()
+            .unwrap()
+            .removed
+    );
+
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::UserSession,
+            160,
+            DiscordEvent::GuildRemoved {
+                guild_id: litecord_types::GuildId(10),
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    assert!(
+        db.read(|r| guilds::get(r, litecord_types::GuildId(10)))
+            .unwrap()
+            .unwrap()
+            .departed
+    );
 }
 
 /// The page and its cursor share one transaction: if the transaction fails
@@ -739,13 +1022,17 @@ fn messages_page_extracts_memory_only_for_recent_messages() {
         })
         .collect();
     assert_eq!(extracted, vec![MessageId(3), MessageId(4)]);
-    // All four are stored (and announced) regardless.
-    let created = committed
+    // All four are stored and announced as history imports.
+    let imported = committed
         .events
         .iter()
-        .filter(|e| matches!(e, UnifiedEvent::MessageCreated { .. }))
+        .filter(|e| matches!(e, UnifiedEvent::MessageImported { .. }))
         .count();
-    assert_eq!(created, 4);
+    assert_eq!(imported, 4);
+    assert!(!committed
+        .events
+        .iter()
+        .any(|event| matches!(event, UnifiedEvent::MessageCreated { .. })));
     assert!(committed
         .value
         .followups

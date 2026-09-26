@@ -9,6 +9,7 @@ use litecord_types::{GuildId, Revision, Timestamp};
 
 use crate::db::WriteTx;
 use crate::error::StoreResult;
+use crate::repos::channels;
 
 /// A stored guild row plus bookkeeping.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -50,6 +51,18 @@ pub fn upsert(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
+    upsert_from_source(tx, guild, origin, origin.as_str(), observed_at)
+}
+
+/// Upsert a guild and record that `source` currently retains membership.
+/// The canonical row is shared across sources; membership is source-scoped.
+pub fn upsert_from_source(
+    tx: &WriteTx<'_>,
+    guild: &Guild,
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
     let n = tx.execute(
         "INSERT INTO guilds (id, name, icon_url, departed, origin, observed_at, revision)
          VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)
@@ -72,11 +85,15 @@ pub fn upsert(
             tx.revision().get() as i64,
         ],
     )?;
-    let changed = n > 0;
-    if changed {
+    let membership_changed = tx.execute(
+        "INSERT OR IGNORE INTO guild_source_memberships (source, guild_id) VALUES (?1, ?2)",
+        params![source, guild.id.to_sql()],
+    )? > 0;
+    let canonical_changed = n > 0;
+    if canonical_changed {
         tx.emit(UnifiedEvent::GuildObserved { guild_id: guild.id }, origin)?;
     }
-    Ok(changed)
+    Ok(canonical_changed || membership_changed)
 }
 
 /// Insert a placeholder guild (empty name) if `id` is unknown. Emits nothing.
@@ -84,6 +101,19 @@ pub fn ensure_stub(
     tx: &WriteTx<'_>,
     id: GuildId,
     origin: Origin,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
+    ensure_stub_from_source(tx, id, origin, origin.as_str(), observed_at)
+}
+
+/// Ensure a placeholder guild exists and record source membership. If this
+/// source sees a guild after it was globally marked departed, reactivate the
+/// canonical row while preserving any hydrated fields.
+pub fn ensure_stub_from_source(
+    tx: &WriteTx<'_>,
+    id: GuildId,
+    origin: Origin,
+    source: &str,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
     let n = tx.execute(
@@ -96,6 +126,23 @@ pub fn ensure_stub(
             tx.revision().get() as i64,
         ],
     )?;
+    let reactivated = tx.execute(
+        "UPDATE guilds SET departed = 0, origin = ?1, observed_at = ?2, revision = ?3
+         WHERE id = ?4 AND departed = 1",
+        params![
+            origin.as_str(),
+            observed_at.as_millis(),
+            tx.revision().get() as i64,
+            id.to_sql(),
+        ],
+    )? > 0;
+    tx.execute(
+        "INSERT OR IGNORE INTO guild_source_memberships (source, guild_id) VALUES (?1, ?2)",
+        params![source, id.to_sql()],
+    )?;
+    if reactivated {
+        tx.emit(UnifiedEvent::GuildObserved { guild_id: id }, origin)?;
+    }
     Ok(n > 0)
 }
 
@@ -110,21 +157,49 @@ pub fn mark_departed(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
-    let n = tx.execute(
-        "UPDATE guilds SET departed = 1, origin = ?1, observed_at = ?2, revision = ?3
-         WHERE id = ?4 AND departed = 0",
-        params![
-            origin.as_str(),
-            observed_at.as_millis(),
-            tx.revision().get() as i64,
-            id.to_sql(),
-        ],
+    mark_departed_from_source(tx, id, origin, origin.as_str(), observed_at)
+}
+
+/// Remove one source's guild membership. The canonical guild is marked
+/// departed only after no source retains it; its channel memberships are
+/// retired with the same source first.
+pub fn mark_departed_from_source(
+    tx: &WriteTx<'_>,
+    id: GuildId,
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
+    let channels_changed = channels::remove_source_for_guild(tx, id, origin, source, observed_at)?;
+    let membership_removed = tx.execute(
+        "DELETE FROM guild_source_memberships WHERE source = ?1 AND guild_id = ?2",
+        params![source, id.to_sql()],
+    )? > 0;
+    let retained: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM guild_source_memberships WHERE guild_id = ?1)",
+        params![id.to_sql()],
+        |r| Ok(r.get::<_, i64>(0)? != 0),
     )?;
-    let changed = n > 0;
-    if changed {
-        tx.emit(UnifiedEvent::GuildRemoved { guild_id: id }, origin)?;
-    }
-    Ok(changed)
+    let globally_departed = if retained {
+        false
+    } else {
+        let n = tx.execute(
+            "UPDATE guilds SET departed = 1, origin = ?1, observed_at = ?2, revision = ?3
+             WHERE id = ?4 AND departed = 0",
+            params![
+                origin.as_str(),
+                observed_at.as_millis(),
+                tx.revision().get() as i64,
+                id.to_sql(),
+            ],
+        )?;
+        let changed = n > 0;
+        if changed {
+            tx.emit(UnifiedEvent::GuildRemoved { guild_id: id }, origin)?;
+        }
+        changed
+    };
+    Ok(channels_changed || membership_removed || globally_departed)
 }
 
 /// Replace the authoritative guild list: upsert every guild given and mark
@@ -135,25 +210,38 @@ pub fn replace_all(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<bool> {
+    replace_all_from_source(tx, guilds, origin, origin.as_str(), observed_at)
+}
+
+/// Replace only one source's authoritative membership list. Guilds retained
+/// by another source remain globally active.
+pub fn replace_all_from_source(
+    tx: &WriteTx<'_>,
+    guilds: &[Guild],
+    origin: Origin,
+    source: &str,
+    observed_at: Timestamp,
+) -> StoreResult<bool> {
     let mut changed = false;
     let mut keep: Vec<GuildId> = Vec::with_capacity(guilds.len());
     for g in guilds {
         keep.push(g.id);
-        if upsert(tx, g, origin, observed_at)? {
+        if upsert_from_source(tx, g, origin, source, observed_at)? {
             changed = true;
         }
     }
-    let existing: Vec<GuildId> = {
-        let mut stmt = tx.prepare("SELECT id FROM guilds WHERE departed = 0")?;
-        let rows = stmt.query_map([], |r| Ok(GuildId::from_sql(r.get(0)?)))?;
+    let source_memberships: Vec<GuildId> = {
+        let mut stmt =
+            tx.prepare("SELECT guild_id FROM guild_source_memberships WHERE source = ?1")?;
+        let rows = stmt.query_map(params![source], |r| Ok(GuildId::from_sql(r.get(0)?)))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
         }
         out
     };
-    for id in existing {
-        if !keep.contains(&id) && mark_departed(tx, id, origin, observed_at)? {
+    for id in source_memberships {
+        if !keep.contains(&id) && mark_departed_from_source(tx, id, origin, source, observed_at)? {
             changed = true;
         }
     }

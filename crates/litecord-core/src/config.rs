@@ -25,6 +25,9 @@ pub enum BackendKind {
     /// Official Discord Social SDK (requires the `discord-social-sdk` feature
     /// and SDK binaries).
     SocialSdk,
+    /// User-owned Discord client session backend.
+    #[serde(alias = "user-session")]
+    UserSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -456,6 +459,7 @@ fn parse_backend(v: &str) -> Result<BackendKind> {
     match v {
         "demo" => Ok(BackendKind::Demo),
         "social_sdk" | "social-sdk" => Ok(BackendKind::SocialSdk),
+        "user_session" | "user-session" => Ok(BackendKind::UserSession),
         other => Err(Error::config(format!("unknown backend `{other}`"))),
     }
 }
@@ -542,6 +546,30 @@ filter = "debug"
             .load()
             .unwrap_err();
         assert!(err.to_string().contains("unknown backend"));
+    }
+
+    #[test]
+    fn user_session_backend_uses_stable_serde_name_and_aliases() {
+        assert_eq!(
+            serde_json::to_string(&BackendKind::UserSession).unwrap(),
+            "\"user_session\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BackendKind>("\"user_session\"").unwrap(),
+            BackendKind::UserSession
+        );
+        assert_eq!(
+            serde_json::from_str::<BackendKind>("\"user-session\"").unwrap(),
+            BackendKind::UserSession
+        );
+        assert_eq!(
+            parse_backend("user_session").unwrap(),
+            BackendKind::UserSession
+        );
+        assert_eq!(
+            parse_backend("user-session").unwrap(),
+            BackendKind::UserSession
+        );
     }
 
     #[test]

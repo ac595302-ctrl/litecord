@@ -334,13 +334,12 @@ impl Workspace {
                     self.send(Command::DismissTask(task.id));
                 }
             }
-            TaskStatus::Open => {
+            TaskStatus::Open
                 if ui
                     .add_enabled(enabled, egui::Button::new("Complete"))
-                    .clicked()
-                {
-                    self.send(Command::CompleteTask(task.id));
-                }
+                    .clicked() =>
+            {
+                self.send(Command::CompleteTask(task.id));
             }
             _ => {}
         });
@@ -629,7 +628,7 @@ fn reminder_row(workspace: &mut Workspace, ui: &mut Ui, reminder: &Reminder) {
                     ui.painter().circle_stroke(
                         rect.center(),
                         3.5,
-                        egui::Stroke::new(1.5, theme::OMNI),
+                        egui::Stroke::new(1.5_f32, theme::OMNI),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         small_chip(
@@ -697,7 +696,7 @@ fn row_frame(selected: bool) -> egui::Frame {
             theme::SIDEBAR
         })
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             if selected {
                 theme::PRIMARY.gamma_multiply(0.6)
             } else {
@@ -774,7 +773,7 @@ fn priority_combo(ui: &mut Ui, id: &str, priority: &mut TaskPriority) {
 fn small_chip(ui: &mut Ui, text: &str, tint: Color32, text_color: Color32) {
     egui::Frame::new()
         .fill(tint.gamma_multiply(0.12))
-        .stroke(egui::Stroke::new(1.0, tint.gamma_multiply(0.32)))
+        .stroke(egui::Stroke::new(1.0_f32, tint.gamma_multiply(0.32)))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
@@ -871,7 +870,9 @@ fn origin_label(task: &Task) -> String {
         Origin::UserProvided => "Added by you".into(),
         Origin::LocalApplication if from_message => "From your messages".into(),
         Origin::LocalApplication => "Automatic".into(),
-        Origin::DiscordSocialSdk | Origin::DiscordBotGateway => "From Discord".into(),
+        Origin::DiscordSocialSdk | Origin::DiscordUserSession | Origin::DiscordBotGateway => {
+            "From Discord".into()
+        }
         Origin::Imported => "Imported".into(),
         Origin::Synthetic => "Demo data".into(),
     }

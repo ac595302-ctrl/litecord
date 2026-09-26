@@ -24,6 +24,43 @@ pub struct MessageRecord {
     pub revision: Revision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MessageObservation {
+    pub origin: Origin,
+    pub first_observed_at: Timestamp,
+    pub last_observed_at: Timestamp,
+    pub deleted: bool,
+}
+
+pub fn observations(conn: &Connection, id: MessageId) -> StoreResult<Vec<MessageObservation>> {
+    let mut stmt=conn.prepare("SELECT origin,first_observed_at,last_observed_at,deleted FROM message_observations WHERE message_id=?1 ORDER BY origin")?;
+    let rows = stmt.query_map(params![id.to_sql()], |r| {
+        let origin: String = r.get(0)?;
+        Ok(MessageObservation {
+            origin: crate::sql::origin(0, &origin)?,
+            first_observed_at: Timestamp::from_millis(r.get(1)?),
+            last_observed_at: Timestamp::from_millis(r.get(2)?),
+            deleted: r.get::<_, bool>(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn observe(
+    tx: &WriteTx<'_>,
+    id: MessageId,
+    origin: Origin,
+    at: Timestamp,
+    deleted: bool,
+) -> StoreResult<()> {
+    tx.execute("INSERT INTO message_observations (message_id,origin,first_observed_at,last_observed_at,deleted) VALUES (?1,?2,?3,?3,?4)
+        ON CONFLICT(message_id,origin) DO UPDATE SET first_observed_at=MIN(first_observed_at,excluded.first_observed_at),
+        last_observed_at=MAX(last_observed_at,excluded.last_observed_at),deleted=MAX(deleted,excluded.deleted)
+        WHERE excluded.first_observed_at<first_observed_at OR excluded.last_observed_at>last_observed_at OR excluded.deleted>deleted",
+        params![id.to_sql(),origin.as_str(),at.as_millis(),deleted])?;
+    Ok(())
+}
+
 /// What [`upsert`] actually did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageWrite {
@@ -94,6 +131,45 @@ pub fn upsert(
     origin: Origin,
     observed_at: Timestamp,
 ) -> StoreResult<MessageWriteOutcome> {
+    upsert_with_history(tx, message, origin, observed_at, false)
+}
+
+/// Insert or update a message learned from a history snapshot or backfill
+/// page. New rows emit [`UnifiedEvent::MessageImported`] so consumers can
+/// distinguish them from live messages.
+pub fn upsert_historical(
+    tx: &WriteTx<'_>,
+    message: &Message,
+    origin: Origin,
+    observed_at: Timestamp,
+) -> StoreResult<MessageWriteOutcome> {
+    upsert_with_history(tx, message, origin, observed_at, true)
+}
+
+fn upsert_with_history(
+    tx: &WriteTx<'_>,
+    message: &Message,
+    origin: Origin,
+    observed_at: Timestamp,
+    historical: bool,
+) -> StoreResult<MessageWriteOutcome> {
+    observe(tx, message.id, origin, observed_at, false)?;
+    // Message IDs are globally unique. A delete can arrive before a create
+    // (or before history hydration), so check the durable tombstone before
+    // creating conversation or author stubs for stale data.
+    let tombstoned: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM message_tombstones WHERE message_id = ?1)",
+        params![message.id.to_sql()],
+        |r| Ok(r.get::<_, i64>(0)? != 0),
+    )?;
+    if tombstoned {
+        return Ok(MessageWriteOutcome {
+            write: MessageWrite::Unchanged,
+            created_conversation_stub: false,
+            created_author_stub: false,
+        });
+    }
+
     let created_conversation_stub =
         conversations::ensure(tx, message.conversation_id, origin, observed_at)?;
     let created_author_stub = users::ensure_stub(tx, message.author_id, origin, observed_at)?;
@@ -142,17 +218,28 @@ pub fn upsert(
                     tx.revision().get() as i64,
                 ],
             )?;
-            tx.emit(
+            let event = if historical {
+                UnifiedEvent::MessageImported {
+                    message_id: message.id,
+                    conversation_id: message.conversation_id,
+                }
+            } else {
                 UnifiedEvent::MessageCreated {
                     message_id: message.id,
                     conversation_id: message.conversation_id,
-                },
-                origin,
-            )?;
+                }
+            };
+            tx.emit(event, origin)?;
             MessageWrite::Created
         }
         Some((deleted, old_content, old_edited_at, old_reply_to, old_extras)) => {
+            // A history snapshot can contain the message as it looked before
+            // a live edit. When the stored edit timestamp is newer, that
+            // timestamp proves the incoming full message is stale.
+            let stale_edit =
+                old_edited_at.is_some_and(|old| new_edited_at.is_none_or(|new| new < old));
             let unchanged = deleted
+                || stale_edit
                 || (old_content == message.content.as_ref()
                     && old_edited_at == new_edited_at
                     && old_reply_to == new_reply_to
@@ -197,9 +284,10 @@ pub fn upsert(
     })
 }
 
-/// Mark a message deleted. When `purge_content` is set, the content and
-/// extras are also cleared. Emits [`UnifiedEvent::MessageDeleted`] if a row
-/// actually changed.
+/// Mark a message deleted and persist an ID tombstone, even if its message
+/// row has not arrived yet. When `purge_content` is set, the content and
+/// extras are also cleared. Emits [`UnifiedEvent::MessageDeleted`] when the
+/// message or its tombstone changes.
 pub fn mark_deleted(
     tx: &WriteTx<'_>,
     id: MessageId,
@@ -207,6 +295,13 @@ pub fn mark_deleted(
     purge_content: bool,
     origin: Origin,
 ) -> StoreResult<bool> {
+    observe(tx, id, origin, tx.now(), true)?;
+    // Keep the tombstone even when no message row exists yet. History pages
+    // are allowed to arrive after this event and must not recreate the row.
+    let tombstone_inserted = tx.execute(
+        "INSERT OR IGNORE INTO message_tombstones (message_id, conversation_id) VALUES (?1, ?2)",
+        params![id.to_sql(), conversation_id.to_sql()],
+    )? > 0;
     let n = tx.execute(
         "UPDATE messages SET
              deleted = 1,
@@ -216,7 +311,7 @@ pub fn mark_deleted(
          WHERE id = ?3 AND deleted = 0",
         params![purge_content, tx.revision().get() as i64, id.to_sql()],
     )?;
-    let changed = n > 0;
+    let changed = tombstone_inserted || n > 0;
     if changed {
         tx.emit(
             UnifiedEvent::MessageDeleted {
@@ -581,6 +676,30 @@ mod tests {
     }
 
     #[test]
+    fn historical_create_emits_imported_event() {
+        let db = Database::open_in_memory().unwrap();
+        let imported = db
+            .write(|tx| {
+                upsert_historical(
+                    tx,
+                    &msg(5, 1, 2, "from history", 10),
+                    Origin::Synthetic,
+                    Timestamp::from_millis(20),
+                )
+            })
+            .unwrap();
+        assert_eq!(imported.value.write, MessageWrite::Created);
+        assert!(imported.events.contains(&UnifiedEvent::MessageImported {
+            message_id: MessageId(5),
+            conversation_id: ConversationId(1),
+        }));
+        assert!(!imported
+            .events
+            .iter()
+            .any(|event| matches!(event, UnifiedEvent::MessageCreated { .. })));
+    }
+
+    #[test]
     fn delete_does_not_get_resurrected() {
         let db = Database::open_in_memory().unwrap();
         db.write(|tx| {
@@ -608,6 +727,108 @@ mod tests {
         let rec = db.read(|r| get(r, MessageId(1))).unwrap().unwrap();
         assert!(rec.deleted);
         assert_eq!(rec.message.content.as_ref(), "");
+    }
+
+    #[test]
+    fn delete_before_create_blocks_later_history_without_creating_stubs() {
+        let db = Database::open_in_memory().unwrap();
+        let deleted = db
+            .write(|tx| mark_deleted(tx, MessageId(7), ConversationId(3), true, Origin::Synthetic))
+            .unwrap();
+        assert!(deleted.value);
+        assert_eq!(
+            deleted.events,
+            vec![UnifiedEvent::MessageDeleted {
+                message_id: MessageId(7),
+                conversation_id: ConversationId(3),
+            }]
+        );
+
+        let late_history = db
+            .write(|tx| {
+                upsert(
+                    tx,
+                    &msg(7, 3, 9, "deleted before hydration", 100),
+                    Origin::Synthetic,
+                    Timestamp::from_millis(200),
+                )
+            })
+            .unwrap();
+        assert_eq!(late_history.value.write, MessageWrite::Unchanged);
+        assert!(!late_history.changed());
+        assert!(!late_history.value.created_conversation_stub);
+        assert!(!late_history.value.created_author_stub);
+        assert!(db.read(|r| get(r, MessageId(7))).unwrap().is_none());
+
+        let (messages, conversations, users, tombstones) = db
+            .read(|r| {
+                Ok::<_, crate::error::StoreError>((
+                    r.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    r.query_row("SELECT COUNT(*) FROM conversations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    r.query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))?,
+                    r.query_row(
+                        "SELECT COUNT(*) FROM message_tombstones WHERE message_id = ?1",
+                        params![MessageId(7).to_sql()],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!((messages, conversations, users, tombstones), (0, 0, 0, 1));
+
+        let duplicate = db
+            .write(|tx| mark_deleted(tx, MessageId(7), ConversationId(3), true, Origin::Synthetic))
+            .unwrap();
+        assert!(!duplicate.value);
+        assert!(!duplicate.changed());
+    }
+
+    #[test]
+    fn older_edited_at_cannot_overwrite_a_newer_message() {
+        let db = Database::open_in_memory().unwrap();
+        let mut current = msg(1, 1, 2, "newer edit", 10);
+        current.edited_at = Some(Timestamp::from_millis(300));
+        db.write(|tx| upsert(tx, &current, Origin::Synthetic, Timestamp::from_millis(400)))
+            .unwrap();
+
+        let mut stale = msg(1, 1, 2, "stale history", 10);
+        stale.edited_at = Some(Timestamp::from_millis(200));
+        let outcome = db
+            .write(|tx| upsert(tx, &stale, Origin::Synthetic, Timestamp::from_millis(500)))
+            .unwrap();
+        assert_eq!(outcome.value.write, MessageWrite::Unchanged);
+        assert!(!outcome.changed());
+
+        // An unedited historical copy also predates a known edit.
+        let unedited = msg(1, 1, 2, "original content", 10);
+        let outcome = db
+            .write(|tx| {
+                upsert(
+                    tx,
+                    &unedited,
+                    Origin::Synthetic,
+                    Timestamp::from_millis(600),
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome.value.write, MessageWrite::Unchanged);
+        assert!(!outcome.changed());
+
+        let mut newer = msg(1, 1, 2, "newest edit", 10);
+        newer.edited_at = Some(Timestamp::from_millis(400));
+        let outcome = db
+            .write(|tx| upsert(tx, &newer, Origin::Synthetic, Timestamp::from_millis(700)))
+            .unwrap();
+        assert_eq!(outcome.value.write, MessageWrite::Updated);
+        assert!(outcome.changed());
+
+        let record = db.read(|r| get(r, MessageId(1))).unwrap().unwrap();
+        assert_eq!(record.message.content.as_ref(), "newest edit");
+        assert_eq!(record.message.edited_at, newer.edited_at);
     }
 
     #[test]

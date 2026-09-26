@@ -14,7 +14,7 @@ use litecord_core::ports::SocialBackend;
 use litecord_store::repos;
 use litecord_store::Database;
 use litecord_types::actions::{Actor, AgentAction};
-use litecord_types::capability::CapabilitySet;
+use litecord_types::capability::{BackendMode, CapabilitySet};
 use litecord_types::entity::EntityId;
 use litecord_types::ids::ActionId;
 use litecord_types::notes::Bookmark;
@@ -85,7 +85,13 @@ impl DefaultExecutor {
 
     fn backend_for(&self, identity: DiscordIdentity) -> Option<&Arc<dyn SocialBackend>> {
         match identity {
-            DiscordIdentity::UserSocialSdk => self.backend.as_ref(),
+            DiscordIdentity::UserSocialSdk => self
+                .backend
+                .as_ref()
+                .filter(|backend| backend.mode() != BackendMode::UserSession),
+            // The user-session backend is a read-only source. Keep it out of
+            // proposal execution even if it is the configured backend.
+            DiscordIdentity::UserSession => None,
             DiscordIdentity::ApplicationBot => self.bot.as_ref(),
         }
     }

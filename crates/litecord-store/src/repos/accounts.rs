@@ -21,12 +21,11 @@ pub struct AccountRecord {
     pub last_seen_at: Timestamp,
 }
 
-/// `DiscordIdentity` has no stable string form in `litecord-types`; this
-/// mirrors the one the handoff spec asks for ("user_social_sdk" /
-/// "application_bot") without modifying that (out-of-scope) crate.
+/// Stable persisted names for Discord identities.
 fn identity_as_str(identity: DiscordIdentity) -> &'static str {
     match identity {
         DiscordIdentity::UserSocialSdk => "user_social_sdk",
+        DiscordIdentity::UserSession => "user_session",
         DiscordIdentity::ApplicationBot => "application_bot",
     }
 }
@@ -34,6 +33,7 @@ fn identity_as_str(identity: DiscordIdentity) -> &'static str {
 fn identity_parse(idx: usize, s: &str) -> rusqlite::Result<DiscordIdentity> {
     match s {
         "user_social_sdk" => Ok(DiscordIdentity::UserSocialSdk),
+        "user_session" => Ok(DiscordIdentity::UserSession),
         "application_bot" => Ok(DiscordIdentity::ApplicationBot),
         other => Err(col_err(
             idx,
@@ -105,6 +105,15 @@ pub fn current(conn: &Connection, identity: DiscordIdentity) -> StoreResult<Opti
             map_row,
         )
         .optional()?)
+}
+
+/// The active user's account, preferring a user session and then falling back
+/// to the Social SDK account when present.
+pub fn current_user(conn: &Connection) -> StoreResult<Option<AccountRecord>> {
+    match current(conn, DiscordIdentity::UserSession)? {
+        Some(account) => Ok(Some(account)),
+        None => current(conn, DiscordIdentity::UserSocialSdk),
+    }
 }
 
 #[cfg(test)]

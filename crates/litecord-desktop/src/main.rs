@@ -50,6 +50,7 @@ struct Cli {
 enum BackendArg {
     Demo,
     SocialSdk,
+    UserSession,
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,6 +144,7 @@ fn load_config(cli: &Cli) -> litecord_core::Result<LitecordConfig> {
             backend: cli.backend.map(|b| match b {
                 BackendArg::Demo => BackendKind::Demo,
                 BackendArg::SocialSdk => BackendKind::SocialSdk,
+                BackendArg::UserSession => BackendKind::UserSession,
             }),
             log_filter: cli.log.clone(),
         });
@@ -228,9 +230,12 @@ async fn gui(
     options: litecord_ui::WindowOptions,
     omni_ask: Option<String>,
 ) -> litecord_core::Result<()> {
-    let app = with_omni(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)
-        .start()
-        .await?;
+    let app = with_omni(
+        with_account(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)?,
+        &cfg,
+    )
+    .start()
+    .await?;
     if let Some(text) = omni_ask {
         let a = app.clone();
         tokio::spawn(async move {
@@ -254,7 +259,7 @@ fn litecord_layout_destination(name: &str) -> Option<litecord_ui::Destination> {
 }
 
 async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core::Result<()> {
-    let mut builder = with_bot(LitecordApp::builder(cfg))?;
+    let mut builder = with_account(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)?;
     if in_memory {
         builder = builder.in_memory();
     }
@@ -327,9 +332,12 @@ async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core:
 async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()> {
     use litecord_app::harness::{HarnessKind, LoginKind, LoginState};
     use litecord_core::error::{Error, ErrorKind};
-    let app = with_omni(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)
-        .start()
-        .await?;
+    let app = with_omni(
+        with_account(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)?,
+        &cfg,
+    )
+    .start()
+    .await?;
     let omni = app.omni().clone();
     let result = async {
         match cmd {
@@ -660,5 +668,44 @@ fn with_bot(builder: litecord_app::AppBuilder) -> litecord_core::Result<litecord
 
 #[cfg(not(feature = "discord-bot"))]
 fn with_bot(builder: litecord_app::AppBuilder) -> litecord_core::Result<litecord_app::AppBuilder> {
+    Ok(builder)
+}
+
+#[cfg(feature = "discord-user-session")]
+fn with_account(
+    builder: litecord_app::AppBuilder,
+    cfg: &LitecordConfig,
+) -> litecord_core::Result<litecord_app::AppBuilder> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::Arc;
+    if cfg.backend.kind != BackendKind::UserSession {
+        return Ok(builder);
+    }
+    let path = std::path::absolute(cfg.database_path())
+        .map_err(|_| litecord_core::Error::config("cannot resolve database path"))?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    let secrets = Arc::new(litecord_core::secrets::OsSecretStore::new(&format!(
+        "account.{:016x}",
+        hash.finish()
+    )));
+    let transport = discord_adapter::user_session::HttpTransport::user_session()?;
+    Ok(builder.backend(Arc::new(
+        discord_adapter::user_session::UserSessionBackend::new(
+            Arc::new(transport),
+            secrets,
+            Arc::new(litecord_core::clock::SystemClock),
+        ),
+    )))
+}
+
+#[cfg(not(feature = "discord-user-session"))]
+fn with_account(
+    builder: litecord_app::AppBuilder,
+    cfg: &LitecordConfig,
+) -> litecord_core::Result<litecord_app::AppBuilder> {
+    if cfg.backend.kind == BackendKind::UserSession {
+        return Err(litecord_core::Error::new(litecord_core::ErrorKind::Unsupported,"build with --features gui,discord-user-session to enable the experimental account source"));
+    }
     Ok(builder)
 }

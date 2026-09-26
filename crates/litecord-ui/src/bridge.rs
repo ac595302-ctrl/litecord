@@ -97,6 +97,10 @@ pub enum Command {
     Omni(OmniCommand),
     /// Start (true) or stop (false) full history sync for a conversation.
     SyncHistory(ConversationId, bool),
+    /// Authenticate with an experimental Discord user-session credential.
+    ConnectSession(litecord_core::secrets::Secret<String>),
+    /// Sign out of the current Discord user session.
+    DiscordSignOut,
 }
 
 /// Omni panel and settings commands.
@@ -448,6 +452,8 @@ pub(crate) async fn execute(
             });
         }
         Command::SyncHistory(id, false) => app.stop_history_sync(id)?,
+        Command::ConnectSession(credential) => app.authenticate_session(credential).await?,
+        Command::DiscordSignOut => app.sign_out().await?,
         Command::CreateTask(draft) => {
             if let litecord_actions::ProposeOutcome::Executed {
                 result:
@@ -546,4 +552,21 @@ async fn omni(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+
+    #[test]
+    fn connect_session_command_debug_redacts_credential() {
+        const CREDENTIAL: &str = "session_credential_sentinel_761a";
+
+        let command =
+            Command::ConnectSession(litecord_core::secrets::Secret::new(CREDENTIAL.to_owned()));
+        let debug = format!("{command:?}");
+
+        assert!(!debug.contains(CREDENTIAL));
+        assert!(debug.contains("REDACTED"));
+    }
 }

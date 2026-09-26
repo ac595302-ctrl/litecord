@@ -136,7 +136,7 @@ pub(crate) struct HistorySyncCtx {
 }
 
 /// Why sync is waiting right now, if it is.
-fn pause_reason(ctx: &HistorySyncCtx) -> Result<Option<String>> {
+pub(crate) fn pause_reason(ctx: &HistorySyncCtx) -> Result<Option<String>> {
     let quota = quota_bytes(&ctx.cfg);
     let size = ctx.db.read(|r| litecord_store::db_size_bytes(r))?;
     if size >= quota {
@@ -163,6 +163,9 @@ fn backend_for(ctx: &HistorySyncCtx, id: ConversationId) -> Result<Arc<dyn Socia
         .read(|r| repos::conversations::get(r, id))?
         .map(|c| c.conversation.kind);
     Ok(match (kind, &ctx.bot) {
+        _ if ctx.backend.mode() == litecord_types::capability::BackendMode::UserSession => {
+            ctx.backend.clone()
+        }
         (Some(ConversationKind::GuildChannel), Some(bot)) => bot.clone(),
         _ => ctx.backend.clone(),
     })
@@ -181,6 +184,10 @@ pub(crate) async fn sync_step(ctx: &HistorySyncCtx) -> Result<Duration> {
     }
     set_paused(ctx, &rec, None)?;
     let backend = backend_for(ctx, rec.conversation_id)?;
+    let sink = match backend.session_generation() {
+        Some((generation, epoch)) => ctx.ingest.with_session_guard(generation, epoch),
+        None => ctx.ingest.clone(),
+    };
     let limit = ctx.cfg.hydration.history_page_size.clamp(1, 100);
     let req = match rec.oldest_message_id {
         Some(before) => HistoryPageRequest::before(rec.conversation_id, before, limit),
@@ -191,11 +198,11 @@ pub(crate) async fn sync_step(ctx: &HistorySyncCtx) -> Result<Duration> {
             let done = !page.has_more || page.messages.is_empty();
             let source = backend.source();
             let now = ctx.db.now();
-            send_page(ctx, source, now, rec.conversation_id, page.messages).await?;
+            send_page(&sink, source, now, rec.conversation_id, page.messages).await?;
             if done {
                 // An empty page marks the conversation complete (same
                 // reducer transaction as the checkpoint).
-                send_page(ctx, source, now, rec.conversation_id, Vec::new()).await?;
+                send_page(&sink, source, now, rec.conversation_id, Vec::new()).await?;
             }
             Ok(Duration::from_millis(
                 ctx.cfg.hydration.history_page_interval_ms,
@@ -205,7 +212,7 @@ pub(crate) async fn sync_step(ctx: &HistorySyncCtx) -> Result<Duration> {
             set_paused(ctx, &rec, Some("Discord asked to slow down"))?;
             Ok(Duration::from_millis(retry_after.as_millis().max(1_000)))
         }
-        Err(e @ BackendError::Unsupported { .. }) => {
+        Err(e @ (BackendError::Unsupported { .. } | BackendError::PermissionDenied { .. })) => {
             // This source can't page history: stop instead of spinning.
             let msg = format!("this source can't load older history ({e})");
             ctx.db.write(|tx| -> litecord_store::StoreResult<()> {
@@ -225,23 +232,28 @@ pub(crate) async fn sync_step(ctx: &HistorySyncCtx) -> Result<Duration> {
 }
 
 async fn send_page(
-    ctx: &HistorySyncCtx,
+    sink: &IngestSender,
     source: litecord_types::provenance::DiscordSource,
     now: Timestamp,
     conversation_id: ConversationId,
     messages: Vec<litecord_types::social::Message>,
 ) -> Result<()> {
-    ctx.ingest
-        .send(SourceEnvelope::new(
-            source,
-            now,
-            DiscordEvent::MessagesPage {
-                conversation_id,
-                messages,
-            },
-        ))
-        .await
-        .map_err(|_| Error::new(ErrorKind::Shutdown, "ingest queue closed"))
+    sink.send_committed(SourceEnvelope::new(
+        source,
+        now,
+        DiscordEvent::MessagesPage {
+            conversation_id,
+            messages,
+        },
+    ))
+    .await
+    .map(|_| ())
+    .map_err(|_| {
+        Error::new(
+            ErrorKind::Storage,
+            "history page did not commit; checkpoint retained",
+        )
+    })
 }
 
 fn set_paused(ctx: &HistorySyncCtx, rec: &HistorySyncRecord, reason: Option<&str>) -> Result<()> {

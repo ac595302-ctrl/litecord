@@ -3,7 +3,7 @@
 use litecord_core::Result;
 use litecord_store::repos;
 use litecord_types::ids::UserId;
-use litecord_types::provenance::{DiscordIdentity, Origin};
+use litecord_types::provenance::Origin;
 use litecord_types::social::{Presence, PresenceStatus};
 use litecord_types::Revision;
 use serde::Serialize;
@@ -39,13 +39,13 @@ pub struct ContactViewModel {
 }
 
 impl LitecordApp {
-    /// Loads the current user from the active user Social SDK account.
+    /// Loads the current user from the active user account.
     ///
     /// The not-signed-in state is represented explicitly; no demo persona or
     /// fallback self identity is invented when the account is absent.
     pub fn account_view(&self) -> Result<AccountViewModel> {
         self.inner.db.read(|conn| -> Result<AccountViewModel> {
-            let account = repos::accounts::current(conn, DiscordIdentity::UserSocialSdk)?;
+            let account = repos::accounts::current_user(conn)?;
             let Some(account) = account else {
                 return Ok(AccountViewModel {
                     as_of_revision: conn.revision(),

@@ -55,6 +55,8 @@ pub struct Workspace {
     pub omni_code_draft: String,
     pub omni_key_draft: String,
     pub omni_key_option: Option<String>,
+    /// In-memory input for the experimental Discord user-session connection.
+    pub discord_session_draft: String,
     pub automation_form: crate::omni_ui::AutomationForm,
     /// Tasks screen: new-task form and comment drafts.
     pub task_title_draft: String,
@@ -133,6 +135,7 @@ impl Workspace {
             omni_code_draft: String::new(),
             omni_key_draft: String::new(),
             omni_key_option: None,
+            discord_session_draft: String::new(),
             automation_form: crate::omni_ui::AutomationForm::default(),
             task_title_draft: String::new(),
             task_priority_draft: litecord_types::tasks::TaskPriority::default(),
@@ -380,7 +383,7 @@ impl Workspace {
                     } else {
                         theme::WORKSPACE
                     },
-                    Stroke::new(1.0, theme::BORDER),
+                    Stroke::new(1.0_f32, theme::BORDER),
                     egui::StrokeKind::Inside,
                 );
                 crate::icons::glyph(
@@ -438,7 +441,7 @@ impl Workspace {
                         } else {
                             theme::OMNI.gamma_multiply(0.12)
                         })
-                        .stroke(Stroke::new(1.0, theme::OMNI.gamma_multiply(0.5))),
+                        .stroke(Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.5))),
                     )
                     .on_hover_text("Ask Omni (Ctrl+J)");
                 if omni.clicked() {
@@ -542,7 +545,7 @@ impl Workspace {
                         ui.painter().rect_stroke(
                             rect.shrink(1.0),
                             0.0,
-                            Stroke::new(1.5, theme::PRIMARY),
+                            Stroke::new(1.5_f32, theme::PRIMARY),
                             egui::StrokeKind::Inside,
                         );
                     }
@@ -728,7 +731,7 @@ impl Workspace {
                 .frame(
                     egui::Frame::new()
                         .fill(theme::SIDEBAR)
-                        .stroke(Stroke::new(1.0, theme::BORDER))
+                        .stroke(Stroke::new(1.0_f32, theme::BORDER))
                         .inner_margin(egui::Margin::symmetric(14, 10)),
                 )
                 .show_inside(root, |ui| self.omni_panel(ui));

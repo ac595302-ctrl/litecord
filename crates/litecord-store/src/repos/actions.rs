@@ -18,6 +18,7 @@ use crate::sql::{col_err, push_in_str, rev};
 fn identity_str(identity: DiscordIdentity) -> &'static str {
     match identity {
         DiscordIdentity::UserSocialSdk => "user_social_sdk",
+        DiscordIdentity::UserSession => "user_session",
         DiscordIdentity::ApplicationBot => "application_bot",
     }
 }
@@ -25,6 +26,7 @@ fn identity_str(identity: DiscordIdentity) -> &'static str {
 fn parse_identity(s: &str) -> Result<DiscordIdentity, ValidationError> {
     match s {
         "user_social_sdk" => Ok(DiscordIdentity::UserSocialSdk),
+        "user_session" => Ok(DiscordIdentity::UserSession),
         "application_bot" => Ok(DiscordIdentity::ApplicationBot),
         _ => Err(ValidationError::Parse {
             what: "DiscordIdentity",

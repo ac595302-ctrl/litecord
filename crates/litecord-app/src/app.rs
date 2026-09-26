@@ -119,6 +119,12 @@ impl AppBuilder {
                     ErrorKind::Unsupported,
                     "the Social SDK backend is not wired yet; see docs/IMPLEMENTATION_STATUS.md",
                 )),
+                BackendKind::UserSession => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "the user-session backend is not installed in this build",
+                    ))
+                }
             },
         };
         let bot: Option<Arc<dyn SocialBackend>> = match self.bot {
@@ -130,6 +136,14 @@ impl AppBuilder {
             ))),
             None => None,
         };
+        if backend.source() == litecord_types::provenance::DiscordSource::UserSession {
+            if let Some(account) = db.read(|r| litecord_store::repos::accounts::current_user(r))? {
+                if account.origin == litecord_types::provenance::Origin::Synthetic {
+                    return Err(Error::new(ErrorKind::Configuration,"use a separate data directory for a real account; this database contains demo data"));
+                }
+                backend.bind_account(account.user_id)?;
+            }
+        }
         drop(_g);
 
         let bus = AppEventBus::new(cfg.runtime.broadcast_capacity);
@@ -218,13 +232,26 @@ impl AppBuilder {
             });
         }
 
-        backend.connect(ingest.clone()).await?;
+        if let Err(error) = backend.connect(ingest.clone()).await {
+            let _ = backend.disconnect().await;
+            supervisor
+                .shutdown(Duration::from_millis(cfg.runtime.shutdown_grace_ms))
+                .await;
+            return Err(error.into());
+        }
         if let Err(e) = crate::recovery::restore(&db, &hydrator) {
             tracing::warn!(error = %e, "could not restore hydration queue");
         }
         hydrator.initial_hydration();
         if let (Some(b), Some(h)) = (&bot, &bot_hydrator) {
-            b.connect(ingest.clone()).await?;
+            if let Err(error) = b.connect(ingest.clone()).await {
+                let _ = b.disconnect().await;
+                let _ = backend.disconnect().await;
+                supervisor
+                    .shutdown(Duration::from_millis(cfg.runtime.shutdown_grace_ms))
+                    .await;
+                return Err(error.into());
+            }
             h.initial_hydration();
         }
         let omni_ctx = match (&self.omni_mcp_command, self.in_memory) {
@@ -275,6 +302,19 @@ impl AppBuilder {
             });
         }
         let ui_activity = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        if backend.source() == litecord_types::provenance::DiscordSource::UserSession {
+            let ctx = crate::history::HistorySyncCtx {
+                db: db.clone(),
+                cfg: cfg.clone(),
+                backend: backend.clone(),
+                bot: None,
+                ingest: ingest.clone(),
+                ui_activity: ui_activity.clone(),
+            };
+            supervisor.spawn("account-recovery", move |t| {
+                crate::account_recovery::run(ctx, t)
+            });
+        }
         {
             let ctx = crate::history::HistorySyncCtx {
                 db: db.clone(),

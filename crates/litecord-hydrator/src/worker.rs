@@ -377,6 +377,10 @@ impl Hydrator {
     }
 
     async fn fetch_and_emit(&self, job: &HydrationJob) -> Result<(), ExecuteError> {
+        let sink = match self.backend.session_generation() {
+            Some((generation, epoch)) => self.sink.with_session_guard(generation, epoch),
+            None => self.sink.clone(),
+        };
         let event = match job.key {
             HydrationKey::CurrentUser => {
                 let user = self.backend.current_user().await?;
@@ -389,7 +393,8 @@ impl Hydrator {
             HydrationKey::Guilds => {
                 let guilds = self.backend.guilds().await?;
                 let guild_ids: Vec<GuildId> = guilds.iter().map(|g| g.id).collect();
-                self.emit(DiscordEvent::GuildsSnapshot { guilds }).await?;
+                self.emit(DiscordEvent::GuildsSnapshot { guilds }, &sink)
+                    .await?;
                 for guild_id in guild_ids {
                     self.request_if_stale(
                         HydrationKey::GuildChannels { guild_id },
@@ -430,15 +435,21 @@ impl Hydrator {
                 DiscordEvent::VoiceStateChanged { voice }
             }
         };
-        self.emit(event).await
+        self.emit(event, &sink).await
     }
 
-    async fn emit(&self, event: DiscordEvent) -> Result<(), ExecuteError> {
+    async fn emit(&self, event: DiscordEvent, sink: &IngestSender) -> Result<(), ExecuteError> {
         let envelope = SourceEnvelope::new(self.backend.source(), self.clock.now(), event);
-        self.sink
-            .send(envelope)
-            .await
-            .map_err(|_| ExecuteError::IngestClosed)
+        if self.backend.source() == litecord_types::provenance::DiscordSource::UserSession {
+            sink.send_committed(envelope)
+                .await
+                .map(|_| ())
+                .map_err(|_| ExecuteError::Backend(BackendError::NotConnected))
+        } else {
+            sink.send(envelope)
+                .await
+                .map_err(|_| ExecuteError::IngestClosed)
+        }
     }
 }
 

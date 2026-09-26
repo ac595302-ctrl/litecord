@@ -364,7 +364,7 @@ impl Workspace {
                             theme::WORKSPACE
                         })
                         .stroke(egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             if selected {
                                 theme::PRIMARY.gamma_multiply(0.6)
                             } else {

@@ -99,7 +99,7 @@ pub enum State {
 }
 
 /// One instruction for the driver to carry out.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Output {
     /// Send this JSON text frame on the socket.
     Send(String),
@@ -116,6 +116,26 @@ pub enum Output {
     Ready,
     /// The session was just resumed (RESUMED dispatch handled).
     Resumed,
+}
+
+impl fmt::Debug for Output {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(_) => f.write_str("Send([REDACTED])"),
+            Self::Dispatch { event, .. } => f
+                .debug_struct("Dispatch")
+                .field("event", event)
+                .finish_non_exhaustive(),
+            Self::Reconnect { resume, url } => f
+                .debug_struct("Reconnect")
+                .field("resume", resume)
+                .field("url", url)
+                .finish(),
+            Self::Fatal(message) => f.debug_tuple("Fatal").field(message).finish(),
+            Self::Ready => f.write_str("Ready"),
+            Self::Resumed => f.write_str("Resumed"),
+        }
+    }
 }
 
 /// Raw shape of every gateway frame: `{"op", "d", "s", "t"}`.
@@ -152,6 +172,7 @@ pub struct GatewaySession {
     next_heartbeat_at: Option<Timestamp>,
     /// Set when we've sent a heartbeat and are still waiting for op 11.
     awaiting_ack: bool,
+    user_session: bool,
 }
 
 impl fmt::Debug for GatewaySession {
@@ -177,7 +198,20 @@ impl GatewaySession {
             heartbeat_interval: None,
             next_heartbeat_at: None,
             awaiting_ack: false,
+            user_session: false,
         }
+    }
+
+    /// Reuse transport lifecycle only; user Identify has no bot intent bits.
+    /// Account protocol compatibility remains experimental.
+    pub fn new_user_session(token: Secret<String>, properties_os: String) -> Self {
+        let mut session = Self::new(GatewayConfig {
+            token,
+            intents: Intents(0),
+            properties_os,
+        });
+        session.user_session = true;
+        session
     }
 
     pub fn state(&self) -> State {
@@ -199,7 +233,7 @@ impl GatewaySession {
     }
 
     fn identify_payload(&self) -> String {
-        let payload = json!({
+        let mut payload = json!({
             "op": OP_IDENTIFY,
             "d": {
                 "token": self.cfg.token.expose_secret(),
@@ -211,6 +245,12 @@ impl GatewaySession {
                 },
             },
         });
+        if self.user_session {
+            if let Some(data) = payload.get_mut("d").and_then(Value::as_object_mut) {
+                data.remove("intents");
+                data.insert("compress".into(), Value::Bool(false));
+            }
+        }
         payload.to_string()
     }
 

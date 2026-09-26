@@ -32,7 +32,7 @@ use litecord_types::entity::EntityId;
 use litecord_types::memory::{
     MemoryItem, MemoryKind, MemoryPayload, MemoryStatus, NewMemory, RelationType,
 };
-use litecord_types::provenance::{Confidence, DiscordIdentity, Origin, SourceRef};
+use litecord_types::provenance::{Confidence, Origin, SourceRef};
 use litecord_types::social::Message;
 use litecord_types::tasks::{TaskDraft, TaskPriority, TaskStatus};
 use litecord_types::{ConversationId, DurationMs, MemoryId, MessageId, Timestamp};
@@ -251,8 +251,7 @@ impl MemoryService {
             let author_name = repos::users::get(r, record.message.author_id)?
                 .map(|u| u.user.display_name().to_string())
                 .unwrap_or_else(|| record.message.author_id.to_string());
-            let me =
-                repos::accounts::current(r, DiscordIdentity::UserSocialSdk)?.map(|a| a.user_id);
+            let me = repos::accounts::current_user(r)?.map(|a| a.user_id);
             Ok(Some((record, author_name, me)))
         })?;
 

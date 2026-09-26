@@ -140,7 +140,7 @@ impl Workspace {
         let status = &snapshot.omni.status;
         egui::Frame::new()
             .fill(theme::OMNI.gamma_multiply(0.07))
-            .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.35)))
+            .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.35)))
             .corner_radius(8)
             .inner_margin(12)
             .show(ui, |ui| {
@@ -239,7 +239,7 @@ impl Workspace {
                     for c in &snapshot.omni.checkins {
                         egui::Frame::new()
                             .fill(theme::OMNI.gamma_multiply(0.06))
-                            .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.3)))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.3)))
                             .corner_radius(8)
                             .inner_margin(10)
                             .show(ui, |ui| {
@@ -365,7 +365,7 @@ impl Workspace {
             .count();
         egui::Frame::new()
             .fill(theme::RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
@@ -445,7 +445,7 @@ impl Workspace {
             for (title, body, button, id) in cards {
                 egui::Frame::new()
                     .fill(theme::OMNI.gamma_multiply(0.07))
-                    .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.35)))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.35)))
                     .corner_radius(8)
                     .inner_margin(10)
                     .show(ui, |ui| {
@@ -505,7 +505,10 @@ impl Workspace {
         };
         egui::Frame::new()
             .fill(theme::SIDEBAR)
-            .stroke(egui::Stroke::new(1.0, theme::WARNING.gamma_multiply(0.5)))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                theme::WARNING.gamma_multiply(0.5),
+            ))
             .corner_radius(8)
             .inner_margin(12)
             .show(ui, |ui| {
@@ -579,6 +582,9 @@ impl Workspace {
                                 }
                                 DiscordIdentity::UserSocialSdk => {
                                     theme::chip(ui, "Acts as you", theme::PRIMARY)
+                                }
+                                DiscordIdentity::UserSession => {
+                                    theme::chip(ui, "User session (read only)", theme::PRIMARY)
                                 }
                             }
                             theme::chip(ui, &class, action_class_color(action.class));
@@ -685,7 +691,7 @@ fn metric_card(ui: &mut Ui, label: &str, count: usize) -> egui::Response {
             } else {
                 theme::RAISED
             },
-            egui::Stroke::new(1.0, theme::BORDER),
+            egui::Stroke::new(1.0_f32, theme::BORDER),
             egui::StrokeKind::Inside,
         );
         painter.text(
@@ -745,7 +751,9 @@ fn attention_row(ui: &mut Ui, category: &str, title: &str, body: &str, action: &
 
 fn origin_label(origin: Origin) -> &'static str {
     match origin {
-        Origin::DiscordSocialSdk | Origin::DiscordBotGateway => "Observed from Discord",
+        Origin::DiscordSocialSdk | Origin::DiscordUserSession | Origin::DiscordBotGateway => {
+            "Observed from Discord"
+        }
         Origin::UserProvided => "Added by you",
         Origin::LocalApplication => "Suggested task",
         Origin::AgentDerived => "From Omni",

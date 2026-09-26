@@ -43,7 +43,7 @@ fn preview(s: &str) -> String {
 }
 
 fn me(conn: &Connection) -> Result<Option<UserId>> {
-    Ok(repos::accounts::current(conn, DiscordIdentity::UserSocialSdk)?.map(|a| a.user_id))
+    Ok(repos::accounts::current_user(conn)?.map(|a| a.user_id))
 }
 
 fn name_of(conn: &Connection, id: UserId) -> Result<String> {
@@ -214,11 +214,13 @@ impl LitecordApp {
             }
             _ => {
                 let caps = self.inner.backend.capabilities();
-                let can = if is_guild_channel {
-                    caps.is_usable(Capability::GuildMessages)
-                } else {
-                    caps.is_usable(Capability::DmSend)
-                };
+                let can = self.inner.backend.mode()
+                    != litecord_types::capability::BackendMode::UserSession
+                    && if is_guild_channel {
+                        caps.is_usable(Capability::GuildMessages)
+                    } else {
+                        caps.is_usable(Capability::DmSend)
+                    };
                 (
                     &self.inner.hydrator,
                     caps,
@@ -1092,6 +1094,13 @@ impl LitecordApp {
         Ok(self.inner.backend.complete_sign_in(redirect_url).await?)
     }
 
+    pub async fn authenticate_session(
+        &self,
+        credential: litecord_core::secrets::Secret<String>,
+    ) -> Result<()> {
+        Ok(self.inner.backend.authenticate_session(credential).await?)
+    }
+
     /// Sign out of Discord. Local memory is kept (it is the user's data);
     /// hydration pauses until the next sign-in.
     pub async fn sign_out(&self) -> Result<()> {
@@ -1103,7 +1112,14 @@ impl LitecordApp {
         Ok(self
             .inner
             .db
-            .read(|r| repos::app_state::get(r, "session_state"))?
+            .read(|r| {
+                repos::app_state::get(
+                    r,
+                    litecord_store::reducer::session_state_key(
+                        self.inner.backend.source().identity(),
+                    ),
+                )
+            })?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default())
     }

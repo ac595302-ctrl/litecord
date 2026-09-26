@@ -362,7 +362,9 @@ pub(crate) fn origin_label(origin: Origin) -> &'static str {
         Origin::UserProvided => "You",
         Origin::AgentDerived => "From Omni",
         Origin::LocalApplication => "From your messages",
-        Origin::DiscordSocialSdk | Origin::DiscordBotGateway => "From Discord",
+        Origin::DiscordSocialSdk | Origin::DiscordUserSession | Origin::DiscordBotGateway => {
+            "From Discord"
+        }
         Origin::Imported => "Imported",
         Origin::Synthetic => "Demo data",
     }

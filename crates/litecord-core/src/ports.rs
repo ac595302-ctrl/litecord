@@ -37,6 +37,8 @@ pub enum BackendError {
     RateLimited { retry_after: DurationMs },
     #[error("authentication failed: {0}")]
     Authentication(String),
+    #[error("permission denied: {what}")]
+    PermissionDenied { what: String },
     #[error("sdk error: {0}")]
     Sdk(String),
 }
@@ -61,6 +63,7 @@ impl From<BackendError> for Error {
             BackendError::Unsupported { .. } => ErrorKind::Unsupported,
             BackendError::NotFound { .. } => ErrorKind::NotFound,
             BackendError::Authentication(_) => ErrorKind::Authentication,
+            BackendError::PermissionDenied { .. } => ErrorKind::Discord,
             BackendError::RateLimited { .. } | BackendError::Sdk(_) => ErrorKind::Discord,
         };
         Error::with_source(kind, e.to_string(), e)
@@ -181,6 +184,16 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     /// What this backend can actually do right now.
     fn capabilities(&self) -> CapabilitySet;
 
+    /// Bind an account source to the database's previously connected account.
+    fn bind_account(&self, _account: UserId) -> BackendResult<()> {
+        Ok(())
+    }
+
+    /// Epoch used to reject responses from a cancelled account session.
+    fn session_generation(&self) -> Option<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)> {
+        None
+    }
+
     /// Start delivering live events into `sink`. Idempotent. Implementations
     /// on callback threads must use `IngestSender::try_send`.
     async fn connect(&self, sink: IngestSender) -> BackendResult<()>;
@@ -201,6 +214,17 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     async fn complete_sign_in(&self, _redirect_url: &str) -> BackendResult<()> {
         Err(BackendError::Authentication(
             "this backend has no interactive sign-in".into(),
+        ))
+    }
+
+    /// Explicit account-owner supplied session credential. This is a distinct
+    /// experimental auth flow, never an OAuth redirect or a model-facing tool.
+    async fn authenticate_session(
+        &self,
+        _credential: crate::secrets::Secret<String>,
+    ) -> BackendResult<()> {
+        Err(BackendError::Authentication(
+            "this backend does not accept session credentials".into(),
         ))
     }
 

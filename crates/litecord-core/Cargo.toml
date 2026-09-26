@@ -15,6 +15,11 @@ tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native", "apple-native", "linux-native"], optional = true }
+
+[features]
+default = []
+os-keychain = ["dep:keyring"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

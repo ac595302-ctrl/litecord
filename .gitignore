@@ -7,3 +7,5 @@
 /vendor/discord-sdk/*
 !/vendor/discord-sdk/README.md
 /.claude/
+/.litecord-account/
+/.litecord-demo/

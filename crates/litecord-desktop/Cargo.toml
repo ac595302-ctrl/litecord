@@ -38,3 +38,4 @@ omni-opencode = ["litecord-harness/opencode"]
 screenshots = ["gui", "litecord-ui/screenshots"]
 # Real application-bot source; enabled at runtime by LITECORD_BOT_TOKEN.
 discord-bot = ["dep:discord-adapter", "discord-adapter/discord-bot"]
+discord-user-session = ["dep:discord-adapter", "discord-adapter/discord-user-session", "litecord-core/os-keychain"]

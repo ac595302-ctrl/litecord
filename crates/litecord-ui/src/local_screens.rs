@@ -7,6 +7,8 @@ use crate::{bridge::Command, theme, workspace::Workspace};
 use eframe::egui::{self, Ui};
 use litecord_app::view::{SettingRow, SettingsViewModel};
 use litecord_features::feature::{FeatureInfo, SettingKind};
+use litecord_types::capability::BackendMode;
+use litecord_types::provenance::Origin;
 use litecord_types::social::SessionState;
 use serde_json::Value;
 
@@ -33,12 +35,20 @@ impl Workspace {
             .show(ui, |ui| {
                 ui.heading("Settings");
                 ui.label(
-                    egui::RichText::new(
-                        "Available controls come from the features compiled into this build.",
-                    )
-                    .color(theme::MUTED),
+                    egui::RichText::new("Customize your experience and manage your account.")
+                        .color(theme::MUTED),
                 );
                 ui.add_space(12.0);
+
+                if snapshot.diagnostics.backend_mode == BackendMode::UserSession {
+                    discord_session_connection(
+                        self,
+                        ui,
+                        &snapshot.account,
+                        &snapshot.diagnostics.session,
+                    );
+                    ui.add_space(12.0);
+                }
 
                 if self.settings_section.as_deref().is_none_or(|s| s == "Omni") {
                     self.omni_settings(ui, &snapshot.omni);
@@ -94,6 +104,103 @@ impl Workspace {
 
                 backend_diagnostics(ui, &settings, &snapshot.diagnostics);
             });
+    }
+}
+
+fn discord_session_connection(
+    workspace: &mut Workspace,
+    ui: &mut Ui,
+    account: &litecord_app::people::AccountViewModel,
+    state: &SessionState,
+) {
+    theme::section_label(ui, "Discord connection");
+    egui::Frame::new()
+        .fill(theme::SIDEBAR)
+        .inner_margin(egui::Margin::same(10))
+        .corner_radius(egui::CornerRadius::same(8))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Experimental account connection; Discord forbids account automation and may terminate accounts.",
+                )
+                .color(theme::WARNING),
+            );
+            ui.label(
+                egui::RichText::new("This account connection is read-only.")
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal_wrapped(|ui| {
+                theme::chip(
+                    ui,
+                    &format!("Account · {}", workspace.display(&account.display_name)),
+                    theme::SECONDARY,
+                );
+                theme::chip(
+                    ui,
+                    &format!("State · {}", session_label(state)),
+                    if state.is_online() {
+                        theme::SUCCESS
+                    } else {
+                        theme::MUTED
+                    },
+                );
+                theme::chip(
+                    ui,
+                    &format!("Source · {}", account_source_label(account.origin)),
+                    theme::MUTED,
+                );
+            });
+
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Session credential").strong());
+            ui.add_enabled(
+                !workspace.busy,
+                egui::TextEdit::singleline(&mut workspace.discord_session_draft)
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Paste credential"),
+            );
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let can_connect =
+                    !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
+                if ui
+                    .add_enabled(can_connect, egui::Button::new("Connect"))
+                    .clicked()
+                {
+                    let credential = std::mem::take(&mut workspace.discord_session_draft);
+                    workspace.send(Command::ConnectSession(
+                        litecord_core::secrets::Secret::new(credential),
+                    ));
+                }
+
+                let connected =
+                    account.user_id.is_some() || !matches!(state, SessionState::LoggedOut);
+                if ui
+                    .add_enabled(!workspace.busy && connected, egui::Button::new("Log out"))
+                    .clicked()
+                {
+                    workspace.discord_session_draft.clear();
+                    workspace.send(Command::DiscordSignOut);
+                }
+            });
+        });
+}
+
+fn account_source_label(origin: Option<Origin>) -> &'static str {
+    match origin {
+        Some(Origin::DiscordSocialSdk | Origin::DiscordUserSession) => "User session (read only)",
+        Some(Origin::DiscordBotGateway) => "Discord bot",
+        Some(Origin::UserProvided) => "User provided",
+        Some(Origin::LocalApplication) => "Local application",
+        Some(Origin::AgentDerived) => "Omni",
+        Some(Origin::Imported) => "Imported",
+        Some(Origin::Synthetic) => "Synthetic demo",
+        None => "No account connected",
     }
 }
 
@@ -380,6 +487,7 @@ fn backend_label(mode: litecord_types::capability::BackendMode) -> &'static str 
         BackendMode::PresenceOnly => "Presence only",
         BackendMode::Demo => "Demo · synthetic",
         BackendMode::BotBridge => "Bot bridge",
+        BackendMode::UserSession => "User session (read only)",
     }
 }
 
@@ -398,4 +506,94 @@ fn session_label(session: &SessionState) -> &'static str {
 
 fn quiet_empty(ui: &mut Ui, message: &str) {
     ui.label(egui::RichText::new(message).color(theme::MUTED));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge;
+    use discord_adapter::{fixtures, MockBackend};
+    use litecord_app::LitecordApp;
+    use litecord_core::config::LitecordConfig;
+    use litecord_layout::Destination;
+    use litecord_types::{provenance::Origin, Timestamp};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_session_settings_masks_credential_and_shows_connection_metadata() {
+        const CREDENTIAL: &str = "session_credential_sentinel_b28c";
+
+        let backend = Arc::new(MockBackend::new(fixtures::generate(83, Timestamp::now())));
+        let app = LitecordApp::builder(LitecordConfig::default())
+            .backend(backend)
+            .in_memory()
+            .start()
+            .await
+            .unwrap();
+        let selection = bridge::Selection {
+            generation: 1,
+            destination: Destination::Settings,
+            conversation: None,
+            contact: None,
+            before: None,
+            palette_query: String::new(),
+            task: None,
+            omni_session: None,
+        };
+        let mut snapshot = bridge::snapshot(&app, selection.clone(), None).unwrap();
+        snapshot.diagnostics.backend_mode = BackendMode::UserSession;
+        snapshot.account.origin = Some(Origin::DiscordUserSession);
+        snapshot.account.display_name = "Example account".into();
+
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut workspace =
+            Workspace::new(app.clone(), tokio::runtime::Handle::current(), ctx.clone());
+        workspace.selection = selection;
+        workspace.discord_session_draft = CREDENTIAL.to_owned();
+        workspace.snapshot = Some(Arc::new(snapshot));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| workspace.draw(ui));
+        let rendered = rendered_text(&output);
+
+        assert!(!rendered.contains(CREDENTIAL));
+        assert!(
+            rendered.contains("Experimental account connection; Discord forbids account automation and may terminate accounts.")
+        );
+        assert!(rendered.contains("User session (read only)"));
+        assert!(rendered.contains("Example account"));
+
+        drop(workspace);
+        app.shutdown().await;
+    }
+
+    fn rendered_text(output: &egui::FullOutput) -> String {
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            collect_shape_text(&clipped.shape, &mut text);
+        }
+        text
+    }
+
+    fn collect_shape_text(shape: &egui::Shape, text: &mut String) {
+        match shape {
+            egui::Shape::Text(text_shape) => {
+                text.push_str(&text_shape.galley.job.text);
+                text.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_shape_text(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
 }

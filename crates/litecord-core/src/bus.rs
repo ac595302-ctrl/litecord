@@ -100,6 +100,37 @@ impl Drop for BytesTicket {
 struct Queued {
     env: SourceEnvelope,
     _ticket: BytesTicket,
+    guard: Option<(Arc<AtomicU64>, u64)>,
+    acknowledgement:
+        Option<tokio::sync::oneshot::Sender<Result<litecord_types::Revision, IngestCommitError>>>,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("ingest was rejected or could not be committed")]
+pub struct IngestCommitError;
+
+/// Ephemeral delivery metadata stays outside serialized Discord events.
+#[derive(Debug)]
+pub struct IngestDelivery {
+    pub envelope: SourceEnvelope,
+    acknowledgement:
+        Option<tokio::sync::oneshot::Sender<Result<litecord_types::Revision, IngestCommitError>>>,
+}
+impl IngestDelivery {
+    pub fn reduce(
+        self,
+        reducer: impl FnOnce(SourceEnvelope) -> Result<litecord_types::Revision, IngestCommitError>,
+    ) {
+        let result = reducer(self.envelope);
+        if let Some(tx) = self.acknowledgement {
+            let _ = tx.send(result);
+        }
+    }
+    pub fn finish(self, result: Result<litecord_types::Revision, IngestCommitError>) {
+        if let Some(tx) = self.acknowledgement {
+            let _ = tx.send(result);
+        }
+    }
 }
 
 /// Outcome of a non-blocking enqueue.
@@ -125,9 +156,25 @@ pub struct IngestSender {
     /// Byte budget, one permit per KiB.
     budget: Arc<Semaphore>,
     budget_kib: u32,
+    guard: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl IngestSender {
+    pub fn with_session_guard(&self, generation: Arc<AtomicU64>, epoch: u64) -> Self {
+        let mut sender = self.clone();
+        sender.guard = Some((generation, epoch));
+        sender
+    }
+    pub async fn send_committed(
+        &self,
+        env: SourceEnvelope,
+    ) -> Result<litecord_types::Revision, IngestCommitError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.enqueue(env, Some(tx))
+            .await
+            .map_err(|_| IngestCommitError)?;
+        rx.await.map_err(|_| IngestCommitError)?
+    }
     /// KiB permits for an envelope of `bytes`: `max(1, ceil(bytes / 1024))`,
     /// capped at the whole budget so an oversized envelope is still admitted
     /// once the queue is empty instead of deadlocking.
@@ -138,6 +185,15 @@ impl IngestSender {
 
     /// Enqueue, waiting for both a free slot and enough byte budget.
     pub async fn send(&self, env: SourceEnvelope) -> Result<(), IngestClosed> {
+        self.enqueue(env, None).await
+    }
+    async fn enqueue(
+        &self,
+        env: SourceEnvelope,
+        acknowledgement: Option<
+            tokio::sync::oneshot::Sender<Result<litecord_types::Revision, IngestCommitError>>,
+        >,
+    ) -> Result<(), IngestClosed> {
         let bytes = env.approx_bytes();
         let permits = self.permits_for(bytes);
         let permit = tokio::select! {
@@ -149,6 +205,8 @@ impl IngestSender {
             .send(Queued {
                 env,
                 _ticket: ticket,
+                guard: self.guard.clone(),
+                acknowledgement,
             })
             .await
             .map_err(|_| IngestClosed)?;
@@ -173,6 +231,8 @@ impl IngestSender {
         match self.tx.try_send(Queued {
             env,
             _ticket: ticket,
+            guard: self.guard.clone(),
+            acknowledgement: None,
         }) {
             Ok(()) => {
                 self.stats.enqueued.fetch_add(1, Ordering::Relaxed);
@@ -226,11 +286,40 @@ pub struct IngestReceiver {
 impl IngestReceiver {
     /// Take the next envelope; its byte budget is released immediately.
     pub async fn recv(&mut self) -> Option<SourceEnvelope> {
-        self.rx.recv().await.map(|q| q.env)
+        self.recv_delivery().await.map(|d| d.envelope)
     }
 
     pub fn try_recv(&mut self) -> Option<SourceEnvelope> {
-        self.rx.try_recv().ok().map(|q| q.env)
+        self.try_recv_delivery().map(|d| d.envelope)
+    }
+
+    fn delivery(q: Queued) -> Option<IngestDelivery> {
+        if q.guard
+            .as_ref()
+            .is_some_and(|(generation, epoch)| generation.load(Ordering::Acquire) != *epoch)
+        {
+            return None;
+        }
+        Some(IngestDelivery {
+            envelope: q.env,
+            acknowledgement: q.acknowledgement,
+        })
+    }
+    pub async fn recv_delivery(&mut self) -> Option<IngestDelivery> {
+        loop {
+            let q = self.rx.recv().await?;
+            if let Some(delivery) = Self::delivery(q) {
+                return Some(delivery);
+            }
+        }
+    }
+    pub fn try_recv_delivery(&mut self) -> Option<IngestDelivery> {
+        loop {
+            let q = self.rx.try_recv().ok()?;
+            if let Some(delivery) = Self::delivery(q) {
+                return Some(delivery);
+            }
+        }
     }
 
     /// Returns `true` once after any overflow, then resets.
@@ -286,6 +375,7 @@ pub fn ingest_channel_with_budget(
             capacity,
             budget: budget.clone(),
             budget_kib,
+            guard: None,
         },
         IngestReceiver { rx, stats, budget },
     )
@@ -478,5 +568,44 @@ mod tests {
         drop(rx);
         assert_eq!(tx.try_send(env()), TrySendOutcome::Closed);
         assert_eq!(tx.send(env()).await, Err(IngestClosed));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_producer_waits_for_commit_and_observes_failure() {
+        let (tx, mut rx) = ingest_channel(2);
+        let sender = tx.clone();
+        let pending = tokio::spawn(async move { sender.send_committed(env()).await });
+        let delivery = rx.recv_delivery().await.unwrap();
+        assert!(
+            !pending.is_finished(),
+            "queue admission is not durable acknowledgement"
+        );
+        delivery.reduce(|_| Err(IngestCommitError));
+        assert!(pending.await.unwrap().is_err());
+        let sender = tx.clone();
+        let pending = tokio::spawn(async move { sender.send_committed(env()).await });
+        rx.recv_delivery()
+            .await
+            .unwrap()
+            .reduce(|_| Ok(litecord_types::Revision(9)));
+        assert_eq!(pending.await.unwrap().unwrap(), litecord_types::Revision(9));
+    }
+
+    #[tokio::test]
+    async fn logout_epoch_rejects_queued_old_session_and_releases_budget() {
+        let (tx, mut rx) = ingest_channel(4);
+        let generation = Arc::new(AtomicU64::new(1));
+        tx.with_session_guard(generation.clone(), 1)
+            .send(env())
+            .await
+            .unwrap();
+        generation.store(2, Ordering::Release);
+        assert!(rx.try_recv_delivery().is_none());
+        assert_eq!(tx.bytes_in_flight(), 0);
+        tx.with_session_guard(generation, 2)
+            .send(env())
+            .await
+            .unwrap();
+        assert!(rx.recv_delivery().await.is_some());
     }
 }

@@ -257,7 +257,7 @@ impl Workspace {
         painter.rect_stroke(
             zone.shrink(1.0),
             4.0,
-            Stroke::new(1.5, theme::PRIMARY),
+            Stroke::new(1.5_f32, theme::PRIMARY),
             egui::StrokeKind::Inside,
         );
         painter.text(
@@ -299,7 +299,7 @@ impl Workspace {
         painter.rect_stroke(
             rect,
             6.0,
-            Stroke::new(1.0, theme::PRIMARY),
+            Stroke::new(1.0_f32, theme::PRIMARY),
             egui::StrokeKind::Inside,
         );
         painter.galley(rect.min + egui::vec2(10.0, 6.0), galley, theme::TEXT);
@@ -318,7 +318,7 @@ impl Workspace {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(theme::RAISED)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER))
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(14, 8))
                     .show(ui, |ui| {

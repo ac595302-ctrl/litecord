@@ -81,6 +81,7 @@ pub enum Followup {
 pub fn session_state_key(identity: DiscordIdentity) -> &'static str {
     match identity {
         DiscordIdentity::UserSocialSdk => "session_state",
+        DiscordIdentity::UserSession => "user_session_state",
         DiscordIdentity::ApplicationBot => "bot_session_state",
     }
 }
@@ -104,6 +105,11 @@ pub fn reduce(
 
     match &env.event {
         DiscordEvent::SessionChanged { state } => {
+            if env.source == litecord_types::provenance::DiscordSource::UserSession
+                && *state == SessionState::Ready
+            {
+                crate::repos::account_catchup::reconnect(tx)?;
+            }
             let json = serde_json::to_string(state)?;
             // User and bot sessions are tracked separately: a bot outage
             // must never look like the user being signed out.
@@ -160,15 +166,18 @@ pub fn reduce(
         }
 
         DiscordEvent::GuildUpserted { guild } => {
-            guilds::upsert(tx, guild, origin, observed_at)?;
+            guilds::upsert_from_source(tx, guild, origin, origin.as_str(), observed_at)?;
         }
 
         DiscordEvent::GuildRemoved { guild_id } => {
-            guilds::mark_departed(tx, *guild_id, origin, observed_at)?;
+            guilds::mark_departed_from_source(tx, *guild_id, origin, origin.as_str(), observed_at)?;
         }
 
         DiscordEvent::ChannelUpserted { channel } => {
-            channels::upsert(tx, channel, origin, observed_at)?;
+            channels::upsert_from_source(tx, channel, origin, origin.as_str(), observed_at)?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                account_channel_conversation(tx, channel, origin, observed_at)?;
+            }
         }
 
         DiscordEvent::ConversationUpserted { conversation } => {
@@ -176,8 +185,15 @@ pub fn reduce(
         }
 
         DiscordEvent::MessageCreated { message } | DiscordEvent::MessageUpdated { message } => {
-            let created_conversation_stub =
-                apply_message(tx, message, origin, observed_at, true, &mut followups)?;
+            let created_conversation_stub = apply_message(
+                tx,
+                message,
+                origin,
+                observed_at,
+                false,
+                true,
+                &mut followups,
+            )?;
             if created_conversation_stub {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
             }
@@ -209,14 +225,26 @@ pub fn reduce(
         }
 
         DiscordEvent::GuildsSnapshot { guilds: list } => {
-            guilds::replace_all(tx, list, origin, observed_at)?;
+            guilds::replace_all_from_source(tx, list, origin, origin.as_str(), observed_at)?;
         }
 
         DiscordEvent::GuildChannelsSnapshot {
             guild_id,
             channels: list,
         } => {
-            channels::replace_for_guild(tx, *guild_id, list, origin, observed_at)?;
+            channels::replace_for_guild_from_source(
+                tx,
+                *guild_id,
+                list,
+                origin,
+                origin.as_str(),
+                observed_at,
+            )?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                for channel in list {
+                    account_channel_conversation(tx, channel, origin, observed_at)?;
+                }
+            }
         }
 
         DiscordEvent::ConversationsSnapshot {
@@ -227,15 +255,61 @@ pub fn reduce(
             }
         }
 
-        DiscordEvent::MessagesSnapshot { messages: list, .. } => {
+        DiscordEvent::MessagesSnapshot {
+            conversation_id,
+            messages: list,
+        } => {
             let mut conversation_stub_created = false;
             for m in list {
                 conversation_stub_created |=
-                    apply_message(tx, m, origin, observed_at, true, &mut followups)?;
+                    apply_message(tx, m, origin, observed_at, true, true, &mut followups)?;
             }
             if conversation_stub_created {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
             }
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::account_catchup::track(
+                    tx,
+                    *conversation_id,
+                    list.iter().map(|m| m.id).max(),
+                )?;
+            }
+        }
+
+        DiscordEvent::MessagesCatchupPage {
+            conversation_id,
+            messages: list,
+            has_more,
+        } => {
+            if env.source != litecord_types::provenance::DiscordSource::UserSession {
+                return Err(crate::error::StoreError::Invariant(
+                    "account catch-up requires the account source".into(),
+                ));
+            }
+            let extract_since = observed_at.saturating_sub(HISTORY_EXTRACTION_WINDOW);
+            for message in list {
+                if message.conversation_id != *conversation_id {
+                    return Err(crate::error::StoreError::Invariant(
+                        "catch-up channel mismatch".into(),
+                    ));
+                }
+                apply_message(
+                    tx,
+                    message,
+                    origin,
+                    observed_at,
+                    true,
+                    message.sent_at >= extract_since,
+                    &mut followups,
+                )?;
+            }
+            crate::repos::account_catchup::track(tx, *conversation_id, None)?;
+            crate::repos::account_catchup::advance(
+                tx,
+                *conversation_id,
+                list.iter().map(|m| m.id).max(),
+                *has_more,
+            )?;
         }
 
         DiscordEvent::MessagesPage {
@@ -248,7 +322,7 @@ pub fn reduce(
             for m in list {
                 let extract = m.sent_at >= extract_since;
                 conversation_stub_created |=
-                    apply_message(tx, m, origin, observed_at, extract, &mut followups)?;
+                    apply_message(tx, m, origin, observed_at, true, extract, &mut followups)?;
             }
             if conversation_stub_created {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
@@ -274,16 +348,22 @@ pub fn reduce(
 /// Shared by `MessageCreated`/`MessageUpdated`, `MessagesSnapshot` and
 /// `MessagesPage`. Returns whether a conversation stub was created (so the
 /// batch variants can raise a single `Hydrate(DmSummaries)`). A newly
-/// created message is queued for memory extraction when `extract` is set.
+/// created message is queued for memory extraction when `extract` is set;
+/// historical insertions carry a distinct event from live creations.
 fn apply_message(
     tx: &WriteTx<'_>,
     message: &litecord_types::social::Message,
     origin: litecord_types::provenance::Origin,
     observed_at: litecord_types::Timestamp,
+    historical: bool,
     extract: bool,
     followups: &mut Vec<Followup>,
 ) -> StoreResult<bool> {
-    let outcome = messages::upsert(tx, message, origin, observed_at)?;
+    let outcome = if historical {
+        messages::upsert_historical(tx, message, origin, observed_at)?
+    } else {
+        messages::upsert(tx, message, origin, observed_at)?
+    };
     if outcome.created_author_stub {
         followups.push(Followup::Hydrate(HydrationKey::User {
             user_id: message.author_id,
@@ -296,6 +376,33 @@ fn apply_message(
         });
     }
     Ok(outcome.created_conversation_stub)
+}
+
+fn account_channel_conversation(
+    tx: &WriteTx<'_>,
+    channel: &litecord_types::social::Channel,
+    origin: litecord_types::provenance::Origin,
+    observed_at: litecord_types::Timestamp,
+) -> StoreResult<()> {
+    use litecord_types::social::{ChannelCapabilities, Conversation, ConversationKind};
+    if channel.capabilities.contains(ChannelCapabilities::READABLE) {
+        conversations::upsert(
+            tx,
+            &Conversation {
+                id: ConversationId(channel.id.get()),
+                kind: ConversationKind::GuildChannel,
+                recipient_id: None,
+                guild_id: Some(channel.guild_id),
+                lobby_id: None,
+                title: Some(channel.name.clone()),
+                last_message_id: None,
+                last_activity_at: None,
+            },
+            origin,
+            observed_at,
+        )?;
+    }
+    Ok(())
 }
 
 fn dedupe(followups: Vec<Followup>) -> Vec<Followup> {

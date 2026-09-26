@@ -35,9 +35,10 @@ impl TrustLevel {
     /// Default trust label for content with the given origin.
     pub const fn for_origin(origin: Origin) -> TrustLevel {
         match origin {
-            Origin::DiscordSocialSdk | Origin::DiscordBotGateway | Origin::Synthetic => {
-                TrustLevel::ExternalDiscordContent
-            }
+            Origin::DiscordSocialSdk
+            | Origin::DiscordUserSession
+            | Origin::DiscordBotGateway
+            | Origin::Synthetic => TrustLevel::ExternalDiscordContent,
             Origin::UserProvided => TrustLevel::UserConfirmedMemory,
             Origin::AgentDerived | Origin::LocalApplication | Origin::Imported => {
                 TrustLevel::AgentDerived

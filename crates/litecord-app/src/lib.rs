@@ -5,6 +5,7 @@
 //! UI-framework-agnostic services and view models (see [`services`] and
 //! [`view`]). A UI depends on this crate only.
 
+mod account_recovery;
 mod app;
 pub mod automations;
 pub mod freshness;

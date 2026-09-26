@@ -14,7 +14,6 @@ use litecord_core::error::{Error, Result};
 use litecord_harness::{LoginState, OmniMode};
 use litecord_store::repos;
 use litecord_store::repos::omni::{AutomationRecord, NewSession};
-use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::ConversationKind;
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{Revision, Timestamp, UserId};
@@ -385,8 +384,7 @@ impl OmniService {
         let default_visibility = self.default_visibility();
         self.db().read(|r| -> Result<_> {
             let current = r.revision().get();
-            let me =
-                repos::accounts::current(r, DiscordIdentity::UserSocialSdk)?.map(|a| a.user_id);
+            let me = repos::accounts::current_user(r)?.map(|a| a.user_id);
             let mut found = Vec::new();
             for e in repos::events::since(r, Revision(a.last_checked_revision), 500)? {
                 let litecord_core::events::UnifiedEvent::MessageCreated {

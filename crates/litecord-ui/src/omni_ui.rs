@@ -255,7 +255,7 @@ impl Workspace {
         };
         egui::Frame::new()
             .fill(theme::WARNING.gamma_multiply(0.08))
-            .stroke(Stroke::new(1.0, theme::WARNING.gamma_multiply(0.5)))
+            .stroke(Stroke::new(1.0_f32, theme::WARNING.gamma_multiply(0.5)))
             .corner_radius(8)
             .inner_margin(10)
             .show(ui, |ui| {
@@ -926,7 +926,7 @@ fn omni_bubble(ui: &mut Ui, text: &str, streaming: bool) {
     egui::Frame::new()
         .fill(theme::OMNI.gamma_multiply(0.06))
         .stroke(Stroke::new(
-            1.0,
+            1.0_f32,
             theme::OMNI.gamma_multiply(if streaming { 0.5 } else { 0.2 }),
         ))
         .corner_radius(10)
