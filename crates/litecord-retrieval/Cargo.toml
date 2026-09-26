@@ -1,0 +1,20 @@
+[package]
+name = "litecord-retrieval"
+description = "Retrieval over unified memory without requiring an LLM: FTS5 lexical search, structured filters, temporal parsing, pluggable embeddings and explainable scoring."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
