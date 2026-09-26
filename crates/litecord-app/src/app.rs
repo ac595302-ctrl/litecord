@@ -31,6 +31,7 @@ use crate::runtime;
 pub struct AppBuilder {
     cfg: LitecordConfig,
     backend: Option<Arc<dyn SocialBackend>>,
+    bot: Option<Arc<dyn SocialBackend>>,
     clock: SharedClock,
     in_memory: bool,
 }
@@ -40,6 +41,7 @@ impl AppBuilder {
         Self {
             cfg,
             backend: None,
+            bot: None,
             clock: Arc::new(SystemClock),
             in_memory: false,
         }
@@ -48,6 +50,14 @@ impl AppBuilder {
     /// Use a specific backend instead of the one selected by configuration.
     pub fn backend(mut self, backend: Arc<dyn SocialBackend>) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    /// Add an application-bot source (optional second Discord source with
+    /// the `ApplicationBot` identity). It shares the ingest queue and the
+    /// canonical reducer but has its own hydrator and session state.
+    pub fn bot_backend(mut self, bot: Arc<dyn SocialBackend>) -> Self {
+        self.bot = Some(bot);
         self
     }
 
@@ -93,6 +103,15 @@ impl AppBuilder {
                 )),
             },
         };
+        let bot: Option<Arc<dyn SocialBackend>> = match self.bot {
+            Some(b) => Some(b),
+            None if cfg.backend.demo_bot => Some(Arc::new(MockBackend::demo_bot(
+                cfg.backend.demo_seed,
+                self.clock.now(),
+                self.clock.clone(),
+            ))),
+            None => None,
+        };
         drop(_g);
 
         let bus = AppEventBus::new(cfg.runtime.broadcast_capacity);
@@ -105,8 +124,24 @@ impl AppBuilder {
             self.clock.clone(),
             metrics.clone(),
         );
+        // The bot's freshness is session-scoped (in memory): its keys would
+        // otherwise collide with the user source's `sync_state` rows.
+        let bot_hydrator = bot.as_ref().map(|b| {
+            Hydrator::new(
+                b.clone(),
+                ingest.clone(),
+                Arc::new(litecord_hydrator::InMemoryFreshnessStore::new()),
+                &cfg.hydration,
+                self.clock.clone(),
+                metrics.clone(),
+            )
+        });
         let memory = MemoryService::with_heuristics(db.clone());
-        let executor = Arc::new(DefaultExecutor::new(db.clone(), Some(backend.clone())));
+        let mut executor = DefaultExecutor::new(db.clone(), Some(backend.clone()));
+        if let Some(b) = &bot {
+            executor = executor.with_bot(b.clone());
+        }
+        let executor = Arc::new(executor);
         let actions = ActionEngine::new(db.clone(), &cfg.agent, executor)?;
         let features =
             builtin_registry().map_err(|e| Error::internal(format!("feature registry: {e}")))?;
@@ -120,6 +155,7 @@ impl AppBuilder {
             db: db.clone(),
             bus: bus.clone(),
             hydrator: hydrator.clone(),
+            bot_hydrator: bot_hydrator.clone(),
             memory: memory.clone(),
             metrics: metrics.clone(),
             ingest: ingest.clone(),
@@ -131,6 +167,9 @@ impl AppBuilder {
         {
             let h = hydrator.clone();
             supervisor.spawn("hydrator", move |t| h.run(t));
+        }
+        if let Some(h) = bot_hydrator.clone() {
+            supervisor.spawn("bot-hydrator", move |t| h.run(t));
         }
         {
             let h = hydrator.clone();
@@ -162,7 +201,11 @@ impl AppBuilder {
             tracing::warn!(error = %e, "could not restore hydration queue");
         }
         hydrator.initial_hydration();
-        tracing::info!(mode = ?backend.mode(), "litecord started");
+        if let (Some(b), Some(h)) = (&bot, &bot_hydrator) {
+            b.connect(ingest.clone()).await?;
+            h.initial_hydration();
+        }
+        tracing::info!(mode = ?backend.mode(), bot = bot.is_some(), "litecord started");
 
         Ok(LitecordApp {
             inner: Arc::new(AppInner {
@@ -172,6 +215,8 @@ impl AppBuilder {
                 bus,
                 backend,
                 hydrator,
+                bot,
+                bot_hydrator,
                 memory,
                 actions,
                 metrics,
@@ -189,6 +234,8 @@ pub(crate) struct AppInner {
     pub bus: AppEventBus,
     pub backend: Arc<dyn SocialBackend>,
     pub hydrator: Arc<Hydrator>,
+    pub bot: Option<Arc<dyn SocialBackend>>,
+    pub bot_hydrator: Option<Arc<Hydrator>>,
     pub memory: MemoryService,
     pub tasks: TaskService,
     pub actions: ActionEngine,
@@ -256,6 +303,11 @@ impl LitecordApp {
     pub async fn shutdown(&self) -> ShutdownReport {
         if let Err(e) = self.inner.backend.disconnect().await {
             tracing::warn!(error = %e, "backend disconnect failed");
+        }
+        if let Some(bot) = &self.inner.bot {
+            if let Err(e) = bot.disconnect().await {
+                tracing::warn!(error = %e, "bot disconnect failed");
+            }
         }
         let grace = Duration::from_millis(self.inner.cfg.runtime.shutdown_grace_ms);
         let report = self.inner.supervisor.shutdown(grace).await;

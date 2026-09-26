@@ -23,6 +23,7 @@ use litecord_memory::{MemoryService, ReminderEngine};
 use litecord_store::reducer::{self, Followup, ReducerConfig};
 use litecord_store::{repos, Database};
 use litecord_types::actions::ActionStatus;
+use litecord_types::provenance::DiscordIdentity;
 
 /// Everything the reactor needs; cheap clones of shared handles.
 #[derive(Debug, Clone)]
@@ -30,6 +31,8 @@ pub(crate) struct ReactorCtx {
     pub db: Database,
     pub bus: AppEventBus,
     pub hydrator: Arc<Hydrator>,
+    /// Hydrator of the optional application-bot source.
+    pub bot_hydrator: Option<Arc<Hydrator>>,
     pub memory: MemoryService,
     pub metrics: Arc<Metrics>,
     pub ingest: IngestSender,
@@ -39,6 +42,12 @@ pub(crate) struct ReactorCtx {
 impl ReactorCtx {
     fn handle(&self, env: litecord_core::events::SourceEnvelope) {
         let kind = env.event.kind();
+        // Follow-ups go back to the source that produced the event.
+        let is_bot = env.source.identity() == DiscordIdentity::ApplicationBot;
+        let hydrator = match (&self.bot_hydrator, is_bot) {
+            (Some(bot), true) => bot,
+            _ => &self.hydrator,
+        };
         let committed = match reducer::apply(&self.db, &env, &self.reducer) {
             Ok(c) => c,
             Err(e) => {
@@ -59,8 +68,7 @@ impl ReactorCtx {
         for followup in committed.value.followups {
             match followup {
                 Followup::Hydrate(key) => {
-                    self.hydrator
-                        .request(HydrationRequest::immediate(key, HydrationReason::Event));
+                    hydrator.request(HydrationRequest::immediate(key, HydrationReason::Event));
                 }
                 Followup::ExtractMemory { message_id, .. } => {
                     // Cheap and deterministic (no LLM), so it runs inline;
@@ -79,8 +87,12 @@ impl ReactorCtx {
                     }
                 }
                 Followup::SessionChanged(state) => {
-                    self.hydrator.on_session_changed(&state);
-                    self.bus.publish(ApplicationEvent::SessionChanged { state });
+                    hydrator.on_session_changed(&state);
+                    // `SessionChanged` describes the *user's* session; bot
+                    // session changes surface through diagnostics instead.
+                    if !is_bot {
+                        self.bus.publish(ApplicationEvent::SessionChanged { state });
+                    }
                 }
             }
         }

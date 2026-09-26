@@ -15,6 +15,7 @@ read_pool_size = 2
 kind = "demo"                # "demo" (synthetic data) | "social_sdk" (needs feature + SDK)
 # application_id = 0         # Discord application id (public)
 demo_seed = 42
+demo_bot = false            # also run a synthetic application-bot source
 
 [runtime]
 event_queue_capacity = 1024  # bounded ingest queue; overflow => drop + resync

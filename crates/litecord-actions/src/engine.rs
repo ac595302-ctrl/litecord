@@ -18,8 +18,10 @@ use litecord_store::repos::actions::NewProposal;
 use litecord_store::repos::Connection;
 use litecord_store::Database;
 use litecord_types::actions::*;
+use litecord_types::capability::Capability;
 use litecord_types::ids::ActionId;
 use litecord_types::provenance::{DiscordIdentity, Origin};
+use litecord_types::social::ConversationKind;
 use litecord_types::tasks::TaskStatus;
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{DurationMs, Revision};
@@ -107,7 +109,30 @@ impl ActionEngine {
         based_on: Revision,
         rationale: Option<String>,
     ) -> Result<ProposeOutcome, ActionError> {
-        propose(&self.inner, action, actor, based_on, rationale).await
+        propose(
+            &self.inner,
+            action,
+            actor,
+            DiscordIdentity::UserSocialSdk,
+            based_on,
+            rationale,
+        )
+        .await
+    }
+
+    /// Propose an action to be performed as a specific Discord identity.
+    /// Bot and user identities are never substituted for one another: the
+    /// chosen identity is part of the proposal, shown to the user, and used
+    /// by the executor.
+    pub async fn propose_as(
+        &self,
+        action: AgentAction,
+        actor: Actor,
+        identity: DiscordIdentity,
+        based_on: Revision,
+        rationale: Option<String>,
+    ) -> Result<ProposeOutcome, ActionError> {
+        propose(&self.inner, action, actor, identity, based_on, rationale).await
     }
 
     pub fn get(&self, id: ActionId) -> Result<Option<ActionProposal>, ActionError> {
@@ -161,7 +186,7 @@ impl ActionEngine {
                 }
                 _ => proposal.action,
             };
-            validate_state(inner, tx, &action, &Actor::User)?;
+            validate_state(inner, tx, &action, &Actor::User, proposal.identity)?;
             let hash = payload_hash(&action)?;
             repos::actions::revoke_approvals(tx, id, now)?;
             let token = inner.issuer.issue(id, &hash, now, inner.approval_ttl)?;
@@ -211,8 +236,8 @@ impl ActionEngine {
     /// state, then runs the executor and records the result.
     pub async fn execute(&self, token: &ApprovalToken) -> Result<ExecutionOutcome, ActionError> {
         let inner = &self.inner;
-        let (action, actor) = claim_for_execution(inner, token)?;
-        run_executor(inner, token.action_id(), &action, &actor).await
+        let (action, actor, identity) = claim_for_execution(inner, token)?;
+        run_executor(inner, token.action_id(), &action, &actor, identity).await
     }
 }
 
@@ -224,7 +249,30 @@ impl ActionProposer {
         based_on: Revision,
         rationale: Option<String>,
     ) -> Result<ProposeOutcome, ActionError> {
-        propose(&self.inner, action, actor, based_on, rationale).await
+        propose(
+            &self.inner,
+            action,
+            actor,
+            DiscordIdentity::UserSocialSdk,
+            based_on,
+            rationale,
+        )
+        .await
+    }
+
+    /// Propose an action to be performed as a specific Discord identity.
+    /// Bot and user identities are never substituted for one another: the
+    /// chosen identity is part of the proposal, shown to the user, and used
+    /// by the executor.
+    pub async fn propose_as(
+        &self,
+        action: AgentAction,
+        actor: Actor,
+        identity: DiscordIdentity,
+        based_on: Revision,
+        rationale: Option<String>,
+    ) -> Result<ProposeOutcome, ActionError> {
+        propose(&self.inner, action, actor, identity, based_on, rationale).await
     }
 
     pub fn get(&self, id: ActionId) -> Result<Option<ActionProposal>, ActionError> {
@@ -241,7 +289,7 @@ impl ActionProposer {
 fn claim_for_execution(
     inner: &Inner,
     token: &ApprovalToken,
-) -> Result<(AgentAction, Actor), ActionError> {
+) -> Result<(AgentAction, Actor, DiscordIdentity), ActionError> {
     let id = token.action_id();
     let now = inner.db.now();
 
@@ -268,7 +316,7 @@ fn claim_for_execution(
     // A failed revalidation must still commit the invalidation, hence the
     // nested Result: the outer error aborts the transaction, the inner one
     // is returned after commit.
-    type Claimed = Result<(AgentAction, Actor), ActionError>;
+    type Claimed = Result<(AgentAction, Actor, DiscordIdentity), ActionError>;
     let committed = inner.db.write(|tx| -> Result<Claimed, ActionError> {
         let p = repos::actions::get(tx, id)?.ok_or(ActionError::NotFound(id))?;
         if p.status != ActionStatus::Approved {
@@ -298,7 +346,7 @@ fn claim_for_execution(
         if current.is_after(p.based_on_revision) {
             tracing::debug!(action_id = %id, based_on = %p.based_on_revision, %current, "state advanced since proposal; revalidating");
         }
-        if let Err(e) = validate_state(inner, tx, &p.action, &p.actor) {
+        if let Err(e) = validate_state(inner, tx, &p.action, &p.actor, p.identity) {
             repos::actions::set_status(
                 tx,
                 id,
@@ -317,7 +365,7 @@ fn claim_for_execution(
         }
         repos::actions::set_status(tx, id, ActionStatus::Executing, Origin::UserProvided)?;
         audit(tx, id, &Actor::User, AuditEvent::ExecutionStarted)?;
-        Ok(Ok((p.action, p.actor)))
+        Ok(Ok((p.action, p.actor, p.identity)))
     })?;
     committed.value
 }
@@ -359,15 +407,16 @@ async fn propose(
     inner: &Inner,
     action: AgentAction,
     actor: Actor,
+    identity: DiscordIdentity,
     based_on: Revision,
     rationale: Option<String>,
 ) -> Result<ProposeOutcome, ActionError> {
     let span = tracing::info_span!("action_propose", kind = action.kind(), actor = %actor.label());
     let (id, decision) =
-        span.in_scope(|| record_proposal(inner, &action, &actor, based_on, rationale))?;
+        span.in_scope(|| record_proposal(inner, &action, &actor, identity, based_on, rationale))?;
     match decision {
         PolicyDecision::Execute => {
-            let result = run_executor(inner, id, &action, &actor).await?;
+            let result = run_executor(inner, id, &action, &actor, identity).await?;
             Ok(ProposeOutcome::Executed {
                 action_id: id,
                 result,
@@ -385,6 +434,7 @@ fn record_proposal(
     inner: &Inner,
     action: &AgentAction,
     actor: &Actor,
+    identity: DiscordIdentity,
     based_on: Revision,
     rationale: Option<String>,
 ) -> Result<(ActionId, PolicyDecision), ActionError> {
@@ -399,7 +449,7 @@ fn record_proposal(
         .write(|tx| -> Result<Result<ActionId, ActionError>, ActionError> {
             // State validation failures are returned to the caller but not
             // persisted: nothing was proposed.
-            if let Err(e) = validate_state(inner, tx, action, actor) {
+            if let Err(e) = validate_state(inner, tx, action, actor, identity) {
                 return Ok(Err(e));
             }
             let status = match &decision {
@@ -413,7 +463,7 @@ fn record_proposal(
                     action,
                     actor,
                     class,
-                    identity: DiscordIdentity::UserSocialSdk,
+                    identity,
                     payload_json: &json,
                     payload_hash: &hash,
                     status,
@@ -451,8 +501,9 @@ async fn run_executor(
     id: ActionId,
     action: &AgentAction,
     actor: &Actor,
+    identity: DiscordIdentity,
 ) -> Result<ExecutionOutcome, ActionError> {
-    let result = inner.executor.execute(id, action, actor).await;
+    let result = inner.executor.execute(id, action, actor, identity).await;
     inner.db.write(|tx| -> Result<(), ActionError> {
         match &result {
             Ok(outcome) => {
@@ -517,6 +568,7 @@ fn validate_state(
     conn: &Connection,
     action: &AgentAction,
     actor: &Actor,
+    identity: DiscordIdentity,
 ) -> Result<(), ActionError> {
     let is_agent = matches!(actor, Actor::Agent { .. });
     let invalid = |m: &str| Err(ActionError::Invalid(m.to_owned()));
@@ -524,7 +576,24 @@ fn validate_state(
     // An executor without a backend (e.g. the MCP process) reports no
     // capabilities; Discord writes proposed there are checked again when the
     // application executes them.
-    let caps = inner.executor.capabilities();
+    let caps = inner.executor.capabilities(identity);
+    if identity == DiscordIdentity::ApplicationBot {
+        // The bot identity may only post/edit/delete in guild channels; it
+        // never acts on the user's social graph, presence or local data.
+        if !matches!(
+            action,
+            AgentAction::SendMessage {
+                target: MessageTarget::Conversation { .. },
+                ..
+            } | AgentAction::EditMessage { .. }
+                | AgentAction::DeleteMessage { .. }
+        ) {
+            return Err(ActionError::Invalid(format!(
+                "`{}` cannot be performed as the application bot",
+                action.kind()
+            )));
+        }
+    }
     if let Some(cap) = action.required_capability() {
         if !caps.entries.is_empty() && !caps.is_usable(cap) {
             return Err(ActionError::Invalid(format!(
@@ -549,6 +618,21 @@ fn validate_state(
                 };
                 if is_agent && visible(*conversation_id)? == AgentVisibility::Hidden {
                     return invalid("conversation is hidden from agents");
+                }
+                let guild_channel = c.conversation.kind == ConversationKind::GuildChannel;
+                if identity == DiscordIdentity::ApplicationBot && !guild_channel {
+                    return invalid("the application bot only posts in guild channels");
+                }
+                // Guild channels need a backend that can write there (a bot;
+                // the Social SDK cannot). An executor without a backend (MCP
+                // process) defers this check to execution time.
+                if guild_channel
+                    && !caps.entries.is_empty()
+                    && !caps.is_usable(Capability::GuildMessages)
+                {
+                    return invalid(
+                        "this identity cannot post in guild channels; propose it as the bot or open in Discord",
+                    );
                 }
                 if let Some(r) = c.conversation.recipient_id {
                     if repos::relationships::get(conn, r)?.is_some_and(|rel| rel.is_blocked()) {
@@ -579,7 +663,8 @@ fn validate_state(
             if m.deleted {
                 return invalid("message was deleted");
             }
-            let me = repos::accounts::current(conn, DiscordIdentity::UserSocialSdk)?;
+            // Only messages authored by the acting identity are editable.
+            let me = repos::accounts::current(conn, identity)?;
             if me.map(|a| a.user_id) != Some(m.message.author_id) {
                 return invalid("only your own messages can be edited or deleted");
             }

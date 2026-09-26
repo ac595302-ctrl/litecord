@@ -18,7 +18,7 @@ use litecord_types::capability::CapabilitySet;
 use litecord_types::entity::EntityId;
 use litecord_types::ids::ActionId;
 use litecord_types::notes::Bookmark;
-use litecord_types::provenance::Origin;
+use litecord_types::provenance::{DiscordIdentity, Origin};
 use litecord_types::tasks::TaskStatus;
 
 use crate::error::ActionError;
@@ -36,13 +36,14 @@ pub struct ExecutionOutcome {
 pub trait ActionExecutor: Send + Sync + std::fmt::Debug {
     /// Backend capabilities (used for validation). Local-only executors
     /// report an empty set.
-    fn capabilities(&self) -> CapabilitySet;
+    fn capabilities(&self, identity: DiscordIdentity) -> CapabilitySet;
 
     async fn execute(
         &self,
         id: ActionId,
         action: &AgentAction,
         actor: &Actor,
+        identity: DiscordIdentity,
     ) -> Result<ExecutionOutcome, ActionError>;
 }
 
@@ -62,17 +63,31 @@ pub fn origin_for(actor: &Actor) -> Origin {
 pub struct DefaultExecutor {
     db: Database,
     backend: Option<Arc<dyn SocialBackend>>,
+    /// Optional application-bot backend; used only for proposals whose
+    /// identity is `ApplicationBot`.
+    bot: Option<Arc<dyn SocialBackend>>,
 }
 
 impl DefaultExecutor {
     pub fn new(db: Database, backend: Option<Arc<dyn SocialBackend>>) -> Self {
-        Self { db, backend }
+        Self {
+            db,
+            backend,
+            bot: None,
+        }
     }
 
-    fn backend(&self) -> Result<&Arc<dyn SocialBackend>, ActionError> {
-        self.backend
-            .as_ref()
-            .ok_or_else(|| ActionError::Execution("no Discord backend in this process".into()))
+    /// Attach the application-bot backend.
+    pub fn with_bot(mut self, bot: Arc<dyn SocialBackend>) -> Self {
+        self.bot = Some(bot);
+        self
+    }
+
+    fn backend_for(&self, identity: DiscordIdentity) -> Option<&Arc<dyn SocialBackend>> {
+        match identity {
+            DiscordIdentity::UserSocialSdk => self.backend.as_ref(),
+            DiscordIdentity::ApplicationBot => self.bot.as_ref(),
+        }
     }
 
     fn local(&self, action: &AgentAction, origin: Origin) -> Result<ExecutionOutcome, ActionError> {
@@ -156,9 +171,8 @@ impl DefaultExecutor {
 
 #[async_trait]
 impl ActionExecutor for DefaultExecutor {
-    fn capabilities(&self) -> CapabilitySet {
-        self.backend
-            .as_ref()
+    fn capabilities(&self, identity: DiscordIdentity) -> CapabilitySet {
+        self.backend_for(identity)
             .map(|b| b.capabilities())
             .unwrap_or_default()
     }
@@ -168,9 +182,17 @@ impl ActionExecutor for DefaultExecutor {
         id: ActionId,
         action: &AgentAction,
         actor: &Actor,
+        identity: DiscordIdentity,
     ) -> Result<ExecutionOutcome, ActionError> {
-        let span = tracing::info_span!("action_execute", action_id = %id, kind = action.kind());
-        self.execute_inner(action, actor).instrument(span).await
+        let span = tracing::info_span!(
+            "action_execute",
+            action_id = %id,
+            kind = action.kind(),
+            identity = identity.as_str()
+        );
+        self.execute_inner(action, actor, identity)
+            .instrument(span)
+            .await
     }
 }
 
@@ -179,13 +201,18 @@ impl DefaultExecutor {
         &self,
         action: &AgentAction,
         actor: &Actor,
+        identity: DiscordIdentity,
     ) -> Result<ExecutionOutcome, ActionError> {
+        let backend = || {
+            self.backend_for(identity).ok_or_else(|| {
+                ActionError::Execution(format!("no {} backend in this process", identity.as_str()))
+            })
+        };
         let exec_err =
             |e: litecord_core::ports::BackendError| ActionError::Execution(e.to_string());
         match action {
             AgentAction::SendMessage { target, content } => {
-                let msg = self
-                    .backend()?
+                let msg = backend()?
                     .send_message(target, content)
                     .await
                     .map_err(exec_err)?;
@@ -198,7 +225,7 @@ impl DefaultExecutor {
                 message_id,
                 content,
             } => {
-                self.backend()?
+                backend()?
                     .edit_message(*message_id, content)
                     .await
                     .map_err(exec_err)?;
@@ -208,7 +235,7 @@ impl DefaultExecutor {
                 })
             }
             AgentAction::DeleteMessage { message_id } => {
-                self.backend()?
+                backend()?
                     .delete_message(*message_id)
                     .await
                     .map_err(exec_err)?;
@@ -218,17 +245,14 @@ impl DefaultExecutor {
                 })
             }
             AgentAction::ChangePresence { presence } => {
-                self.backend()?
-                    .set_presence(presence)
-                    .await
-                    .map_err(exec_err)?;
+                backend()?.set_presence(presence).await.map_err(exec_err)?;
                 Ok(ExecutionOutcome {
                     summary: format!("presence set to {}", presence.status),
                     entity: None,
                 })
             }
             AgentAction::RelationshipChange { user_id, action } => {
-                self.backend()?
+                backend()?
                     .relationship_action(*user_id, *action)
                     .await
                     .map_err(exec_err)?;

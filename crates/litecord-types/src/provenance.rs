@@ -87,6 +87,9 @@ pub enum DiscordSource {
     /// Mock/demo backend. Persisted with `Origin::Synthetic` so it can never be
     /// mistaken for real Discord content.
     Synthetic,
+    /// Mock/demo *bot* source: synthetic data seen through the application
+    /// bot identity (for developing the bot path without a real bot).
+    SyntheticBot,
 }
 
 impl DiscordSource {
@@ -94,7 +97,7 @@ impl DiscordSource {
         match self {
             DiscordSource::SocialSdk => Origin::DiscordSocialSdk,
             DiscordSource::BotGateway => Origin::DiscordBotGateway,
-            DiscordSource::Synthetic => Origin::Synthetic,
+            DiscordSource::Synthetic | DiscordSource::SyntheticBot => Origin::Synthetic,
         }
     }
 
@@ -102,18 +105,30 @@ impl DiscordSource {
     pub const fn identity(self) -> DiscordIdentity {
         match self {
             DiscordSource::SocialSdk | DiscordSource::Synthetic => DiscordIdentity::UserSocialSdk,
-            DiscordSource::BotGateway => DiscordIdentity::ApplicationBot,
+            DiscordSource::BotGateway | DiscordSource::SyntheticBot => {
+                DiscordIdentity::ApplicationBot
+            }
         }
     }
 }
 
 /// Which Discord identity observed or performs something. Bot and user
 /// identities are never interchangeable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscordIdentity {
+    #[default]
     UserSocialSdk,
     ApplicationBot,
+}
+
+impl DiscordIdentity {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DiscordIdentity::UserSocialSdk => "user_social_sdk",
+            DiscordIdentity::ApplicationBot => "application_bot",
+        }
+    }
 }
 
 /// A reference from derived knowledge back to what it was derived from.

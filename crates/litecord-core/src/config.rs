@@ -115,6 +115,9 @@ pub struct BackendConfig {
     pub application_id: Option<u64>,
     /// Seed for the demo backend's synthetic data.
     pub demo_seed: u64,
+    /// Also run a synthetic application-bot source (demo of the optional
+    /// bot adapter: guild channels readable/writable as the bot identity).
+    pub demo_bot: bool,
 }
 
 impl Default for BackendConfig {
@@ -123,6 +126,7 @@ impl Default for BackendConfig {
             kind: BackendKind::Demo,
             application_id: None,
             demo_seed: 42,
+            demo_bot: false,
         }
     }
 }

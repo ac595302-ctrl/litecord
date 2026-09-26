@@ -188,6 +188,15 @@ impl AgentGateway {
         if let Some(r) = sync_result {
             return r;
         }
+        let identity = match arg_str(&args, "send_as") {
+            None | Some("user") => DiscordIdentity::UserSocialSdk,
+            Some("bot") if name == "propose_message" => DiscordIdentity::ApplicationBot,
+            Some(other) => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "`send_as` must be \"user\" or \"bot\" (got {other:?})"
+                )))
+            }
+        };
         let (action, rationale, based_on) = match name {
             "create_reminder" => (self.reminder_action(&args)?, None, None),
             "create_task" => (task_action(&args)?, None, None),
@@ -280,7 +289,7 @@ impl AgentGateway {
         };
         let outcome = self
             .proposer
-            .propose(action, caller.actor(), based_on, rationale)
+            .propose_as(action, caller.actor(), identity, based_on, rationale)
             .await?;
         let note = match &outcome {
             ProposeOutcome::Executed { .. } => "done (recorded in the action audit log)",

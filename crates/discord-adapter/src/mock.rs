@@ -74,6 +74,8 @@ struct MockState {
 pub struct MockBackend {
     state: Mutex<MockState>,
     clock: SharedClock,
+    /// `Synthetic` (user view) or `SyntheticBot` (application-bot view).
+    source: DiscordSource,
 }
 
 impl std::fmt::Debug for MockBackend {
@@ -143,7 +145,23 @@ impl MockBackend {
         Self {
             state: Mutex::new(state),
             clock,
+            source: DiscordSource::Synthetic,
         }
+    }
+
+    /// A synthetic **application bot** source: the same demo guilds seen
+    /// through a bot installed in them (guild channels are readable and
+    /// writable conversations; no friends, DMs or presence of its own).
+    /// Everything it emits is `DiscordSource::SyntheticBot` → origin
+    /// `synthetic`, identity `application_bot`.
+    pub fn demo_bot(seed: u64, now: Timestamp, clock: SharedClock) -> Self {
+        let mut backend = Self::with_clock(fixtures::generate_bot(seed, now), clock);
+        backend.source = DiscordSource::SyntheticBot;
+        backend
+    }
+
+    fn is_bot(&self) -> bool {
+        self.source == DiscordSource::SyntheticBot
     }
 
     /// Builds a backend from deterministic fixture data for `(seed, now)`.
@@ -208,7 +226,7 @@ impl MockBackend {
     }
 
     fn envelope(&self, event: DiscordEvent) -> SourceEnvelope {
-        SourceEnvelope::new(DiscordSource::Synthetic, self.clock.now(), event)
+        SourceEnvelope::new(self.source, self.clock.now(), event)
     }
 
     /// Best-effort emission: a closed ingest channel only means the
@@ -291,7 +309,7 @@ impl MockBackend {
         let now = self.clock.now();
         for (user_id, presence) in presences {
             let _ = sink.try_send(SourceEnvelope::new(
-                DiscordSource::Synthetic,
+                self.source,
                 now,
                 DiscordEvent::PresenceChanged { user_id, presence },
             ));
@@ -444,14 +462,32 @@ impl MockBackend {
 #[async_trait]
 impl SocialBackend for MockBackend {
     fn source(&self) -> DiscordSource {
-        DiscordSource::Synthetic
+        self.source
     }
 
     fn mode(&self) -> BackendMode {
-        BackendMode::Demo
+        if self.is_bot() {
+            BackendMode::BotBridge
+        } else {
+            BackendMode::Demo
+        }
     }
 
     fn capabilities(&self) -> CapabilitySet {
+        if self.is_bot() {
+            // A bot reads and writes guild channels it can see; it has no
+            // social graph, DMs with the user's friends, or voice here.
+            return CapabilitySet::default()
+                .with(Capability::CurrentUser, SupportLevel::Full)
+                .with(Capability::GuildListing, SupportLevel::Full)
+                .with(Capability::GuildChannels, SupportLevel::Full)
+                .with(Capability::GuildMessages, SupportLevel::Full)
+                .with(Capability::DmList, SupportLevel::Full)
+                .with(Capability::DmHistory, SupportLevel::Full)
+                .with(Capability::DmSend, SupportLevel::Full)
+                .with(Capability::DmEdit, SupportLevel::Full)
+                .with(Capability::DmDelete, SupportLevel::Full);
+        }
         let mut set = CapabilitySet::default()
             .with(Capability::CurrentUser, SupportLevel::Full)
             .with(Capability::Friends, SupportLevel::Full)

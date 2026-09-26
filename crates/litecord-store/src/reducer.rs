@@ -22,6 +22,7 @@
 //! as live gateway/SDK events.
 
 use litecord_core::events::{DiscordEvent, HydrationKey, SourceEnvelope, UnifiedEvent};
+use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::SessionState;
 use litecord_types::{ConversationId, MessageId};
 
@@ -69,6 +70,14 @@ pub enum Followup {
     SessionChanged(SessionState),
 }
 
+/// `app_state` key holding the last session state of an identity.
+pub fn session_state_key(identity: DiscordIdentity) -> &'static str {
+    match identity {
+        DiscordIdentity::UserSocialSdk => "session_state",
+        DiscordIdentity::ApplicationBot => "bot_session_state",
+    }
+}
+
 /// Everything [`reduce`] learned while applying one event.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReduceOutcome {
@@ -89,7 +98,10 @@ pub fn reduce(
     match &env.event {
         DiscordEvent::SessionChanged { state } => {
             let json = serde_json::to_string(state)?;
-            if app_state::set(tx, "session_state", &json)? {
+            // User and bot sessions are tracked separately: a bot outage
+            // must never look like the user being signed out.
+            let key = session_state_key(env.source.identity());
+            if app_state::set(tx, key, &json)? {
                 tx.emit(UnifiedEvent::SessionChanged, origin)?;
             }
             followups.push(Followup::SessionChanged(state.clone()));

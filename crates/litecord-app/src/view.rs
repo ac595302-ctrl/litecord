@@ -17,7 +17,7 @@ use litecord_types::capability::{BackendMode, CapabilitySet, HistoryCapability};
 use litecord_types::entity::EntityId;
 use litecord_types::ids::*;
 use litecord_types::memory::{Edge, MemoryItem, MemoryStatus};
-use litecord_types::provenance::Origin;
+use litecord_types::provenance::{DiscordIdentity, Origin};
 use litecord_types::social::*;
 use litecord_types::tasks::{Reminder, Task, TaskComment};
 use litecord_types::trust::AgentVisibility;
@@ -92,6 +92,10 @@ pub struct ConversationCapabilities {
     pub history: Option<HistoryCapability>,
     /// Deep link when content is only available in Discord.
     pub open_in_discord_url: String,
+    /// Which Discord identity a message typed here would be sent as
+    /// (`application_bot` for guild channels served by the bot). `None`
+    /// when no connected identity can post here. Show this in the composer.
+    pub send_identity: Option<DiscordIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +151,9 @@ pub struct PendingActionRow {
     /// Full content for review (the user must see exactly what is approved).
     pub content: Option<String>,
     pub actor: String,
+    /// The Discord identity that would perform the action. Always shown to
+    /// the user before approval; bot and user are never interchangeable.
+    pub identity: DiscordIdentity,
     pub rationale: Option<String>,
     pub created_at: Timestamp,
 }
@@ -232,6 +239,17 @@ pub struct DiagnosticsViewModel {
     pub hydration_active: usize,
     pub counts: StoreCounts,
     pub metrics: MetricsSnapshot,
+    /// Optional application-bot source status.
+    pub bot: Option<BotStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BotStatus {
+    pub session: SessionState,
+    pub mode: BackendMode,
+    pub capabilities: CapabilitySet,
+    pub bot_user_id: Option<UserId>,
+    pub hydration_pending: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]

@@ -199,14 +199,40 @@ impl LitecordApp {
         limit: u32,
         before: Option<litecord_types::Timestamp>,
     ) -> Result<ConversationViewModel> {
-        self.inner.hydrator.request_if_stale(
+        // Guild channels are served by the bot source (the Social SDK has no
+        // guild history); everything else by the user source.
+        let is_guild_channel = self
+            .inner
+            .db
+            .read(|r| repos::conversations::get(r, id))?
+            .is_some_and(|c| c.conversation.kind == ConversationKind::GuildChannel);
+        let (hydrator, caps, send_identity) = match (&self.inner.bot, &self.inner.bot_hydrator) {
+            (Some(bot), Some(h)) if is_guild_channel => {
+                let caps = bot.capabilities();
+                let can = caps.is_usable(Capability::GuildMessages);
+                (h, caps, can.then_some(DiscordIdentity::ApplicationBot))
+            }
+            _ => {
+                let caps = self.inner.backend.capabilities();
+                let can = if is_guild_channel {
+                    caps.is_usable(Capability::GuildMessages)
+                } else {
+                    caps.is_usable(Capability::DmSend)
+                };
+                (
+                    &self.inner.hydrator,
+                    caps,
+                    can.then_some(DiscordIdentity::UserSocialSdk),
+                )
+            }
+        };
+        hydrator.request_if_stale(
             HydrationKey::DmConversation {
                 conversation_id: id,
             },
             Priority::High,
             HydrationReason::ActiveScreen,
         );
-        let caps = self.inner.backend.capabilities();
         let default_vis = self.inner.cfg.agent.default_visibility;
         let features = self
             .inner
@@ -270,7 +296,7 @@ impl LitecordApp {
                 messages,
                 has_more,
                 capabilities: ConversationCapabilities {
-                    can_send: caps.is_usable(Capability::DmSend),
+                    can_send: send_identity.is_some(),
                     can_edit: caps.is_usable(Capability::DmEdit),
                     can_delete: caps.is_usable(Capability::DmDelete),
                     history: caps.dm_history.clone(),
@@ -278,6 +304,7 @@ impl LitecordApp {
                         conversation_id: id,
                     }
                     .web_url(),
+                    send_identity,
                 },
                 agent_visibility: conv.visibility.unwrap_or(default_vis),
                 open_drafts,
@@ -572,7 +599,26 @@ impl LitecordApp {
             };
             Ok((r.revision(), session, counts))
         })?;
+        let bot = match (&self.inner.bot, &self.inner.bot_hydrator) {
+            (Some(b), Some(h)) => Some(self.inner.db.read(|r| -> Result<BotStatus> {
+                Ok(BotStatus {
+                    session: repos::app_state::get(
+                        r,
+                        litecord_store::reducer::session_state_key(DiscordIdentity::ApplicationBot),
+                    )?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+                    mode: b.mode(),
+                    capabilities: b.capabilities(),
+                    bot_user_id: repos::accounts::current(r, DiscordIdentity::ApplicationBot)?
+                        .map(|a| a.user_id),
+                    hydration_pending: h.pending_len(),
+                })
+            })?),
+            _ => None,
+        };
         Ok(DiagnosticsViewModel {
+            bot,
             revision,
             session,
             backend_mode: self.inner.backend.mode(),
@@ -780,6 +826,32 @@ impl LitecordApp {
         self.inner
             .actions
             .propose(action, Actor::User, rev, None)
+            .await
+            .map_err(action_err)
+    }
+
+    /// Send a message typed by the user as a specific identity (e.g. the
+    /// application bot in a guild channel). The UI must make the identity
+    /// explicit in the composer; see `ConversationCapabilities::send_identity`.
+    pub async fn send_message_as(
+        &self,
+        conversation_id: ConversationId,
+        content: &str,
+        identity: DiscordIdentity,
+    ) -> Result<ProposeOutcome> {
+        let rev = self.revision()?;
+        self.inner
+            .actions
+            .propose_as(
+                AgentAction::SendMessage {
+                    target: MessageTarget::Conversation { conversation_id },
+                    content: content.to_owned(),
+                },
+                Actor::User,
+                identity,
+                rev,
+                None,
+            )
             .await
             .map_err(action_err)
     }
@@ -1040,6 +1112,7 @@ fn pending_row(conn: &Connection, p: &ActionProposal) -> Result<PendingActionRow
         target_label: target,
         content,
         actor: p.actor.label(),
+        identity: p.identity,
         rationale: p.rationale.clone(),
         created_at: p.created_at,
     })

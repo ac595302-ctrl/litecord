@@ -351,6 +351,87 @@ pub fn generate(seed: u64, now: Timestamp) -> DemoData {
 /// like a real (if synthetic) DM history: an in-flight project, a rescheduled
 /// meeting, a couple of unanswered questions, and one deliberately
 /// suspicious message for prompt-injection tests.
+/// Synthetic bot user id (never collides with fixture users).
+pub const DEMO_BOT_ID: u64 = 7_000;
+
+/// The same demo guilds seen through an installed application bot: every
+/// text/announcement channel is a readable, writable conversation with a
+/// short synthetic history. There are no relationships, DMs or presences.
+pub fn generate_bot(seed: u64, now: Timestamp) -> DemoData {
+    let base = generate(seed, now);
+    let bot = User {
+        id: UserId(DEMO_BOT_ID),
+        username: arc("litecord-bot"),
+        global_name: Some(arc("Litecord Bot")),
+        avatar_url: None,
+        is_bot: true,
+        is_provisional: false,
+    };
+    let members: Vec<UserId> = base.users.iter().map(|u| u.id).collect();
+    let mut channels = base.channels.clone();
+    let mut conversations = Vec::new();
+    let mut messages = Vec::new();
+    let mut next_id = 950_000u64;
+    let lines = [
+        "Standup notes are in the pinned doc",
+        "Can someone review the release checklist?",
+        "The deploy went out, watching the dashboards now",
+        "Reminder: retro is on Friday",
+    ];
+    for c in channels.iter_mut() {
+        if !matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement) {
+            continue;
+        }
+        c.access = ChannelAccess::Native;
+        c.capabilities = ChannelCapabilities::DISCOVERABLE
+            | ChannelCapabilities::READABLE
+            | ChannelCapabilities::WRITABLE
+            | ChannelCapabilities::OPEN_EXTERNAL;
+        let conv = ConversationId(c.id.get());
+        let mut last = None;
+        for (i, line) in lines.iter().enumerate() {
+            if members.is_empty() {
+                break;
+            }
+            let author = members[(i + c.id.get() as usize) % members.len()];
+            let sent_at = now.saturating_sub(DurationMs::from_hours((lines.len() - i) as u64 * 3));
+            next_id += 1;
+            messages.push(Message {
+                id: MessageId(next_id),
+                conversation_id: conv,
+                author_id: author,
+                content: arc(line),
+                sent_at,
+                edited_at: None,
+                reply_to: None,
+                extras: Vec::new(),
+            });
+            last = Some((MessageId(next_id), sent_at));
+        }
+        conversations.push(Conversation {
+            id: conv,
+            kind: ConversationKind::GuildChannel,
+            recipient_id: None,
+            guild_id: Some(c.guild_id),
+            lobby_id: None,
+            title: Some(arc(&format!("#{}", c.name))),
+            last_message_id: last.map(|l| l.0),
+            last_activity_at: last.map(|l| l.1),
+        });
+    }
+    DemoData {
+        current_user: bot,
+        users: base.users,
+        relationships: Vec::new(),
+        presences: Vec::new(),
+        guilds: base.guilds,
+        channels,
+        conversations,
+        messages,
+        voice: VoiceState::default(),
+    }
+}
+
 fn scripted_tail(conv_index: usize, recipient: UserId, me: UserId) -> Vec<(UserId, String)> {
     match conv_index {
         // ada: prototype/project chatter, a commitment, ends on a question
