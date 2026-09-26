@@ -1,0 +1,60 @@
+# Example Litecord configuration.
+#
+# Precedence: built-in defaults < this file < LITECORD_* environment variables
+# < command-line flags. Every key is optional. Secrets (tokens) never go here;
+# see SECURITY.md.
+
+data_dir = ".litecord"
+
+[database]
+# path = "litecord.db"       # relative to data_dir
+busy_timeout_ms = 5000
+read_pool_size = 2
+
+[backend]
+kind = "demo"                # "demo" (synthetic data) | "social_sdk" (needs feature + SDK)
+# application_id = 0         # Discord application id (public)
+demo_seed = 42
+
+[runtime]
+event_queue_capacity = 1024  # bounded ingest queue; overflow => drop + resync
+broadcast_capacity = 256
+shutdown_grace_ms = 3000
+
+[hydration]
+max_concurrent_jobs = 2
+backoff_base_ms = 1000
+backoff_max_ms = 300000
+reconcile_interval_secs = 60
+stale_after_current_user_secs = 3600
+stale_after_relationships_secs = 900
+stale_after_guilds_secs = 3600
+stale_after_channels_secs = 3600
+stale_after_conversations_secs = 600
+recent_messages_limit = 50
+
+[cache]
+max_users = 1000
+max_messages = 5000
+max_hot_conversations = 8
+
+[retention]
+# raw_messages_days = 30     # unset = keep what the SDK provided
+agent_runs_days = 14
+event_log_days = 30
+purge_deleted_messages = true
+hot_hours = 24
+warm_days = 14
+
+[agent]
+approval_ttl_secs = 600
+default_visibility = "allowed"   # allowed | metadata_only | hidden
+allow_message_proposals = true
+allow_presence_proposals = true
+allow_relationship_proposals = false
+auto_approve_local_writes = true
+default_token_budget = 8000
+
+[logging]
+filter = "info"
+log_message_content = false

@@ -1,0 +1,24 @@
+[package]
+name = "litecord-actions"
+description = "The Action Engine: the only agent-controlled path to external mutation. Policy, proposals, payload-bound approval tokens, revalidation, execution and audit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

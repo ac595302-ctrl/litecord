@@ -449,6 +449,18 @@ filter = "debug"
     }
 
     #[test]
+    fn example_config_file_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/litecord.example.toml");
+        let cfg = ConfigLoader::new().file(path).load().unwrap();
+        assert_eq!(
+            cfg,
+            LitecordConfig::default(),
+            "example documents the defaults"
+        );
+    }
+
+    #[test]
     fn unknown_file_keys_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.toml");

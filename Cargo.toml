@@ -28,6 +28,7 @@ discord-adapter = { path = "crates/discord-adapter" }
 # External crates (keep this list intentional)
 async-trait = "0.1.89"
 blake3 = "1.8"
+getrandom = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 lru = "0.18"
 rusqlite = { version = "0.40", features = ["bundled"] }
