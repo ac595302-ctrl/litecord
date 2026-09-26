@@ -36,7 +36,7 @@ below instead.
   - Presets: Morning brief, Reply radar, Commitment tracker, Weekly people
     digest.
 
-## 2. Stage A: efficiency baseline
+## 2. Stage A: efficiency baseline (done; batching deliberately skipped, see UI_QA.md)
 
 - Snapshots only for the visible destination; refresh on data change.
 - Byte budgets on the ingest queue and the message cache (2–4 MiB for the
@@ -45,7 +45,7 @@ below instead.
 - Show byte usage in Diagnostics.
 - Re-measure memory under the same workload as `UI_QA.md` (137.82 MiB).
 
-## 3. Stage C: paged history and resumable sync
+## 3. Stage C: paged history and resumable sync (done for bot and mock; SDK when connected)
 
 - **History pages:** `HistoryPageRequest { conversation_id, before, after, limit }`
   returns `HistoryPage { messages, oldest, newest, has_more }`.
@@ -74,6 +74,12 @@ below instead.
 
 A message observed by more than one source (SDK, bot, import) is stored once,
 and every source that observed it is recorded.
+
+## 6. Stage D: identity-aware writes (done: replies)
+
+Replies go through the Action Engine with the identity shown in the composer
+and in approvals. Where the identity's source cannot reply, the reply is
+refused; it is never downgraded to a plain message.
 
 ## Invariants for every stage
 

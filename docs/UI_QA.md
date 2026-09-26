@@ -43,9 +43,41 @@ The synthetic QA database contained the standard demo data.
 
 This is an early process sample, not a sustained idle benchmark, peak-memory
 bound, or frame-latency measurement. It exceeds the proposed 50 MiB target.
-Memory attribution and optimization remain necessary. In particular, the
-bridge currently refreshes all bounded screen snapshots, including hidden
-destinations; event bursts are drained with a bounded coalescing pass.
+Memory attribution and optimization remain necessary.
+
+### Stage A before/after (Linux, September 26, 2026)
+
+Same workload for both builds: release `--features gui`, Xvfb 1600 × 1000,
+fresh data directory with demo data, launched on Messages. Resident memory
+and CPU time (user + system, 10 ms ticks) were read after 20 seconds.
+"Before" is commit 8da696a; "after" is fb008ff. Three runs each:
+
+| Build | Resident (KiB) | CPU ticks |
+|---|---|---|
+| Before | 138820 · 138828 · 138556 · 138380 · 138888 · 138540 | 121–135 |
+| After | 140704 · 139968 · 140028 | 140–143 |
+
+Idle startup did not improve. It is about 1.2 MiB higher (+0.9%) and uses
+about 10 more CPU ticks. Possible causes, none measured separately:
+- the demo data now includes 260 deep-history messages;
+- the history-sync task wakes every 5 s;
+- the Home/Inbox cards and the header are richer.
+
+Most of the ~137 MiB is the renderer, fonts and window surfaces, not
+Litecord data.
+
+What Stage A changes is behaviour under load:
+- Snapshots reload only the visible destination's views. Hidden
+  destinations reuse the previous `Arc` values (test
+  `snapshots_reload_only_the_visible_destination`).
+- The ingest queue is capped at 8 MiB of queued events.
+- The open conversation's message window is capped at 4 MiB.
+- The Settings inspector shows the live figures.
+
+Large startup snapshots are **not** split into batches. Snapshot events
+replace state authoritatively, so splitting them would need a new partial-
+snapshot protocol in the reducer. The byte budget admits an oversized
+envelope only when the queue is otherwise empty, so memory stays bounded.
 
 ## Remaining work
 

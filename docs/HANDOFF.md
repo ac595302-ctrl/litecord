@@ -172,6 +172,54 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Stages A, C, D and the mock-aligned UI (September 26, 2026)
+
+See `docs/ROADMAP.md` §2–3 and §6. User-token access was declined (see
+"Not planned" in the roadmap).
+
+- **Stage A:**
+  - Lazy snapshots: `bridge::needs` maps each destination to the views it
+    reloads.
+  - Ingest queue byte budget, `runtime.event_queue_max_bytes`.
+  - Message window byte ceiling, `cache.max_message_cache_bytes`.
+  - The figures are shown in the Settings inspector.
+  - Before/after measurements are in `docs/UI_QA.md`. Idle startup did not
+    improve; the gains are bounds under load.
+- **Stage C** (`crates/litecord-app/src/history.rs`):
+  - The user selects conversations for "Sync full history" in the Messages
+    inspector.
+  - The engine pages backwards one page at a time.
+    `DiscordEvent::MessagesPage` stores the page and advances `history_sync`
+    in one reducer transaction; an empty page marks the conversation
+    complete.
+  - It pauses on user activity (`LitecordApp::note_user_activity`, called by
+    the bridge on commands and navigation, never by background refreshes),
+    on RSS above `runtime.memory_soft_limit_mb`, on the database quota
+    (`retention.max_database_mb`; 0 turns sync off) and on rate limits.
+  - Sources that can't page are disabled with an error.
+  - Tests: `crates/litecord-app/tests/history_sync.rs`.
+  - Only backfill (`before`) pages may go through `MessagesPage`, because an
+    empty forward page would wrongly mark a conversation complete.
+- **Stage D:**
+  - `AgentAction::SendMessage.reply_to` (skipped when `None`, so existing
+    hashes are stable).
+  - A new `Capability::Replies` and `SocialBackend::send_reply`. The bot
+    sends a `message_reference`; the Social SDK mock refuses instead of
+    sending a plain message.
+  - `ConversationCapabilities.can_reply` and `send_reply_as`.
+  - UI: Reply in the message menu and a "Replying to" banner.
+  - Tests are in `tests/bot.rs`.
+- **UI:** matches mock A01. That covers the title-bar search, the
+  conversation list (pills, unread badges, times), the pill composer, the
+  contact inspector (action row, shared files and links, history), Inbox
+  Today plus Omni cards, and the Settings runtime and history panels. The
+  mock PDF is `docs/design/litecord_ui_mock_audit.pdf`.
+- **Next:**
+  - UI fidelity for Friends (A03), Home (A02), Memory (A10), Tasks (A11),
+    Settings (A12), Voice (A05–08) and Servers (A04);
+  - the Discord data-export importer (roadmap §4);
+  - multi-source provenance (§5).
+
 ### Omni sign-in, models, automations and CLI (September 26, 2026)
 
 See `docs/ROADMAP.md` §1 and the status table in `docs/AGENT_HARNESS.md`.
