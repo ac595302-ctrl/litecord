@@ -6,3 +6,4 @@
 .env
 /vendor/discord-sdk/*
 !/vendor/discord-sdk/README.md
+/.claude/
