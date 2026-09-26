@@ -23,6 +23,17 @@
 | Log leakage | Message content is not logged by default (`logging.log_message_content = false`); errors carry no content or secrets | everywhere |
 | SQL injection via search | Untrusted text is tokenized and quoted before FTS5 `MATCH` | `litecord-store::repos::fts` |
 
+## Application-bot source
+
+* The bot token is read only by the `litecord` binary (`LITECORD_BOT_TOKEN`),
+  wrapped in `Secret`, and passed to the transport per request; `Debug`
+  output and errors never contain it (tested).
+* Bot and user identities are separate end to end: separate accounts rows,
+  session state, hydrators, and an explicit `identity` on every proposal.
+  The bot identity can only post/edit/delete in guild channels.
+* Bot posts disable mentions (`allowed_mentions: none`) so an agent-drafted
+  message cannot mass-ping.
+
 ## Not yet implemented (tracked in docs/IMPLEMENTATION_STATUS.md)
 
 * OS keychain-backed `SecretStore` (currently in-memory only).

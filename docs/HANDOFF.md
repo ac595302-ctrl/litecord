@@ -138,8 +138,8 @@ host initially had no Rust compiler. No system PATH changes are required.
    keychain `SecretStore`, callback thread → `IngestSender::try_send`, a
    dedicated thread pumping `lc_bridge_run_callbacks`). The mock backend's
    behaviour and tests describe the expected contract.
-3. **Bot gateway adapter** — another `SocialBackend` with
-   `DiscordSource::BotGateway`; proposals already record `DiscordIdentity`.
+3. **Bot adapter follow-ups** — implemented (see `docs/BOT.md`); remaining:
+   verify `HttpTransport` against a real bot, sharding, interactions.
 4. **LLM-backed extraction/summaries** (optional) — implement
    `CandidateExtractor` / `Summarizer` with a model; store output as
    `Origin::AgentDerived`.
@@ -162,6 +162,16 @@ retention (`retention.raw_messages_days`, bookmarks kept); weekly heuristic
 conversation summaries refreshed by the maintenance task; dedicated
 retriever test suite.
 
+### Backend batch 11 — optional application-bot source
+
+* `discord-adapter::bot::{gateway, translate, rest, time, transport, backend, http}`
+* App: `AppBuilder::bot_backend`, config `backend.demo_bot`, second hydrator
+  with follow-ups routed by source, `bot_session_state`, diagnostics `bot`.
+* Actions: `propose_as(identity)`, identity-aware executor, bot limited to
+  guild-channel messages; guild channels need a GuildMessages-capable identity.
+* Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
+  services `send_message_as`; agent `propose_message.send_as`.
+
 ## Gotchas learned the hard way
 
 * Supersession and pending-reply expiry must follow **observation time**,
@@ -172,5 +182,7 @@ retriever test suite.
   threads.
 * `clippy.toml` allows unwrap only inside `#[test]` fns; integration test
   files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
+* Worktree subagents each build their own `target/` (GBs). Delete merged
+  worktrees (`git worktree remove`) or the disk fills and linking fails.
 * Internally tagged serde enums cannot wrap bare strings or nest another
   internally tagged enum in a tuple variant — use struct variants.
