@@ -25,7 +25,9 @@ use tokio_util::sync::CancellationToken;
 use litecord_core::bus::IngestSender;
 use litecord_core::clock::SharedClock;
 use litecord_core::events::{DiscordEvent, SourceEnvelope};
-use litecord_core::ports::{BackendError, BackendResult, SocialBackend};
+use litecord_core::ports::{
+    BackendError, BackendResult, HistoryPage, HistoryPageRequest, SocialBackend,
+};
 use litecord_core::secrets::Secret;
 use litecord_types::actions::MessageTarget;
 use litecord_types::capability::{BackendMode, Capability, CapabilitySet, SupportLevel};
@@ -361,6 +363,7 @@ impl SocialBackend for BotBackend {
             .with(Capability::GuildListing, SupportLevel::Full)
             .with(Capability::GuildChannels, SupportLevel::Full)
             .with(Capability::GuildMessages, SupportLevel::Full)
+            .with(Capability::Replies, SupportLevel::Full)
     }
 
     async fn connect(&self, sink: IngestSender) -> BackendResult<()> {
@@ -433,6 +436,33 @@ impl SocialBackend for BotBackend {
         Ok(messages)
     }
 
+    /// `GET /channels/{id}/messages?limit=N&before=ID|&after=ID`, returned
+    /// oldest first. `has_more` is "the page came back full". With both
+    /// cursors, only `after` is sent and the `before` bound is applied
+    /// locally (a page cut short by it has no more in range).
+    async fn history_page(&self, req: &HistoryPageRequest) -> BackendResult<HistoryPage> {
+        let channel = ChannelId(req.conversation_id.get());
+        let limit = req.effective_limit();
+        let v = self
+            .shared
+            .call(rest::channel_messages_page(
+                channel, limit, req.before, req.after,
+            ))
+            .await?;
+        let mut messages = rest::parse_messages(&v).map_err(bad_payload)?;
+        let full = messages.len() == limit as usize;
+        let mut has_more = full;
+        if let (Some(before), Some(_)) = (req.before, req.after) {
+            let n = messages.len();
+            messages.retain(|m| m.id < before);
+            has_more = full && messages.len() == n;
+        }
+        for m in &messages {
+            self.shared.remember(m.id, channel);
+        }
+        Ok(HistoryPage { messages, has_more })
+    }
+
     async fn send_message(&self, target: &MessageTarget, content: &str) -> BackendResult<Message> {
         let MessageTarget::Conversation { conversation_id } = target else {
             return Err(BackendError::Unsupported {
@@ -443,6 +473,27 @@ impl SocialBackend for BotBackend {
         let v = self
             .shared
             .call(rest::create_message(channel, content))
+            .await?;
+        let m = translate::message(&v).map_err(bad_payload)?;
+        self.shared.remember(m.id, channel);
+        Ok(m)
+    }
+
+    async fn send_reply(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply_to: MessageId,
+    ) -> BackendResult<Message> {
+        let MessageTarget::Conversation { conversation_id } = target else {
+            return Err(BackendError::Unsupported {
+                capability: Capability::Replies,
+            });
+        };
+        let channel = ChannelId(conversation_id.get());
+        let v = self
+            .shared
+            .call(rest::create_reply(channel, content, reply_to))
             .await?;
         let m = translate::message(&v).map_err(bad_payload)?;
         self.shared.remember(m.id, channel);

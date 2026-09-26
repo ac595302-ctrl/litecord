@@ -30,9 +30,15 @@ async fn start() -> (LitecordApp, Arc<MockBackend>, Arc<MockBackend>) {
         .unwrap();
     for _ in 0..200 {
         let convs = app.conversations_view(100).unwrap().conversations;
-        if convs
-            .iter()
-            .any(|c| c.kind == ConversationKind::GuildChannel)
+        let bot_ready = app
+            .diagnostics_view()
+            .unwrap()
+            .bot
+            .is_some_and(|b| b.bot_user_id.is_some());
+        if bot_ready
+            && convs
+                .iter()
+                .any(|c| c.kind == ConversationKind::GuildChannel)
             && convs
                 .iter()
                 .any(|c| c.kind == ConversationKind::DirectMessage)

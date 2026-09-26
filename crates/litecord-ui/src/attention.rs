@@ -201,6 +201,7 @@ impl Workspace {
                     Some("Replies you owe, suggestions to review, and actions waiting for your approval."),
                 );
                 let _ = &owner;
+                self.inbox_today(ui, &snapshot);
                 let filter = self.inbox_filter;
                 let show = |f: usize| filter == 0 || filter == f;
                 let attention: Vec<&InboxItem> =
@@ -338,6 +339,161 @@ impl Workspace {
                     }
                 }
             });
+    }
+
+    /// A09: "Today" strip and teal Omni assistance cards.
+    fn inbox_today(&mut self, ui: &mut Ui, snapshot: &crate::bridge::Snapshot) {
+        let now = litecord_types::Timestamp::now().as_millis();
+        let end_of_day = (now / 86_400_000 + 1) * 86_400_000;
+        let replies = snapshot
+            .inbox
+            .needs_attention
+            .iter()
+            .filter(|i| matches!(i, InboxItem::PendingReply { .. }))
+            .count();
+        let due_today = snapshot
+            .tasks
+            .open
+            .iter()
+            .filter(|t| t.due_at.is_some_and(|d| d.as_millis() < end_of_day))
+            .count();
+        let reminders = snapshot
+            .tasks
+            .reminders
+            .iter()
+            .filter(|r| r.trigger.due_at().as_millis() < end_of_day)
+            .count();
+        egui::Frame::new()
+            .fill(theme::RAISED)
+            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Today").strong().color(theme::TEXT));
+                    ui.add_space(12.0);
+                    for (n, label, color) in [
+                        (replies, "waiting on a reply", theme::PRIMARY_TEXT),
+                        (due_today, "tasks due", theme::PRIORITY),
+                        (reminders, "reminders", theme::WARNING),
+                    ] {
+                        ui.label(egui::RichText::new(n.to_string()).strong().color(color));
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(12.0)
+                                .color(theme::SECONDARY),
+                        );
+                        ui.add_space(10.0);
+                    }
+                });
+            });
+        ui.add_space(8.0);
+        let memory_review = snapshot
+            .memory
+            .counts_by_status
+            .iter()
+            .find(|(s, _)| *s == litecord_types::memory::MemoryStatus::Candidate)
+            .map_or(0, |(_, n)| *n as usize);
+        let first_reply = snapshot.inbox.needs_attention.iter().find_map(|i| match i {
+            InboxItem::PendingReply {
+                conversation_id,
+                from,
+                ..
+            } => Some((*conversation_id, from.clone())),
+            _ => None,
+        });
+        let approvals = snapshot.inbox.pending_actions.len() + snapshot.omni.requests.len();
+        ui.label(
+            egui::RichText::new("Omni inbox assistance")
+                .size(14.0)
+                .strong()
+                .color(theme::TEXT),
+        );
+        ui.add_space(4.0);
+        let mut action: Option<u8> = None;
+        ui.horizontal_wrapped(|ui| {
+            let cards: [(String, String, &str, u8); 4] = [
+                (
+                    format!("{approvals} waiting for approval"),
+                    "Messages and actions proposed by Omni or you".into(),
+                    "Review",
+                    0,
+                ),
+                (
+                    first_reply.as_ref().map_or_else(
+                        || "No replies owed".into(),
+                        |(_, f)| format!("Reply to {}", self.display(f)),
+                    ),
+                    "Oldest conversation waiting on you".into(),
+                    "Open",
+                    1,
+                ),
+                (
+                    format!("{memory_review} memories to review"),
+                    "New facts picked up from your messages".into(),
+                    "Review",
+                    2,
+                ),
+                (
+                    "Catch-up summary".into(),
+                    "Ask Omni what changed today".into(),
+                    "Ask Omni",
+                    3,
+                ),
+            ];
+            for (title, body, button, id) in cards {
+                egui::Frame::new()
+                    .fill(theme::OMNI.gamma_multiply(0.07))
+                    .stroke(egui::Stroke::new(1.0, theme::OMNI.gamma_multiply(0.35)))
+                    .corner_radius(8)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.set_width(190.0);
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&title).color(theme::TEXT));
+                            ui.label(theme::meta(body));
+                            let enabled = match id {
+                                0 => approvals > 0,
+                                1 => first_reply.is_some(),
+                                2 => memory_review > 0,
+                                _ => true,
+                            };
+                            if ui
+                                .add_enabled(
+                                    enabled,
+                                    egui::Button::new(
+                                        egui::RichText::new(button).color(theme::OMNI),
+                                    )
+                                    .small(),
+                                )
+                                .clicked()
+                            {
+                                action = Some(id);
+                            }
+                        });
+                    });
+            }
+        });
+        match action {
+            Some(0) => self.inbox_filter = 2,
+            Some(1) => {
+                if let Some((conv, _)) = first_reply {
+                    self.navigate(Destination::Messages);
+                    self.open_conversation(conv);
+                }
+            }
+            Some(2) => {
+                self.memory_status_filter = Some(litecord_types::memory::MemoryStatus::Candidate);
+                self.navigate(Destination::Memory);
+            }
+            Some(_) => {
+                self.omni_open = true;
+                self.omni_draft = "What changed today, and what needs my attention first?".into();
+            }
+            None => {}
+        }
+        ui.add_space(8.0);
     }
 
     fn inbox_omni_request(&mut self, ui: &mut Ui, req: &litecord_app::omni::OmniRequestRow) {

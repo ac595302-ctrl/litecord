@@ -80,6 +80,10 @@ pub enum AgentAction {
     SendMessage {
         target: MessageTarget,
         content: String,
+        /// Reply to this message (same conversation). Omitted from the
+        /// serialized form when absent, so existing payload hashes hold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<MessageId>,
     },
     EditMessage {
         message_id: MessageId,
@@ -268,6 +272,7 @@ mod tests {
         let send = AgentAction::SendMessage {
             target: MessageTarget::User { user_id: UserId(1) },
             content: "hi".into(),
+            reply_to: None,
         };
         assert_eq!(send.capability_class(), CapabilityClass::DiscordWrite);
         assert_eq!(send.required_capability(), Some(Capability::DmSend));

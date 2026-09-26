@@ -162,6 +162,15 @@ pub enum DiscordEvent {
         conversation_id: ConversationId,
         messages: Vec<Message>,
     },
+    /// One page of older (or catch-up) history, oldest first. Upsert only:
+    /// messages missing from the page are **never** deleted — unlike the
+    /// authoritative `*Snapshot` variants, a page says nothing about what
+    /// lies outside it. Advances the conversation's `history_sync` cursor
+    /// (when one exists) in the same transaction.
+    MessagesPage {
+        conversation_id: ConversationId,
+        messages: Vec<Message>,
+    },
     /// The adapter knows something changed but could not resolve it; the
     /// hydrator should fetch `key`.
     Invalidated {
@@ -192,6 +201,7 @@ impl DiscordEvent {
             DiscordEvent::GuildChannelsSnapshot { .. } => "guild_channels_snapshot",
             DiscordEvent::ConversationsSnapshot { .. } => "conversations_snapshot",
             DiscordEvent::MessagesSnapshot { .. } => "messages_snapshot",
+            DiscordEvent::MessagesPage { .. } => "messages_page",
             DiscordEvent::Invalidated { .. } => "invalidated",
         }
     }
@@ -212,6 +222,130 @@ impl SourceEnvelope {
             observed_at,
             event,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approximate in-memory size (byte budgets)
+// ---------------------------------------------------------------------------
+
+/// Fixed per-item overhead used by the `approx_bytes` estimates: covers the
+/// struct itself, ids, timestamps and allocator slack. Deliberately coarse.
+const ITEM_OVERHEAD: usize = 64;
+
+fn opt_str_len<S: AsRef<str>>(s: &Option<S>) -> usize {
+    s.as_ref().map_or(0, |s| s.as_ref().len())
+}
+
+fn user_bytes(u: &User) -> usize {
+    ITEM_OVERHEAD + u.username.len() + opt_str_len(&u.global_name) + opt_str_len(&u.avatar_url)
+}
+
+fn guild_bytes(g: &Guild) -> usize {
+    ITEM_OVERHEAD + g.name.len() + opt_str_len(&g.icon_url)
+}
+
+fn channel_bytes(c: &Channel) -> usize {
+    ITEM_OVERHEAD + c.name.len()
+}
+
+fn conversation_bytes(c: &Conversation) -> usize {
+    ITEM_OVERHEAD + opt_str_len(&c.title)
+}
+
+fn relationship_bytes(u: &Option<User>) -> usize {
+    ITEM_OVERHEAD + u.as_ref().map_or(0, user_bytes)
+}
+
+fn presence_bytes(p: &Presence) -> usize {
+    ITEM_OVERHEAD
+        + p.activity.as_ref().map_or(0, |a| {
+            a.name.len() + opt_str_len(&a.details) + opt_str_len(&a.state)
+        })
+}
+
+/// Cheap estimate of a [`Message`]'s heap + inline footprint in bytes: a
+/// fixed overhead plus content and extra-string lengths. No serialization.
+/// Also used to size message values in byte-bounded caches.
+pub fn message_approx_bytes(m: &Message) -> usize {
+    ITEM_OVERHEAD
+        + m.content.len()
+        + m.extras
+            .iter()
+            .map(|e| {
+                ITEM_OVERHEAD / 2
+                    + match e {
+                        MessageExtra::Attachment {
+                            filename,
+                            content_type,
+                            ..
+                        } => filename.len() + opt_str_len(content_type),
+                        MessageExtra::Embed { title, url } => opt_str_len(title) + opt_str_len(url),
+                        MessageExtra::Sticker { name } => name.len(),
+                        MessageExtra::Unsupported { kind } => kind.len(),
+                        MessageExtra::Poll | MessageExtra::VoiceMessage | MessageExtra::Thread => 0,
+                    }
+            })
+            .sum::<usize>()
+}
+
+impl DiscordEvent {
+    /// Cheap estimate of this event's memory footprint in bytes (fixed
+    /// per-variant overhead + string/content lengths + per-item overhead for
+    /// list payloads). Used for queue byte budgets; never serializes.
+    pub fn approx_bytes(&self) -> usize {
+        let payload = match self {
+            DiscordEvent::SessionChanged { .. }
+            | DiscordEvent::RelationshipRemoved { .. }
+            | DiscordEvent::GuildRemoved { .. }
+            | DiscordEvent::MessageDeleted { .. }
+            | DiscordEvent::Invalidated { .. } => 0,
+            DiscordEvent::CurrentUser { user } | DiscordEvent::UserUpserted { user } => {
+                user_bytes(user)
+            }
+            DiscordEvent::PresenceChanged { presence, .. } => presence_bytes(presence),
+            DiscordEvent::RelationshipUpserted { user, .. } => relationship_bytes(user),
+            DiscordEvent::GuildUpserted { guild } => guild_bytes(guild),
+            DiscordEvent::ChannelUpserted { channel } => channel_bytes(channel),
+            DiscordEvent::ConversationUpserted { conversation } => conversation_bytes(conversation),
+            DiscordEvent::MessageCreated { message } | DiscordEvent::MessageUpdated { message } => {
+                message_approx_bytes(message)
+            }
+            DiscordEvent::LobbyUpserted { lobby } => {
+                ITEM_OVERHEAD + lobby.member_ids.len() * std::mem::size_of::<UserId>()
+            }
+            DiscordEvent::VoiceStateChanged { voice } => {
+                ITEM_OVERHEAD
+                    + opt_str_len(&voice.input_device)
+                    + opt_str_len(&voice.output_device)
+                    + voice.participants.len() * ITEM_OVERHEAD
+            }
+            DiscordEvent::RelationshipsSnapshot { entries } => {
+                entries.iter().map(|(_, u)| relationship_bytes(u)).sum()
+            }
+            DiscordEvent::GuildsSnapshot { guilds } => guilds.iter().map(guild_bytes).sum(),
+            DiscordEvent::GuildChannelsSnapshot { channels, .. } => {
+                channels.iter().map(channel_bytes).sum()
+            }
+            DiscordEvent::ConversationsSnapshot { conversations } => {
+                conversations.iter().map(conversation_bytes).sum()
+            }
+            DiscordEvent::MessagesSnapshot { messages, .. }
+            | DiscordEvent::MessagesPage { messages, .. } => {
+                messages.iter().map(message_approx_bytes).sum()
+            }
+        };
+        std::mem::size_of::<Self>() + payload
+    }
+}
+
+impl SourceEnvelope {
+    /// Cheap estimate of the envelope's memory footprint in bytes; see
+    /// [`DiscordEvent::approx_bytes`].
+    pub fn approx_bytes(&self) -> usize {
+        std::mem::size_of::<DiscordSource>()
+            + std::mem::size_of::<Timestamp>()
+            + self.event.approx_bytes()
     }
 }
 

@@ -246,8 +246,24 @@ impl LitecordApp {
             let ctx = self.feature_context(r)?;
             let limit = limit.clamp(1, 200);
             let mut recent = repos::messages::recent(r, id, limit + 1, before)?;
-            let has_more = recent.len() > limit as usize;
+            let mut has_more = recent.len() > limit as usize;
             recent.truncate(limit as usize);
+            // Byte ceiling for the in-memory window (Stage A), newest first;
+            // older messages stay in SQLite and page in on demand.
+            let max_bytes = self.inner.cfg.cache.max_message_cache_bytes;
+            let mut total = 0usize;
+            let keep = recent
+                .iter()
+                .take_while(|m| {
+                    total += litecord_core::events::message_approx_bytes(&m.message);
+                    total <= max_bytes
+                })
+                .count()
+                .max(1);
+            if keep < recent.len() {
+                recent.truncate(keep);
+                has_more = true;
+            }
             recent.reverse();
             let mut messages = Vec::with_capacity(recent.len());
             for m in recent {
@@ -847,6 +863,31 @@ impl LitecordApp {
         content: &str,
         identity: DiscordIdentity,
     ) -> Result<ProposeOutcome> {
+        self.propose_send(conversation_id, content, identity, None)
+            .await
+    }
+
+    /// Reply to `reply_to` (a message in the same conversation) as an
+    /// explicit identity. Refused when that identity's backend cannot send
+    /// replies; it never degrades to a plain message.
+    pub async fn send_reply_as(
+        &self,
+        conversation_id: ConversationId,
+        reply_to: MessageId,
+        content: &str,
+        identity: DiscordIdentity,
+    ) -> Result<ProposeOutcome> {
+        self.propose_send(conversation_id, content, identity, Some(reply_to))
+            .await
+    }
+
+    async fn propose_send(
+        &self,
+        conversation_id: ConversationId,
+        content: &str,
+        identity: DiscordIdentity,
+        reply_to: Option<MessageId>,
+    ) -> Result<ProposeOutcome> {
         let rev = self.revision()?;
         self.inner
             .actions
@@ -854,6 +895,7 @@ impl LitecordApp {
                 AgentAction::SendMessage {
                     target: MessageTarget::Conversation { conversation_id },
                     content: content.to_owned(),
+                    reply_to,
                 },
                 Actor::User,
                 identity,
@@ -873,6 +915,7 @@ impl LitecordApp {
         self.user_action(AgentAction::SendMessage {
             target: MessageTarget::Conversation { conversation_id },
             content: content.to_owned(),
+            reply_to: None,
         })
         .await
     }
@@ -1078,7 +1121,11 @@ fn default_value(kind: &litecord_features::feature::SettingKind) -> serde_json::
 
 fn pending_row(conn: &Connection, p: &ActionProposal) -> Result<PendingActionRow> {
     let (summary, target, content) = match &p.action {
-        AgentAction::SendMessage { target, content } => {
+        AgentAction::SendMessage {
+            target,
+            content,
+            reply_to,
+        } => {
             let label = match target {
                 MessageTarget::User { user_id } => name_of(conn, *user_id)?,
                 MessageTarget::Conversation { conversation_id } => {
@@ -1088,11 +1135,18 @@ fn pending_row(conn: &Connection, p: &ActionProposal) -> Result<PendingActionRow
                     }
                 }
             };
-            (
-                format!("Send to {label}: {}", preview(content)),
-                Some(label),
-                Some(content.clone()),
-            )
+            let replying = match reply_to {
+                Some(id) => match repos::messages::get(conn, *id)? {
+                    Some(m) => Some(name_of(conn, m.message.author_id)?),
+                    None => Some("a message".to_owned()),
+                },
+                None => None,
+            };
+            let summary = match replying {
+                Some(who) => format!("Reply to {who} in {label}: {}", preview(content)),
+                None => format!("Send to {label}: {}", preview(content)),
+            };
+            (summary, Some(label), Some(content.clone()))
         }
         AgentAction::EditMessage { content, .. } => {
             ("Edit a message".to_owned(), None, Some(content.clone()))

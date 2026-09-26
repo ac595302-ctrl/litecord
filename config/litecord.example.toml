@@ -19,8 +19,10 @@ demo_bot = false            # also run a synthetic application-bot source
 
 [runtime]
 event_queue_capacity = 1024  # bounded ingest queue; overflow => drop + resync
+event_queue_max_bytes = 8388608  # ingest queue byte budget (8 MiB, approximate)
 broadcast_capacity = 256
 shutdown_grace_ms = 3000
+memory_soft_limit_mb = 256          # background sync pauses above this
 
 [hydration]
 max_concurrent_jobs = 2
@@ -33,10 +35,14 @@ stale_after_guilds_secs = 3600
 stale_after_channels_secs = 3600
 stale_after_conversations_secs = 600
 recent_messages_limit = 50
+history_page_size = 100            # history sync page (1..=100)
+history_page_interval_ms = 750
+history_idle_after_ms = 5000        # wait for the UI to be idle
 
 [cache]
 max_users = 1000
 max_messages = 5000
+max_message_cache_bytes = 4194304  # message hot cache byte ceiling (4 MiB)
 max_hot_conversations = 8
 
 [retention]
@@ -46,6 +52,7 @@ event_log_days = 30
 purge_deleted_messages = true
 hot_hours = 24
 warm_days = 14
+max_database_mb = 2048              # history sync stops here; 0 disables it
 
 [agent]
 approval_ttl_secs = 600

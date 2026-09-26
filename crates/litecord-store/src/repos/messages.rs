@@ -300,6 +300,19 @@ pub fn in_range(
     Ok(out)
 }
 
+/// Id of the oldest stored message (deleted or not) in a conversation.
+pub fn oldest_in(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> StoreResult<Option<MessageId>> {
+    let v: Option<i64> = conn.query_row(
+        "SELECT MIN(id) FROM messages WHERE conversation_id = ?1",
+        params![conversation_id.to_sql()],
+        |r| r.get(0),
+    )?;
+    Ok(v.map(MessageId::from_sql))
+}
+
 /// Count non-deleted messages, optionally scoped to one conversation.
 pub fn count(conn: &Connection, conversation: Option<ConversationId>) -> StoreResult<i64> {
     Ok(conn.query_row(

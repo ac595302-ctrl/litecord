@@ -86,7 +86,7 @@ async fn bridge_send_and_selection_snapshots_preserve_app_state() {
         .unwrap();
     let (conversation_id, contact_id) = wait_for_demo_conversation(&app).await;
 
-    let latest = snapshot(&app, selection(41, conversation_id, contact_id, None)).unwrap();
+    let latest = snapshot(&app, selection(41, conversation_id, contact_id, None), None).unwrap();
     assert_eq!(latest.selection.generation, 41);
     assert_eq!(latest.selection.destination, Destination::Messages);
     assert_eq!(latest.selection.conversation, Some(conversation_id));
@@ -104,6 +104,7 @@ async fn bridge_send_and_selection_snapshots_preserve_app_state() {
     let older = snapshot(
         &app,
         selection(42, conversation_id, contact_id, Some(before)),
+        None,
     )
     .unwrap();
     assert_eq!(older.selection.generation, 42);
@@ -207,5 +208,32 @@ async fn failed_bridge_send_returns_error_without_a_sent_completion() {
     assert!(completion.error.is_some());
     assert!(completion.sent.is_none());
 
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshots_reload_only_the_visible_destination() {
+    let app = LitecordApp::builder(LitecordConfig::default())
+        .backend(Arc::new(MockBackend::new(fixtures::generate(
+            11,
+            Timestamp::now(),
+        ))))
+        .in_memory()
+        .start()
+        .await
+        .unwrap();
+    let (conversation_id, contact_id) = wait_for_demo_conversation(&app).await;
+    let mut sel = selection(1, conversation_id, contact_id, None);
+    let first = snapshot(&app, sel.clone(), None).unwrap();
+    let second = snapshot(&app, sel.clone(), Some(&first)).unwrap();
+    // Hidden destinations reuse the previous views...
+    assert!(Arc::ptr_eq(&first.tasks, &second.tasks));
+    assert!(Arc::ptr_eq(&first.memory, &second.memory));
+    assert!(Arc::ptr_eq(&first.guilds, &second.guilds));
+    // ...the visible one is reloaded.
+    assert!(!Arc::ptr_eq(&first.conversations, &second.conversations));
+    sel.destination = Destination::Tasks;
+    let third = snapshot(&app, sel, Some(&second)).unwrap();
+    assert!(!Arc::ptr_eq(&second.tasks, &third.tasks));
     app.shutdown().await;
 }

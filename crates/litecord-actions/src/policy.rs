@@ -160,6 +160,7 @@ pub(crate) mod tests {
             AgentAction::SendMessage {
                 target: MessageTarget::User { user_id: UserId(1) },
                 content: "s".into(),
+                reply_to: None,
             },
             AgentAction::EditMessage {
                 message_id: MessageId(1),

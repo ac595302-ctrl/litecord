@@ -161,3 +161,39 @@ async fn message_commands_need_a_valid_selected_message() {
     assert!(app.run_command_in("message.copy_id", bogus).await.is_err());
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_window_respects_the_byte_ceiling() {
+    let mut cfg = LitecordConfig::default();
+    cfg.cache.max_message_cache_bytes = 1_500;
+    let app = LitecordApp::builder(cfg)
+        .backend(Arc::new(MockBackend::new(fixtures::generate(
+            5,
+            Timestamp::now(),
+        ))))
+        .in_memory()
+        .start()
+        .await
+        .unwrap();
+    let mut view = None;
+    for _ in 0..200 {
+        if let Some(c) = app.conversations_view(10).unwrap().conversations.first() {
+            let v = app.conversation_view(c.conversation_id, 200, None).unwrap();
+            if v.messages.len() > 1 || v.has_more {
+                view = Some(v);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let view = view.expect("history hydrated");
+    let bytes: usize = view
+        .messages
+        .iter()
+        .map(|m| 64 + m.render.content.len())
+        .sum();
+    assert!(view.has_more, "older messages stay in SQLite");
+    assert!(!view.messages.is_empty());
+    assert!(bytes <= 1_500 + 400, "window kept small: {bytes} bytes");
+    app.shutdown().await;
+}

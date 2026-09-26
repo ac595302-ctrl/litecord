@@ -137,16 +137,22 @@ impl Default for BackendConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub event_queue_capacity: usize,
+    /// Approximate byte budget of the ingest queue (rounded up to KiB).
+    pub event_queue_max_bytes: usize,
     pub broadcast_capacity: usize,
     pub shutdown_grace_ms: u64,
+    /// Background work (history sync) pauses above this resident size.
+    pub memory_soft_limit_mb: u32,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             event_queue_capacity: 1_024,
+            event_queue_max_bytes: 8 * 1024 * 1024,
             broadcast_capacity: 256,
             shutdown_grace_ms: 3_000,
+            memory_soft_limit_mb: 256,
         }
     }
 }
@@ -165,6 +171,12 @@ pub struct HydrationConfig {
     pub stale_after_channels_secs: u64,
     pub stale_after_conversations_secs: u64,
     pub recent_messages_limit: u32,
+    /// History sync: messages per page (1..=100).
+    pub history_page_size: u32,
+    /// History sync: pause between pages.
+    pub history_page_interval_ms: u64,
+    /// History sync waits until the UI has been idle this long.
+    pub history_idle_after_ms: u64,
 }
 
 impl Default for HydrationConfig {
@@ -180,6 +192,9 @@ impl Default for HydrationConfig {
             stale_after_channels_secs: 60 * 60,
             stale_after_conversations_secs: 10 * 60,
             recent_messages_limit: 50,
+            history_page_size: 100,
+            history_page_interval_ms: 750,
+            history_idle_after_ms: 5_000,
         }
     }
 }
@@ -189,6 +204,8 @@ impl Default for HydrationConfig {
 pub struct CacheConfig {
     pub max_users: usize,
     pub max_messages: usize,
+    /// Approximate byte ceiling of the message hot cache.
+    pub max_message_cache_bytes: usize,
     pub max_hot_conversations: usize,
 }
 
@@ -197,6 +214,7 @@ impl Default for CacheConfig {
         Self {
             max_users: 1_000,
             max_messages: 5_000,
+            max_message_cache_bytes: 4 * 1024 * 1024,
             max_hot_conversations: 8,
         }
     }
@@ -214,6 +232,9 @@ pub struct RetentionConfig {
     /// Messages newer than this are HOT, newer than `warm_days` WARM.
     pub hot_hours: u32,
     pub warm_days: u32,
+    /// Database size ceiling in MiB. History sync stops at this size; it is
+    /// required before history sync is offered (0 = history sync disabled).
+    pub max_database_mb: u32,
 }
 
 impl Default for RetentionConfig {
@@ -225,6 +246,7 @@ impl Default for RetentionConfig {
             purge_deleted_messages: true,
             hot_hours: 24,
             warm_days: 14,
+            max_database_mb: 2048,
         }
     }
 }

@@ -23,5 +23,5 @@ pub mod reducer;
 pub mod repos;
 mod sql;
 
-pub use db::{Committed, Database, ReadTx, WriteTx};
+pub use db::{db_size_bytes, Committed, Database, ReadTx, WriteTx};
 pub use error::{StoreError, StoreResult};

@@ -139,30 +139,55 @@ impl Workspace {
         );
     }
     fn conversations(&mut self, ui: &mut Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            ui.spinner();
+            return;
+        };
         ui.horizontal(|ui| {
-            ui.heading("Messages");
-        });
-        ui.add_space(8.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut self.filter)
-                .hint_text("Search conversations…")
-                .desired_width(f32::INFINITY),
-        );
-        ui.horizontal_wrapped(|ui| {
-            for (i, label) in ["All", "Reply", "Groups", "DMs"].into_iter().enumerate() {
-                if ui
-                    .selectable_label(self.conversation_tab == i, label)
-                    .clicked()
+            ui.label(
+                egui::RichText::new("Messages")
+                    .size(18.0)
+                    .color(theme::TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::icon_button(
+                    ui,
+                    icons::Glyph::Compose,
+                    "New message: pick a friend",
+                    true,
+                )
+                .clicked()
                 {
+                    self.navigate(Destination::Friends);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        theme::search_field(ui, &mut self.filter, "Search conversations…");
+        ui.add_space(4.0);
+        let waiting = s
+            .conversations
+            .conversations
+            .iter()
+            .filter(|r| r.awaiting_reply)
+            .count();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (i, (label, badge)) in [
+                ("All", None),
+                ("Unread", Some(waiting)),
+                ("Groups", None),
+                ("DMs", None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if theme::pill(ui, label, badge, self.conversation_tab == i).clicked() {
                     self.conversation_tab = i;
                 }
             }
         });
         ui.add_space(4.0);
-        let Some(s) = self.snapshot.clone() else {
-            ui.spinner();
-            return;
-        };
         let filter = self.filter.to_lowercase();
         let rows: Vec<_> = s
             .conversations
@@ -177,60 +202,102 @@ impl Workspace {
             })
             .collect();
         if rows.is_empty() {
-            ui.label("No conversations here.");
+            theme::empty_state(ui, "Nothing here", "No conversations match this filter.");
         }
+        let now = litecord_types::Timestamp::now();
         egui::ScrollArea::vertical()
             .id_salt("conversation_scroll")
-            .show_rows(ui, 64.0, rows.len(), |ui, range| {
+            .auto_shrink([false, false])
+            .show_rows(ui, 58.0, rows.len(), |ui, range| {
                 for index in range {
                     let r = rows[index];
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 64.0),
+                        egui::vec2(ui.available_width(), 58.0),
                         Sense::click(),
                     );
-                    if Some(r.conversation_id) == self.selection.conversation || response.hovered()
-                    {
-                        ui.painter().rect_filled(
-                            rect.shrink2(egui::vec2(0.0, 3.0)),
-                            6.0,
-                            theme::SELECTED,
-                        );
+                    let selected = Some(r.conversation_id) == self.selection.conversation;
+                    let painter = ui.painter().clone();
+                    let card = rect.shrink2(egui::vec2(0.0, 2.0));
+                    if selected {
+                        painter.rect_filled(card, 8.0, theme::SELECTED);
+                    } else if response.hovered() {
+                        painter.rect_filled(card, 8.0, theme::HOVER);
                     }
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(rect.shrink(8.0))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
                     let title = self.display(&r.title);
+                    let mut avatar =
+                        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
+                            card.min + egui::vec2(8.0, 7.0),
+                            egui::vec2(40.0, 40.0),
+                        )));
                     theme::avatar_presence(
-                        &mut child,
+                        &mut avatar,
                         &title,
-                        36.0,
+                        40.0,
                         r.recipient_status.map_or(theme::Presence::None, |p| {
                             theme::Presence::from_status(p.as_str())
                         }),
                     );
-                    child.vertical(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(&title).strong()).truncate());
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(
-                                    self.display(
-                                        r.last_message_preview
-                                            .as_deref()
-                                            .unwrap_or("No recent messages"),
-                                    ),
-                                )
-                                .size(12.0)
-                                .color(theme::MUTED),
-                            )
-                            .truncate(),
-                        );
+                    let x = card.left() + 58.0;
+                    let time = r
+                        .last_activity_at
+                        .map(|t| crate::messages_ui::list_time(t, now));
+                    let time_w = time.as_ref().map_or(0.0, |t| {
+                        painter
+                            .layout_no_wrap(t.clone(), FontId::proportional(11.0), theme::MUTED)
+                            .size()
+                            .x
                     });
+                    let text_w = (card.right() - x - time_w - 16.0).max(40.0);
+                    let elide = |text: String, size: f32, color, width: f32| {
+                        let mut job = egui::text::LayoutJob::simple_singleline(
+                            text,
+                            FontId::proportional(size),
+                            color,
+                        );
+                        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+                        painter.layout_job(job)
+                    };
+                    painter.galley(
+                        egui::pos2(x, card.top() + 9.0),
+                        elide(
+                            title.clone(),
+                            14.0,
+                            if r.awaiting_reply {
+                                theme::TEXT
+                            } else {
+                                theme::SECONDARY
+                            },
+                            text_w,
+                        ),
+                        theme::TEXT,
+                    );
+                    if let Some(t) = time {
+                        painter.text(
+                            egui::pos2(card.right() - 8.0, card.top() + 11.0),
+                            Align2::RIGHT_TOP,
+                            t,
+                            FontId::proportional(11.0),
+                            if r.awaiting_reply {
+                                theme::PRIMARY_TEXT
+                            } else {
+                                theme::MUTED
+                            },
+                        );
+                    }
+                    let preview = self.display(
+                        r.last_message_preview
+                            .as_deref()
+                            .unwrap_or("No messages cached yet"),
+                    );
+                    painter.galley(
+                        egui::pos2(x, card.top() + 30.0),
+                        elide(preview, 12.0, theme::MUTED, text_w - 14.0),
+                        theme::MUTED,
+                    );
                     if r.awaiting_reply {
-                        ui.painter().circle_filled(
-                            rect.right_center() - egui::vec2(10.0, 0.0),
-                            3.0,
+                        painter.circle_filled(
+                            egui::pos2(card.right() - 14.0, card.top() + 38.0),
+                            5.0,
                             theme::PRIMARY,
                         );
                     }
@@ -238,8 +305,12 @@ impl Workspace {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::SelectableLabel,
                             true,
-                            Some(r.conversation_id) == self.selection.conversation,
-                            title.clone(),
+                            selected,
+                            if r.awaiting_reply {
+                                format!("{title}, waiting for your reply")
+                            } else {
+                                title.clone()
+                            },
                         )
                     });
                     if response.clicked() {

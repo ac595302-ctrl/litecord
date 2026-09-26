@@ -44,6 +44,8 @@ pub enum Capability {
     GuildListing,
     GuildChannels,
     GuildMessages,
+    /// Sending a message as a reply to another one.
+    Replies,
     LinkedChannels,
     Lobbies,
     Voice,

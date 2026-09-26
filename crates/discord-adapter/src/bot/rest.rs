@@ -73,10 +73,25 @@ pub fn guild_channels(guild: GuildId) -> RestRequest {
 /// `GET /channels/{channel.id}/messages`. `limit` is clamped to `1..=100`
 /// (Discord's own bounds); `before` paginates backwards from a message id.
 pub fn channel_messages(channel: ChannelId, limit: u32, before: Option<MessageId>) -> RestRequest {
+    channel_messages_page(channel, limit, before, None)
+}
+
+/// `GET /channels/{channel.id}/messages` with a paging cursor: `before`
+/// walks backwards, `after` catches up forwards. Discord accepts only one
+/// cursor per request, so when both are given only `after` is sent (callers
+/// filter the `before` bound client-side). `limit` is clamped to `1..=100`.
+pub fn channel_messages_page(
+    channel: ChannelId,
+    limit: u32,
+    before: Option<MessageId>,
+    after: Option<MessageId>,
+) -> RestRequest {
     let limit = limit.clamp(1, 100);
     let mut path = format!("/channels/{channel}/messages?limit={limit}");
-    if let Some(before) = before {
-        path.push_str(&format!("&before={before}"));
+    match (before, after) {
+        (_, Some(after)) => path.push_str(&format!("&after={after}")),
+        (Some(before), None) => path.push_str(&format!("&before={before}")),
+        (None, None) => {}
     }
     RestRequest {
         method: Method::Get,
@@ -95,6 +110,26 @@ pub fn create_message(channel: ChannelId, content: &str) -> RestRequest {
         body: Some(json!({
             "content": content,
             "allowed_mentions": { "parse": [] },
+        })),
+        route: "POST /channels/{channel.id}/messages",
+    }
+}
+
+/// `POST /channels/{channel.id}/messages` as a reply. `fail_if_not_exists`
+/// is false so a reply to a since-deleted message still posts, as in the
+/// Discord client.
+pub fn create_reply(channel: ChannelId, content: &str, reply_to: MessageId) -> RestRequest {
+    RestRequest {
+        method: Method::Post,
+        path: format!("/channels/{channel}/messages"),
+        body: Some(json!({
+            "content": content,
+            "allowed_mentions": { "parse": [], "replied_user": false },
+            "message_reference": {
+                "message_id": reply_to.to_string(),
+                "channel_id": channel.to_string(),
+                "fail_if_not_exists": false,
+            },
         })),
         route: "POST /channels/{channel.id}/messages",
     }
@@ -133,14 +168,16 @@ pub fn gateway_bot() -> RestRequest {
 /// Parses a `GET /channels/{channel.id}/messages` response body.
 ///
 /// Discord returns messages newest-first; this returns them chronologically
-/// (oldest first), matching [`litecord_core::ports::SocialBackend::messages`].
+/// (oldest first, by id — snowflakes are time-ordered), matching
+/// [`litecord_core::ports::SocialBackend::messages`]. Sorting rather than
+/// reversing keeps the order right whatever order an `after=` query uses.
 pub fn parse_messages(v: &Value) -> Result<Vec<Message>, TranslateError> {
     let array = v.as_array().ok_or(TranslateError::Invalid("messages"))?;
     let mut messages = array
         .iter()
         .map(translate::message)
         .collect::<Result<Vec<_>, _>>()?;
-    messages.reverse();
+    messages.sort_by_key(|m| m.id);
     Ok(messages)
 }
 
@@ -241,6 +278,46 @@ mod tests {
 
         let req = channel_messages(ChannelId(1), 0, None);
         assert_eq!(req.path, "/channels/1/messages?limit=1");
+    }
+
+    #[test]
+    fn channel_messages_page_query() {
+        let c = ChannelId(7);
+        assert_eq!(
+            channel_messages_page(c, 50, None, None).path,
+            "/channels/7/messages?limit=50"
+        );
+        assert_eq!(
+            channel_messages_page(c, 50, Some(MessageId(3)), None).path,
+            "/channels/7/messages?limit=50&before=3"
+        );
+        assert_eq!(
+            channel_messages_page(c, 200, None, Some(MessageId(4))).path,
+            "/channels/7/messages?limit=100&after=4"
+        );
+        // Discord takes one cursor: `after` wins.
+        let req = channel_messages_page(c, 10, Some(MessageId(9)), Some(MessageId(4)));
+        assert_eq!(req.path, "/channels/7/messages?limit=10&after=4");
+        assert_eq!(req.route, "GET /channels/{channel.id}/messages");
+        assert_eq!(req.method, Method::Get);
+    }
+
+    #[test]
+    fn parse_messages_sorts_ascending_whatever_the_input_order() {
+        let v = json!([
+            { "id": "2", "channel_id": "1", "author": { "id": "9" }, "content": "b",
+              "timestamp": "2026-01-01T00:00:02Z" },
+            { "id": "3", "channel_id": "1", "author": { "id": "9" }, "content": "c",
+              "timestamp": "2026-01-01T00:00:03Z" },
+            { "id": "1", "channel_id": "1", "author": { "id": "9" }, "content": "a",
+              "timestamp": "2026-01-01T00:00:01Z" },
+        ]);
+        let ids: Vec<u64> = parse_messages(&v)
+            .unwrap()
+            .iter()
+            .map(|m| m.id.get())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]

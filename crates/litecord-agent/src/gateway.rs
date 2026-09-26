@@ -248,7 +248,11 @@ impl AgentGateway {
                     }
                 };
                 (
-                    AgentAction::SendMessage { target, content },
+                    AgentAction::SendMessage {
+                        target,
+                        content,
+                        reply_to: None,
+                    },
                     arg_str(&args, "rationale").map(str::to_owned),
                     arg_i64(&args, "based_on_revision"),
                 )

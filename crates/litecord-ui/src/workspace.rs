@@ -355,17 +355,20 @@ impl Workspace {
                     self.cancel_edit();
                 }
             }
-            // Layout controls and status get their space first (right side);
-            // the search field adapts to what is left.
-            let right_reserve = 430.0;
-            let search_width = (ui.available_width() - right_reserve).clamp(140.0, 380.0);
-            let (rect, search) =
-                ui.allocate_exact_size(egui::vec2(search_width, 28.0), Sense::click());
+            // Centered global search (A01). Layout controls and status keep
+            // their space on the right; the field shrinks on narrow windows.
+            let full = ui.max_rect();
+            let search_width = (full.width() - 2.0 * 330.0).clamp(160.0, 420.0);
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(full.center().x, full.center().y),
+                egui::vec2(search_width, 28.0),
+            );
+            let search = ui.interact(rect, ui.id().with("global_search"), Sense::click());
             if ui.is_rect_visible(rect) {
                 let painter = ui.painter();
                 painter.rect(
                     rect,
-                    6.0,
+                    8.0,
                     if search.hovered() {
                         theme::RAISED
                     } else {
@@ -374,14 +377,17 @@ impl Workspace {
                     Stroke::new(1.0, theme::BORDER),
                     egui::StrokeKind::Inside,
                 );
+                crate::icons::glyph(
+                    painter,
+                    rect.left_center() + egui::vec2(16.0, 0.0),
+                    14.0,
+                    crate::icons::Glyph::Search,
+                    theme::MUTED,
+                );
                 painter.text(
-                    rect.left_center() + egui::vec2(10.0, 0.0),
+                    rect.left_center() + egui::vec2(30.0, 0.0),
                     Align2::LEFT_CENTER,
-                    if search_width > 220.0 {
-                        "Search or run a command…"
-                    } else {
-                        "Search…"
-                    },
+                    "Search",
                     FontId::proportional(13.0),
                     theme::MUTED,
                 );
@@ -393,22 +399,13 @@ impl Workspace {
                     theme::MUTED,
                 );
             }
-            let search = search.on_hover_text("Command palette (Ctrl/Cmd+K)");
+            let search = search.on_hover_text("Search people, messages and commands (Ctrl/Cmd+K)");
             search.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search or run a command")
             });
             if search.clicked() {
                 self.palette_open = true;
                 self.palette_focus_requested = true;
-            }
-            if let Some(s) = self.snapshot.clone() {
-                connection_status(ui, &s.diagnostics.session, "Discord");
-                if let Some(bot) = &s.diagnostics.bot {
-                    connection_status(ui, &bot.session, "Bot");
-                }
-                if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::Demo {
-                    theme::chip(ui, "Demo data", theme::WARNING);
-                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -441,14 +438,23 @@ impl Workspace {
                 if omni.clicked() {
                     self.omni_open = !self.omni_open;
                 }
-                if ui.button("Layouts").clicked() {
+                if ui
+                    .button("Layouts")
+                    .on_hover_text(format!("Layout profile: {}", self.profile.name))
+                    .clicked()
+                {
                     self.profile_manager = !self.profile_manager;
                 }
-                ui.label(
-                    egui::RichText::new(&self.profile.name)
-                        .size(12.0)
-                        .color(theme::MUTED),
-                );
+                ui.add_space(6.0);
+                if let Some(s) = self.snapshot.clone() {
+                    if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::Demo {
+                        theme::chip(ui, "Demo data", theme::WARNING);
+                    }
+                    if let Some(bot) = &s.diagnostics.bot {
+                        connection_status(ui, &bot.session, "Bot");
+                    }
+                    connection_status(ui, &s.diagnostics.session, "Discord");
+                }
             });
         });
     }
@@ -791,7 +797,7 @@ fn connection_status(ui: &mut Ui, state: &litecord_types::social::SessionState, 
         S::Error { .. } => (theme::PRIORITY, "Error"),
     };
     let r = ui
-        .horizontal(|ui| {
+        .with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
             ui.painter().circle_filled(rect.center(), 4.0, color);

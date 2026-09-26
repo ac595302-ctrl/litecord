@@ -84,6 +84,10 @@ pub struct TimingSnapshot {
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub event_queue_depth: Gauge,
+    /// Approximate bytes queued in the ingest queue (shared with the bus).
+    pub event_queue_bytes: Arc<Gauge>,
+    /// Approximate bytes held by the message hot cache.
+    pub hot_cache_bytes: Arc<Gauge>,
     pub events_ingested: Counter,
     pub events_dropped: Counter,
     pub hydration_queue_depth: Gauge,
@@ -124,6 +128,8 @@ impl Metrics {
         MetricsSnapshot {
             rss_bytes: resident_set_size(),
             event_queue_depth: self.event_queue_depth.get(),
+            event_queue_bytes: self.event_queue_bytes.get(),
+            hot_cache_bytes: self.hot_cache_bytes.get(),
             events_ingested: self.events_ingested.get(),
             events_dropped: self.events_dropped.get(),
             hydration_queue_depth: self.hydration_queue_depth.get(),
@@ -145,6 +151,10 @@ pub struct MetricsSnapshot {
     /// `None` on platforms where RSS is not implemented.
     pub rss_bytes: Option<u64>,
     pub event_queue_depth: u64,
+    /// Approximate bytes queued in the ingest queue.
+    pub event_queue_bytes: u64,
+    /// Approximate bytes held by the message hot cache.
+    pub hot_cache_bytes: u64,
     pub events_ingested: u64,
     pub events_dropped: u64,
     pub hydration_queue_depth: u64,

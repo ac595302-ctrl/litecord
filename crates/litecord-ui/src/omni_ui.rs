@@ -77,9 +77,7 @@ impl Workspace {
             };
             ui.label(theme::meta(account));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Close")
-                    .on_hover_text("Close (Ctrl+J)")
+                if crate::icons::icon_button(ui, crate::icons::Glyph::Close, "Close Omni (Ctrl+J)", true)
                     .clicked()
                 {
                     self.omni_open = false;

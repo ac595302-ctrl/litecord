@@ -507,6 +507,7 @@ fn action_proposal_approval_and_audit() {
     let action = AgentAction::SendMessage {
         target: MessageTarget::User { user_id: UserId(5) },
         content: "hello!".to_string(),
+        reply_to: None,
     };
     let actor = Actor::Agent {
         harness: "cli".to_string(),

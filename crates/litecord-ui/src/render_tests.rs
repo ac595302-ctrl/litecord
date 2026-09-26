@@ -126,7 +126,7 @@ async fn every_destination_renders_wide_and_narrow_without_changing_saved_layout
             contact_id,
         );
         workspace.selection = selected.clone();
-        workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected).unwrap()));
+        workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected, None).unwrap()));
 
         for (width, height) in sizes {
             let _ = ctx.run_ui(raw_input(width, height), |ctx| workspace.draw(ctx));
@@ -189,7 +189,7 @@ async fn privacy_mode_keeps_contact_message_and_draft_secrets_out_of_rendered_te
         .unwrap()
         .clone();
     let selected = selection(200_000, Destination::Messages, conversation_id, contact_id);
-    let snapshot = bridge::snapshot(&app, selected.clone()).unwrap();
+    let snapshot = bridge::snapshot(&app, selected.clone(), None).unwrap();
     let message_id = snapshot
         .chat
         .as_ref()
@@ -237,7 +237,9 @@ async fn dragging_navigation_to_top_is_a_cancelable_draft() {
     theme::apply(&ctx);
     let mut workspace = Workspace::new(app.clone(), tokio::runtime::Handle::current(), ctx.clone());
     let selected = selection(300_000, Destination::Messages, conversation_id, contact_id);
-    workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected.clone()).unwrap()));
+    workspace.snapshot = Some(Arc::new(
+        bridge::snapshot(&app, selected.clone(), None).unwrap(),
+    ));
     workspace.selection = selected;
     workspace.profile = saved.profiles.active().unwrap().clone();
     workspace.edit_original = Some(workspace.profile.clone());
@@ -350,7 +352,7 @@ async fn registered_shortcut_navigates_even_when_palette_query_has_no_matches() 
     let mut selected = selection(400_000, Destination::Messages, conversation_id, contact_id);
     selected.palette_query = "no_command_matches_this_sentinel".into();
     workspace.selection = selected.clone();
-    workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected).unwrap()));
+    workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected, None).unwrap()));
     assert!(workspace
         .snapshot
         .as_ref()

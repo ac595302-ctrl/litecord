@@ -211,11 +211,17 @@ impl DefaultExecutor {
         let exec_err =
             |e: litecord_core::ports::BackendError| ActionError::Execution(e.to_string());
         match action {
-            AgentAction::SendMessage { target, content } => {
-                let msg = backend()?
-                    .send_message(target, content)
-                    .await
-                    .map_err(exec_err)?;
+            AgentAction::SendMessage {
+                target,
+                content,
+                reply_to,
+            } => {
+                let backend = backend()?;
+                let msg = match reply_to {
+                    Some(reply_to) => backend.send_reply(target, content, *reply_to).await,
+                    None => backend.send_message(target, content).await,
+                }
+                .map_err(exec_err)?;
                 Ok(ExecutionOutcome {
                     summary: "message sent".into(),
                     entity: Some(EntityId::Message(msg.id)),

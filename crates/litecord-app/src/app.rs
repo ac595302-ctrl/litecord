@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 
 use discord_adapter::MockBackend;
 use litecord_actions::{ActionEngine, DefaultExecutor};
-use litecord_core::bus::{ingest_channel, AppEventBus};
+use litecord_core::bus::{ingest_channel_with_budget, AppEventBus};
 use litecord_core::clock::{SharedClock, SystemClock};
 use litecord_core::config::{BackendKind, LitecordConfig};
 use litecord_core::events::ApplicationEvent;
@@ -133,7 +133,11 @@ impl AppBuilder {
         drop(_g);
 
         let bus = AppEventBus::new(cfg.runtime.broadcast_capacity);
-        let (ingest, rx) = ingest_channel(cfg.runtime.event_queue_capacity);
+        let (ingest, rx) = ingest_channel_with_budget(
+            cfg.runtime.event_queue_capacity,
+            cfg.runtime.event_queue_max_bytes,
+            Some(metrics.event_queue_bytes.clone()),
+        );
         let hydrator = Hydrator::new(
             backend.clone(),
             ingest.clone(),
@@ -270,6 +274,20 @@ impl AppBuilder {
                 Ok(())
             });
         }
+        let ui_activity = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        {
+            let ctx = crate::history::HistorySyncCtx {
+                db: db.clone(),
+                cfg: cfg.clone(),
+                backend: backend.clone(),
+                bot: bot.clone(),
+                ingest: ingest.clone(),
+                ui_activity: ui_activity.clone(),
+            };
+            supervisor.spawn("history-sync", move |t| {
+                crate::history::history_sync_task(ctx, t)
+            });
+        }
         tracing::info!(mode = ?backend.mode(), bot = bot.is_some(), "litecord started");
 
         Ok(LitecordApp {
@@ -287,6 +305,7 @@ impl AppBuilder {
                 metrics,
                 omni,
                 supervisor,
+                ui_activity,
                 features: RwLock::new(features),
                 commands: RwLock::new(commands),
             }),
@@ -308,6 +327,8 @@ pub(crate) struct AppInner {
     pub metrics: Arc<Metrics>,
     pub omni: crate::omni::OmniService,
     pub supervisor: TaskSupervisor,
+    /// Last UI read (ms); background history sync yields while recent.
+    pub ui_activity: Arc<std::sync::atomic::AtomicI64>,
     pub features: RwLock<FeatureRegistry>,
     pub commands: RwLock<CommandRegistry>,
 }

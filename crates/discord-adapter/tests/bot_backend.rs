@@ -228,3 +228,77 @@ async fn rest_reads_and_writes() {
         "bot does not DM users"
     );
 }
+
+#[tokio::test]
+async fn history_page_sends_cursor_query_and_returns_oldest_first() {
+    use litecord_core::ports::HistoryPageRequest;
+
+    let t = FakeTransport::new();
+    let bot = backend(&t);
+    // FakeTransport matches on METHOD + path without the query string; the
+    // query is asserted on the recorded requests instead.
+    t.respond(
+        "GET /channels/55/messages",
+        json!([
+            {"id": "902", "channel_id": "55", "author": {"id": "42", "username": "ada"},
+             "content": "newer", "timestamp": "2026-09-24T15:02:00+00:00"},
+            {"id": "901", "channel_id": "55", "author": {"id": "42", "username": "ada"},
+             "content": "older", "timestamp": "2026-09-24T15:01:00+00:00"}
+        ]),
+    );
+
+    let conv = ConversationId(55);
+    let page = bot
+        .history_page(&HistoryPageRequest::before(conv, MessageId(903), 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        page.messages.iter().map(|m| m.id.get()).collect::<Vec<_>>(),
+        [901, 902]
+    );
+    assert!(page.has_more, "a full page may have more");
+    assert_eq!(page.oldest(), Some(MessageId(901)));
+
+    let page = bot
+        .history_page(&HistoryPageRequest::after(conv, MessageId(900), 500))
+        .await
+        .unwrap();
+    assert_eq!(page.messages.len(), 2);
+    assert!(!page.has_more, "a short page is the end");
+
+    // Both cursors: only `after` goes on the wire; `before` is applied
+    // locally and cuts the page short.
+    let page = bot
+        .history_page(&HistoryPageRequest {
+            conversation_id: conv,
+            before: Some(MessageId(902)),
+            after: Some(MessageId(900)),
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        page.messages.iter().map(|m| m.id.get()).collect::<Vec<_>>(),
+        [901]
+    );
+    assert!(!page.has_more);
+
+    let paths: Vec<String> = t
+        .requests()
+        .into_iter()
+        .map(|r| r.path)
+        .filter(|p| p.starts_with("/channels/55/messages"))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/channels/55/messages?limit=2&before=903",
+            "/channels/55/messages?limit=100&after=900",
+            "/channels/55/messages?limit=2&after=900",
+        ]
+    );
+
+    // Paged messages are remembered for later edits/deletes.
+    t.respond("DELETE /channels/55/messages/901", json!(null));
+    bot.delete_message(MessageId(901)).await.unwrap();
+}

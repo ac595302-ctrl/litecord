@@ -76,6 +76,15 @@ fn configure(conn: &Connection, cfg: &DatabaseConfig, file_backed: bool) -> Stor
     Ok(())
 }
 
+/// Size of the main database file in bytes (`page_count * page_size`), for
+/// disk quotas. Excludes the WAL and free-list reclamation (it counts
+/// allocated pages, including free ones, i.e. what the file occupies).
+pub fn db_size_bytes(conn: &Connection) -> StoreResult<u64> {
+    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok((pages.max(0) as u64).saturating_mul(size.max(0) as u64))
+}
+
 impl Database {
     /// Open (creating if needed) a file-backed database and run migrations.
     pub fn open(path: impl AsRef<Path>, cfg: &DatabaseConfig) -> StoreResult<Self> {
@@ -411,6 +420,17 @@ mod tests {
         let db = Database::open(&path, &DatabaseConfig::default()).unwrap();
         let v = db.read(|r| migrations::current_version(r)).unwrap();
         assert_eq!(v, migrations::latest_version());
+    }
+
+    #[test]
+    fn db_size_bytes_is_page_count_times_page_size() {
+        let db = Database::open_in_memory().unwrap();
+        let size = db.read(|r| db_size_bytes(r)).unwrap();
+        let page: i64 = db
+            .read(|r| Ok::<_, StoreError>(r.query_row("PRAGMA page_size", [], |x| x.get(0))?))
+            .unwrap();
+        assert!(size > 0);
+        assert_eq!(size % page as u64, 0);
     }
 
     #[test]

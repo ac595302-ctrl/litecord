@@ -637,6 +637,26 @@ fn validate_state(
         )?)
     };
 
+    if let AgentAction::SendMessage {
+        target,
+        reply_to: Some(reply_to),
+        ..
+    } = action
+    {
+        let MessageTarget::Conversation { conversation_id } = target else {
+            return invalid("a reply must target the conversation of the replied-to message");
+        };
+        let Some(m) = repos::messages::get(conn, *reply_to)? else {
+            return invalid("replied-to message not found");
+        };
+        if m.message.conversation_id != *conversation_id {
+            return invalid("the replied-to message is in another conversation");
+        }
+        if !caps.entries.is_empty() && !caps.is_usable(Capability::Replies) {
+            return invalid("this identity cannot send replies; send a plain message instead");
+        }
+    }
+
     match action {
         AgentAction::SendMessage { target, .. } => match target {
             MessageTarget::Conversation { conversation_id } => {

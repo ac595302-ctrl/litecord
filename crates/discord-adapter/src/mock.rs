@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use litecord_core::bus::IngestSender;
 use litecord_core::clock::{SharedClock, SystemClock};
 use litecord_core::events::{DiscordEvent, SourceEnvelope};
-use litecord_core::ports::{BackendError, BackendResult, SocialBackend, VoiceControl};
+use litecord_core::ports::{
+    BackendError, BackendResult, HistoryPage, HistoryPageRequest, SocialBackend, VoiceControl,
+};
 use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
 use litecord_types::capability::{
     AuthStep, BackendMode, Capability, CapabilitySet, HistoryCapability, SupportLevel,
@@ -85,6 +87,105 @@ impl std::fmt::Debug for MockBackend {
 }
 
 impl MockBackend {
+    /// Shared by `send_message` and `send_reply`.
+    async fn send_inner(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply_to: Option<MessageId>,
+    ) -> BackendResult<Message> {
+        let now = self.clock.now();
+        let (message, sink, new_conversation) = {
+            let mut s = self.lock();
+            Self::check_write(&mut s, "send_message")?;
+
+            let (conversation_id, new_conversation) = match target {
+                MessageTarget::Conversation { conversation_id } => {
+                    if !s.conversations.contains_key(conversation_id) {
+                        return Err(BackendError::NotFound {
+                            what: format!("conversation {conversation_id}"),
+                        });
+                    }
+                    (*conversation_id, None)
+                }
+                MessageTarget::User { user_id } => {
+                    let existing = s
+                        .conversations
+                        .values()
+                        .find(|c| {
+                            c.kind == ConversationKind::DirectMessage
+                                && c.recipient_id == Some(*user_id)
+                        })
+                        .map(|c| c.id);
+                    match existing {
+                        Some(id) => (id, None),
+                        None => {
+                            let id = ConversationId(s.next_conversation_id);
+                            s.next_conversation_id += 1;
+                            let conv = Conversation {
+                                id,
+                                kind: ConversationKind::DirectMessage,
+                                recipient_id: Some(*user_id),
+                                guild_id: None,
+                                lobby_id: None,
+                                title: None,
+                                last_message_id: None,
+                                last_activity_at: None,
+                            };
+                            s.conversations.insert(id, conv.clone());
+                            (id, Some(conv))
+                        }
+                    }
+                }
+            };
+
+            let message_id = MessageId(s.next_message_id);
+            s.next_message_id += 1;
+            let author_id = s.current_user.id;
+            let message = Message {
+                id: message_id,
+                conversation_id,
+                author_id,
+                content: Arc::from(content),
+                sent_at: now,
+                edited_at: None,
+                reply_to,
+                extras: Vec::new(),
+            };
+            s.messages
+                .entry(conversation_id)
+                .or_default()
+                .push(message.clone());
+            if let Some(conv) = s.conversations.get_mut(&conversation_id) {
+                conv.last_message_id = Some(message_id);
+                conv.last_activity_at = Some(now);
+            }
+            let new_conversation = new_conversation.map(|mut c| {
+                c.last_message_id = Some(message_id);
+                c.last_activity_at = Some(now);
+                c
+            });
+
+            (message, s.sink.clone(), new_conversation)
+        };
+
+        if let Some(sink) = &sink {
+            if let Some(conversation) = new_conversation {
+                self.emit(sink, DiscordEvent::ConversationUpserted { conversation })
+                    .await;
+            }
+            self.emit(
+                sink,
+                DiscordEvent::MessageCreated {
+                    message: message.clone(),
+                },
+            )
+            .await;
+        }
+
+        Ok(message)
+    }
+
     /// Builds a backend from already-constructed [`DemoData`], using the
     /// system clock.
     pub fn new(data: DemoData) -> Self {
@@ -481,7 +582,8 @@ impl SocialBackend for MockBackend {
                 .with(Capability::CurrentUser, SupportLevel::Full)
                 .with(Capability::GuildListing, SupportLevel::Full)
                 .with(Capability::GuildChannels, SupportLevel::Full)
-                .with(Capability::GuildMessages, SupportLevel::Full);
+                .with(Capability::GuildMessages, SupportLevel::Full)
+                .with(Capability::Replies, SupportLevel::Full);
         }
         let mut set = CapabilitySet::default()
             .with(Capability::CurrentUser, SupportLevel::Full)
@@ -503,6 +605,8 @@ impl SocialBackend for MockBackend {
             .with(Capability::GuildListing, SupportLevel::Full)
             .with(Capability::GuildChannels, SupportLevel::Full)
             .with(Capability::GuildMessages, SupportLevel::Unsupported)
+            // The Social SDK sends plain messages only.
+            .with(Capability::Replies, SupportLevel::Unsupported)
             .with(
                 Capability::LinkedChannels,
                 SupportLevel::Partial {
@@ -727,6 +831,42 @@ impl SocialBackend for MockBackend {
         Ok(all[start..].to_vec())
     }
 
+    /// Real cursor paging over the in-memory history, by message id order.
+    async fn history_page(&self, req: &HistoryPageRequest) -> BackendResult<HistoryPage> {
+        let mut s = self.lock();
+        Self::check_read(&mut s, "history_page")?;
+        if !s.conversations.contains_key(&req.conversation_id) {
+            return Err(BackendError::NotFound {
+                what: format!("conversation {}", req.conversation_id),
+            });
+        }
+        let limit = req.effective_limit() as usize;
+        let mut candidates: Vec<&Message> = s
+            .messages
+            .get(&req.conversation_id)
+            .map(|v| {
+                v.iter()
+                    .filter(|m| req.before.is_none_or(|b| m.id < b))
+                    .filter(|m| req.after.is_none_or(|a| m.id > a))
+                    .collect()
+            })
+            .unwrap_or_default();
+        candidates.sort_by_key(|m| m.id);
+        let has_more = candidates.len() > limit;
+        let page: Vec<Message> = if req.after.is_some() {
+            // Catching up forwards: the oldest `limit` after the cursor.
+            candidates.into_iter().take(limit).cloned().collect()
+        } else {
+            // Latest / walking backwards: the newest `limit`.
+            let start = candidates.len().saturating_sub(limit);
+            candidates[start..].iter().map(|m| (*m).clone()).collect()
+        };
+        Ok(HistoryPage {
+            messages: page,
+            has_more,
+        })
+    }
+
     async fn lobby(&self, lobby_id: LobbyId) -> BackendResult<Lobby> {
         let mut s = self.lock();
         Self::check_read(&mut s, "lobby")?;
@@ -801,96 +941,21 @@ impl SocialBackend for MockBackend {
     }
 
     async fn send_message(&self, target: &MessageTarget, content: &str) -> BackendResult<Message> {
-        let now = self.clock.now();
-        let (message, sink, new_conversation) = {
-            let mut s = self.lock();
-            Self::check_write(&mut s, "send_message")?;
+        self.send_inner(target, content, None).await
+    }
 
-            let (conversation_id, new_conversation) = match target {
-                MessageTarget::Conversation { conversation_id } => {
-                    if !s.conversations.contains_key(conversation_id) {
-                        return Err(BackendError::NotFound {
-                            what: format!("conversation {conversation_id}"),
-                        });
-                    }
-                    (*conversation_id, None)
-                }
-                MessageTarget::User { user_id } => {
-                    let existing = s
-                        .conversations
-                        .values()
-                        .find(|c| {
-                            c.kind == ConversationKind::DirectMessage
-                                && c.recipient_id == Some(*user_id)
-                        })
-                        .map(|c| c.id);
-                    match existing {
-                        Some(id) => (id, None),
-                        None => {
-                            let id = ConversationId(s.next_conversation_id);
-                            s.next_conversation_id += 1;
-                            let conv = Conversation {
-                                id,
-                                kind: ConversationKind::DirectMessage,
-                                recipient_id: Some(*user_id),
-                                guild_id: None,
-                                lobby_id: None,
-                                title: None,
-                                last_message_id: None,
-                                last_activity_at: None,
-                            };
-                            s.conversations.insert(id, conv.clone());
-                            (id, Some(conv))
-                        }
-                    }
-                }
-            };
-
-            let message_id = MessageId(s.next_message_id);
-            s.next_message_id += 1;
-            let author_id = s.current_user.id;
-            let message = Message {
-                id: message_id,
-                conversation_id,
-                author_id,
-                content: Arc::from(content),
-                sent_at: now,
-                edited_at: None,
-                reply_to: None,
-                extras: Vec::new(),
-            };
-            s.messages
-                .entry(conversation_id)
-                .or_default()
-                .push(message.clone());
-            if let Some(conv) = s.conversations.get_mut(&conversation_id) {
-                conv.last_message_id = Some(message_id);
-                conv.last_activity_at = Some(now);
-            }
-            let new_conversation = new_conversation.map(|mut c| {
-                c.last_message_id = Some(message_id);
-                c.last_activity_at = Some(now);
-                c
+    async fn send_reply(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply_to: MessageId,
+    ) -> BackendResult<Message> {
+        if !self.is_bot() {
+            return Err(BackendError::Unsupported {
+                capability: Capability::Replies,
             });
-
-            (message, s.sink.clone(), new_conversation)
-        };
-
-        if let Some(sink) = &sink {
-            if let Some(conversation) = new_conversation {
-                self.emit(sink, DiscordEvent::ConversationUpserted { conversation })
-                    .await;
-            }
-            self.emit(
-                sink,
-                DiscordEvent::MessageCreated {
-                    message: message.clone(),
-                },
-            )
-            .await;
         }
-
-        Ok(message)
+        self.send_inner(target, content, Some(reply_to)).await
     }
 
     async fn edit_message(&self, message_id: MessageId, content: &str) -> BackendResult<()> {
@@ -1273,5 +1338,105 @@ mod tests {
 
         let env = rx.recv().await.unwrap();
         assert_eq!(env.event, DiscordEvent::MessageCreated { message: msg });
+    }
+
+    #[tokio::test]
+    async fn history_page_walks_backwards_to_the_beginning() {
+        let backend = MockBackend::demo(3, now());
+        let conv = ConversationId(5001);
+        let total = backend.messages(conv, u32::MAX).await.unwrap().len();
+        assert!(total >= 250);
+
+        // Latest page matches `messages`.
+        let latest = backend
+            .history_page(&HistoryPageRequest::latest(conv, 100))
+            .await
+            .unwrap();
+        assert_eq!(latest.messages, backend.messages(conv, 100).await.unwrap());
+        assert!(latest.has_more);
+
+        let mut seen = latest.messages.len();
+        let mut cursor = latest.oldest().unwrap();
+        let mut pages = 1;
+        loop {
+            let page = backend
+                .history_page(&HistoryPageRequest::before(conv, cursor, 100))
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(page.messages.iter().all(|m| m.id < cursor));
+            assert!(page.messages.windows(2).all(|w| w[0].id < w[1].id));
+            seen += page.messages.len();
+            if !page.has_more {
+                break;
+            }
+            cursor = page.oldest().unwrap();
+        }
+        assert_eq!(seen, total);
+        assert!(pages >= 3);
+
+        // Past the very oldest message: empty, no more.
+        let first = MessageId(fixtures::DEEP_HISTORY_FIRST_ID);
+        let empty = backend
+            .history_page(&HistoryPageRequest::before(conv, first, 100))
+            .await
+            .unwrap();
+        assert!(empty.messages.is_empty());
+        assert!(!empty.has_more);
+    }
+
+    #[tokio::test]
+    async fn history_page_after_catches_up_oldest_first() {
+        let backend = MockBackend::demo(3, now());
+        let conv = ConversationId(5001);
+        let first = MessageId(fixtures::DEEP_HISTORY_FIRST_ID);
+
+        let page = backend
+            .history_page(&HistoryPageRequest::after(conv, first, 10))
+            .await
+            .unwrap();
+        let ids: Vec<u64> = page.messages.iter().map(|m| m.id.get()).collect();
+        let expected: Vec<u64> = (1..=10).map(|i| first.get() + i).collect();
+        assert_eq!(ids, expected);
+        assert!(page.has_more);
+
+        // After the newest message: nothing more.
+        let newest = backend.messages(conv, 1).await.unwrap()[0].id;
+        let page = backend
+            .history_page(&HistoryPageRequest::after(conv, newest, 10))
+            .await
+            .unwrap();
+        assert!(page.messages.is_empty());
+        assert!(!page.has_more);
+
+        // Exactly-full final page reports no more.
+        let before_newest = backend.messages(conv, 4).await.unwrap()[0].id;
+        let page = backend
+            .history_page(&HistoryPageRequest::after(conv, before_newest, 3))
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 3);
+        assert!(!page.has_more);
+
+        // Both cursors: strictly between.
+        let page = backend
+            .history_page(&HistoryPageRequest {
+                conversation_id: conv,
+                before: Some(MessageId(first.get() + 5)),
+                after: Some(first),
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 4);
+        assert!(!page.has_more);
+
+        // Unknown conversation.
+        assert!(matches!(
+            backend
+                .history_page(&HistoryPageRequest::latest(ConversationId(1), 10))
+                .await,
+            Err(BackendError::NotFound { .. })
+        ));
     }
 }

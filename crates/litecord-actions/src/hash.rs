@@ -35,6 +35,7 @@ mod tests {
                 user_id: UserId(to),
             },
             content: content.into(),
+            reply_to: None,
         }
     }
 

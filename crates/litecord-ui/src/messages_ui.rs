@@ -73,14 +73,29 @@ impl Workspace {
                 ui.label(theme::meta(status));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Open in Discord")
-                    .on_hover_text("Open this conversation in the Discord app or website")
-                    .clicked()
+                if crate::icons::icon_button(
+                    ui,
+                    crate::icons::Glyph::External,
+                    "Open in Discord",
+                    true,
+                )
+                .clicked()
                 {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(
                         chat.capabilities.open_in_discord_url.clone(),
                     ));
+                }
+                if crate::icons::icon_button(
+                    ui,
+                    crate::icons::Glyph::Sparkle,
+                    "Ask Omni about this conversation",
+                    true,
+                )
+                .clicked()
+                {
+                    self.omni_open = true;
+                    self.omni_draft =
+                        format!("Catch me up on my conversation with {}.", chat.title);
                 }
                 if chat.capabilities.send_identity == Some(DiscordIdentity::ApplicationBot) {
                     theme::chip(ui, "Posting as your bot", theme::WARNING);
@@ -98,7 +113,7 @@ impl Workspace {
                 self.request();
             }
         });
-        let composer = 96.0;
+        let composer = 78.0;
         let height = (ui.available_height() - composer).max(80.0);
         egui::ScrollArea::vertical()
             .id_salt(("messages", chat.conversation_id, self.selection.before))
@@ -355,25 +370,61 @@ impl Workspace {
         let identity = chat.capabilities.send_identity;
         let can_send_here = identity.is_some() && chat.capabilities.can_send;
         let title = chat.title.clone();
-        let draft = self.drafts.entry(id).or_default();
         let hint = match (private, can_send_here) {
             (true, _) => "Message (privacy mode)".to_owned(),
             (false, false) => "Sending is not available here".to_owned(),
             (false, true) => format!("Message {title}"),
         };
-        let response = ui.add_enabled(
-            !self.busy && can_send_here,
-            egui::TextEdit::multiline(draft)
-                .password(private)
-                .id_salt(("composer", id))
-                .hint_text(hint)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
-        // Enter sends, Shift+Enter inserts a newline (Ctrl/Cmd+Enter also sends).
-        let submit = response.has_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-        let text = draft.trim_end_matches('\n').to_owned();
+        let busy = self.busy;
+        let mut submit = false;
+        let mut clicked = false;
+        let draft_len;
+        {
+            let draft = self.drafts.entry(id).or_default();
+            draft_len = draft.trim().chars().count();
+            egui::Frame::new()
+                .fill(theme::RAISED)
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(10)
+                .inner_margin(egui::Margin {
+                    left: 12,
+                    right: 6,
+                    top: 6,
+                    bottom: 6,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let w = ui.available_width() - 36.0;
+                        let response = ui.add_enabled(
+                            !busy && can_send_here,
+                            egui::TextEdit::multiline(draft)
+                                .frame(egui::Frame::NONE)
+                                .password(private)
+                                .id_salt(("composer", id))
+                                .hint_text(hint)
+                                .desired_rows(1)
+                                .desired_width(w),
+                        );
+                        // Enter sends; Shift+Enter inserts a newline.
+                        submit = response.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                        let ready = !busy && can_send_here && draft_len > 0 && draft_len <= 2000;
+                        clicked = crate::icons::icon_button(
+                            ui,
+                            crate::icons::Glyph::Send,
+                            "Send (Enter)",
+                            ready,
+                        )
+                        .clicked();
+                    });
+                });
+        }
+        let text = self
+            .drafts
+            .get(&id)
+            .map(|d| d.trim_end_matches('\n').to_owned())
+            .unwrap_or_default();
+        let count = text.chars().count();
         ui.horizontal(|ui| {
             let who = match identity {
                 Some(DiscordIdentity::ApplicationBot) => "Sending as your bot",
@@ -381,35 +432,22 @@ impl Workspace {
                 None => "Read only here · use Open in Discord to reply",
             };
             ui.label(theme::meta(who));
-            if can_send_here {
-                ui.label(theme::meta("· Enter to send, Shift+Enter for a new line"));
+            if count > 1800 {
+                ui.label(RichText::new(format!("{count}/2000")).size(12.0).color(
+                    if count > 2000 {
+                        theme::PRIORITY
+                    } else {
+                        theme::MUTED
+                    },
+                ));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let count = text.chars().count();
-                let can_send =
-                    !self.busy && can_send_here && !text.trim().is_empty() && count <= 2000;
-                let send = ui.add_enabled(
-                    can_send,
-                    egui::Button::new(RichText::new("Send").color(theme::TEXT))
-                        .fill(theme::PRIMARY),
-                );
-                if count > 1800 {
-                    ui.label(RichText::new(format!("{count}/2000")).size(12.0).color(
-                        if count > 2000 {
-                            theme::PRIORITY
-                        } else {
-                            theme::MUTED
-                        },
-                    ));
-                }
-                if can_send && (send.clicked() || submit) {
-                    if let Some(identity) = identity {
-                        self.send(Command::SendAs(id, text.clone(), identity));
-                    }
-                }
-            });
         });
-        if submit {
+        let can_send = !busy && can_send_here && !text.trim().is_empty() && count <= 2000;
+        if can_send && (clicked || submit) {
+            if let Some(identity) = identity {
+                self.send(Command::SendAs(id, text, identity));
+            }
+        } else if submit {
             if let Some(d) = self.drafts.get_mut(&id) {
                 *d = d.trim_end_matches('\n').to_owned();
             }
@@ -519,6 +557,31 @@ fn short_clock(t: Timestamp) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
+/// Compact list time (A01): "10:24" today, "Yesterday", weekday within a
+/// week, else "24 Sep". UTC, like the rest of the timeline.
+pub(crate) fn list_time(t: Timestamp, now: Timestamp) -> String {
+    let day = |x: Timestamp| x.as_millis().div_euclid(86_400_000);
+    let diff = day(now) - day(t);
+    match diff {
+        0 => short_clock(t),
+        1 => "Yesterday".into(),
+        2..=6 => day_label(t)
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+        _ => {
+            let label = day_label(t);
+            let mut parts = label.split(' ').skip(1);
+            format!(
+                "{} {}",
+                parts.next().unwrap_or_default(),
+                parts.next().unwrap_or_default()
+            )
+        }
+    }
+}
+
 /// UTC calendar day, e.g. "Thu, 24 Sep 2026".
 pub(crate) fn day_label(t: Timestamp) -> String {
     let days = t.as_millis().div_euclid(86_400_000);
@@ -557,6 +620,33 @@ mod tests {
         assert_eq!(
             day_label(Timestamp::from_millis(951_782_400_000)),
             "Tue, 29 Feb 2000"
+        );
+    }
+
+    #[test]
+    fn list_times_are_compact() {
+        let now = Timestamp::from_millis(1_790_262_000_000); // Thu 24 Sep 15:00
+        assert_eq!(
+            list_time(Timestamp::from_millis(1_790_262_000_000 - 3_600_000), now),
+            "14:00"
+        );
+        assert_eq!(
+            list_time(Timestamp::from_millis(1_790_262_000_000 - 86_400_000), now),
+            "Yesterday"
+        );
+        assert_eq!(
+            list_time(
+                Timestamp::from_millis(1_790_262_000_000 - 3 * 86_400_000),
+                now
+            ),
+            "Mon"
+        );
+        assert_eq!(
+            list_time(
+                Timestamp::from_millis(1_790_262_000_000 - 20 * 86_400_000),
+                now
+            ),
+            "4 Sep"
         );
     }
 

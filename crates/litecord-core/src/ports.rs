@@ -83,6 +83,85 @@ pub enum VoiceControl {
     SetPushToTalk(bool),
 }
 
+/// Largest page a [`SocialBackend::history_page`] call returns (Discord's
+/// own REST bound).
+pub const MAX_HISTORY_PAGE: u32 = 100;
+
+/// One request for a page of a conversation's history.
+///
+/// Cursor semantics (both exclusive, by message id order):
+/// * neither cursor: the newest `limit` messages;
+/// * `before`: the newest `limit` messages strictly older than `before`
+///   (walking backwards);
+/// * `after`: the oldest `limit` messages strictly newer than `after`
+///   (catching up forwards);
+/// * both: the oldest `limit` messages strictly between them.
+///
+/// `limit` is clamped to `1..=`[`MAX_HISTORY_PAGE`] (see
+/// [`HistoryPageRequest::effective_limit`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPageRequest {
+    pub conversation_id: ConversationId,
+    pub before: Option<MessageId>,
+    pub after: Option<MessageId>,
+    pub limit: u32,
+}
+
+impl HistoryPageRequest {
+    /// The newest `limit` messages (no cursor).
+    pub fn latest(conversation_id: ConversationId, limit: u32) -> Self {
+        Self {
+            conversation_id,
+            before: None,
+            after: None,
+            limit,
+        }
+    }
+
+    /// `limit` messages strictly older than `before`.
+    pub fn before(conversation_id: ConversationId, before: MessageId, limit: u32) -> Self {
+        Self {
+            before: Some(before),
+            ..Self::latest(conversation_id, limit)
+        }
+    }
+
+    /// `limit` messages strictly newer than `after`.
+    pub fn after(conversation_id: ConversationId, after: MessageId, limit: u32) -> Self {
+        Self {
+            after: Some(after),
+            ..Self::latest(conversation_id, limit)
+        }
+    }
+
+    /// `limit` clamped to `1..=MAX_HISTORY_PAGE`.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.clamp(1, MAX_HISTORY_PAGE)
+    }
+}
+
+/// A page of history, oldest first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPage {
+    /// Oldest first.
+    pub messages: Vec<Message>,
+    /// Whether more messages exist beyond this page in the requested
+    /// direction (older for `before`/no cursor, newer for `after`).
+    pub has_more: bool,
+}
+
+impl HistoryPage {
+    /// Id of the oldest message in the page.
+    pub fn oldest(&self) -> Option<MessageId> {
+        self.messages.iter().map(|m| m.id).min()
+    }
+
+    /// Id of the newest message in the page.
+    pub fn newest(&self) -> Option<MessageId> {
+        self.messages.iter().map(|m| m.id).max()
+    }
+}
+
 fn unsupported<T>(capability: Capability) -> BackendResult<T> {
     Err(BackendError::Unsupported { capability })
 }
@@ -167,6 +246,20 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
         unsupported(Capability::DmHistory)
     }
 
+    /// One page of history (see [`HistoryPageRequest`] for cursor
+    /// semantics). The default serves only the cursor-less "latest" page via
+    /// [`SocialBackend::messages`] (`has_more` = the page came back full);
+    /// cursor paging is unsupported unless a backend overrides this.
+    async fn history_page(&self, req: &HistoryPageRequest) -> BackendResult<HistoryPage> {
+        if req.before.is_some() || req.after.is_some() {
+            return unsupported(Capability::DmHistory);
+        }
+        let limit = req.effective_limit();
+        let messages = self.messages(req.conversation_id, limit).await?;
+        let has_more = messages.len() == limit as usize;
+        Ok(HistoryPage { messages, has_more })
+    }
+
     async fn lobby(&self, _lobby_id: LobbyId) -> BackendResult<Lobby> {
         unsupported(Capability::Lobbies)
     }
@@ -192,6 +285,17 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
         _content: &str,
     ) -> BackendResult<Message> {
         unsupported(Capability::DmSend)
+    }
+
+    /// Send `content` as a reply to `reply_to`. Backends without reply
+    /// support must refuse rather than send a plain message.
+    async fn send_reply(
+        &self,
+        _target: &MessageTarget,
+        _content: &str,
+        _reply_to: MessageId,
+    ) -> BackendResult<Message> {
+        unsupported(Capability::Replies)
     }
 
     async fn edit_message(&self, _message_id: MessageId, _content: &str) -> BackendResult<()> {
@@ -220,5 +324,107 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     /// External fallback link for content this backend cannot show.
     fn external_link(&self, target: &DiscordTarget) -> String {
         target.web_url()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A backend that only implements the required methods plus `messages`.
+    #[derive(Debug)]
+    struct Minimal;
+
+    #[async_trait]
+    impl SocialBackend for Minimal {
+        fn source(&self) -> DiscordSource {
+            DiscordSource::Synthetic
+        }
+        fn mode(&self) -> BackendMode {
+            BackendMode::Demo
+        }
+        fn capabilities(&self) -> CapabilitySet {
+            CapabilitySet::default()
+        }
+        async fn connect(&self, _sink: IngestSender) -> BackendResult<()> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> BackendResult<()> {
+            Ok(())
+        }
+        async fn current_user(&self) -> BackendResult<User> {
+            Err(BackendError::NotConnected)
+        }
+        async fn messages(
+            &self,
+            conversation_id: ConversationId,
+            limit: u32,
+        ) -> BackendResult<Vec<Message>> {
+            // Three messages exist; return the newest `limit`.
+            let all: Vec<Message> = (1..=3u64)
+                .map(|i| Message {
+                    id: MessageId(i),
+                    conversation_id,
+                    author_id: UserId(9),
+                    content: "m".into(),
+                    sent_at: litecord_types::Timestamp::from_millis(i as i64),
+                    edited_at: None,
+                    reply_to: None,
+                    extras: Vec::new(),
+                })
+                .collect();
+            let start = all.len().saturating_sub(limit as usize);
+            Ok(all[start..].to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_history_page_serves_latest_only() {
+        let b = Minimal;
+        let conv = ConversationId(1);
+
+        let page = b
+            .history_page(&HistoryPageRequest::latest(conv, 2))
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(page.has_more);
+        assert_eq!(page.oldest(), Some(MessageId(2)));
+        assert_eq!(page.newest(), Some(MessageId(3)));
+
+        let page = b
+            .history_page(&HistoryPageRequest::latest(conv, 10))
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 3);
+        assert!(!page.has_more);
+
+        let err = b
+            .history_page(&HistoryPageRequest::before(conv, MessageId(2), 10))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BackendError::Unsupported {
+                capability: Capability::DmHistory
+            }
+        );
+    }
+
+    #[test]
+    fn history_limit_is_clamped() {
+        let conv = ConversationId(1);
+        assert_eq!(HistoryPageRequest::latest(conv, 0).effective_limit(), 1);
+        assert_eq!(HistoryPageRequest::latest(conv, 500).effective_limit(), 100);
+        assert_eq!(HistoryPageRequest::latest(conv, 50).effective_limit(), 50);
+        assert_eq!(
+            HistoryPage {
+                messages: vec![],
+                has_more: false
+            }
+            .oldest(),
+            None
+        );
     }
 }

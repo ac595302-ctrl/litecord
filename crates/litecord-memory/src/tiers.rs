@@ -18,9 +18,12 @@ use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use litecord_core::config::RetentionConfig;
-use litecord_core::metrics::Gauge;
+use litecord_core::config::{CacheConfig, RetentionConfig};
+use litecord_core::events::message_approx_bytes;
+use litecord_core::metrics::{Gauge, Metrics};
+use litecord_types::ids::MessageId;
 use litecord_types::memory::MemoryTier;
+use litecord_types::social::Message;
 use litecord_types::Timestamp;
 
 /// Classify an item's age into a [`MemoryTier`] relative to `now`.
@@ -41,6 +44,9 @@ pub fn classify(at: Timestamp, now: Timestamp, cfg: &RetentionConfig) -> MemoryT
     }
 }
 
+/// Size estimate for a cached value, in bytes.
+pub type SizeFn<V> = fn(&V) -> usize;
+
 /// A bounded, in-memory LRU cache for the HOT tier.
 ///
 /// This is the *only* place unified memory keeps state in RAM: everything
@@ -50,9 +56,18 @@ pub fn classify(at: Timestamp, now: Timestamp, cfg: &RetentionConfig) -> MemoryT
 /// how much gets `put` into it. When a [`Gauge`] is supplied, it is kept in
 /// sync with `len()` on every mutation, so the cache's live size is visible
 /// as a metric without callers polling it themselves.
+///
+/// Optionally ([`HotCache::with_byte_limit`]) the cache is also bounded by an
+/// approximate byte ceiling: after every insert, least-recently-used entries
+/// are evicted until it is under both the item and the byte limit. A single
+/// value larger than the whole ceiling is therefore not retained.
 pub struct HotCache<K: Hash + Eq, V: Clone> {
     inner: lru::LruCache<K, V>,
     gauge: Option<Arc<Gauge>>,
+    max_bytes: Option<usize>,
+    size_of: Option<SizeFn<V>>,
+    bytes: usize,
+    bytes_gauge: Option<Arc<Gauge>>,
 }
 
 impl<K: Hash + Eq, V: Clone> std::fmt::Debug for HotCache<K, V> {
@@ -60,6 +75,8 @@ impl<K: Hash + Eq, V: Clone> std::fmt::Debug for HotCache<K, V> {
         f.debug_struct("HotCache")
             .field("len", &self.inner.len())
             .field("capacity", &self.inner.cap())
+            .field("bytes", &self.bytes)
+            .field("max_bytes", &self.max_bytes)
             .finish()
     }
 }
@@ -76,12 +93,54 @@ impl<K: Hash + Eq, V: Clone> HotCache<K, V> {
         Self {
             inner: lru::LruCache::new(cap),
             gauge,
+            max_bytes: None,
+            size_of: None,
+            bytes: 0,
+            bytes_gauge: None,
         }
+    }
+
+    /// Additionally bound the cache by `max_bytes` as measured by `size_of`.
+    /// `bytes_gauge`, if given, tracks [`HotCache::bytes`]. Call on an empty
+    /// cache (typically right after [`HotCache::new`]).
+    pub fn with_byte_limit(
+        mut self,
+        max_bytes: usize,
+        size_of: SizeFn<V>,
+        bytes_gauge: Option<Arc<Gauge>>,
+    ) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self.size_of = Some(size_of);
+        self.bytes_gauge = bytes_gauge;
+        self.bytes = self.inner.iter().map(|(_, v)| size_of(v)).sum();
+        self.evict_over_budget();
+        self.sync_gauge();
+        self
+    }
+
+    fn size(&self, v: &V) -> usize {
+        self.size_of.map_or(0, |f| f(v))
     }
 
     fn sync_gauge(&self) {
         if let Some(g) = &self.gauge {
             g.set(self.inner.len() as u64);
+        }
+        if let Some(g) = &self.bytes_gauge {
+            g.set(self.bytes as u64);
+        }
+    }
+
+    fn evict_over_budget(&mut self) {
+        let Some(max) = self.max_bytes else { return };
+        while self.bytes > max {
+            match self.inner.pop_lru() {
+                Some((_, v)) => self.bytes = self.bytes.saturating_sub(self.size(&v)),
+                None => {
+                    self.bytes = 0;
+                    break;
+                }
+            }
         }
     }
 
@@ -93,11 +152,21 @@ impl<K: Hash + Eq, V: Clone> HotCache<K, V> {
         self.inner.get(key).cloned()
     }
 
-    /// Insert or update `key`, evicting the least-recently-used entry first
-    /// if the cache is at capacity. Returns the evicted value's old value if
+    /// Insert or update `key`, evicting least-recently-used entries if the
+    /// cache is over its item or byte limit. Returns the previous value if
     /// `key` was already present, matching [`lru::LruCache::put`].
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
-        let old = self.inner.put(key, value);
+        let replacing = self.inner.contains(&key);
+        self.bytes = self.bytes.saturating_add(self.size(&value));
+        let old = match self.inner.push(key, value) {
+            Some((_, displaced)) => {
+                self.bytes = self.bytes.saturating_sub(self.size(&displaced));
+                // Without `replacing`, `displaced` is the evicted LRU entry.
+                replacing.then_some(displaced)
+            }
+            None => None,
+        };
+        self.evict_over_budget();
         self.sync_gauge();
         old
     }
@@ -105,6 +174,9 @@ impl<K: Hash + Eq, V: Clone> HotCache<K, V> {
     /// Remove `key` if present, returning its value.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let removed = self.inner.pop(key);
+        if let Some(v) = &removed {
+            self.bytes = self.bytes.saturating_sub(self.size(v));
+        }
         self.sync_gauge();
         removed
     }
@@ -122,6 +194,7 @@ impl<K: Hash + Eq, V: Clone> HotCache<K, V> {
     /// Remove every entry.
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.bytes = 0;
         self.sync_gauge();
     }
 
@@ -129,6 +202,34 @@ impl<K: Hash + Eq, V: Clone> HotCache<K, V> {
     pub fn capacity(&self) -> usize {
         self.inner.cap().get()
     }
+
+    /// Approximate bytes currently held (always `0` without a byte limit).
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// The byte ceiling, if any.
+    pub fn max_bytes(&self) -> Option<usize> {
+        self.max_bytes
+    }
+}
+
+/// Size estimate for a cached [`Message`] value (content, extras and a fixed
+/// overhead); see [`litecord_core::events::message_approx_bytes`].
+pub fn message_bytes(message: &Message) -> usize {
+    message_approx_bytes(message)
+}
+
+/// Build the message hot cache from [`CacheConfig`]: bounded by
+/// `max_messages` entries and `max_message_cache_bytes`, reporting its entry
+/// count as the `messages` cache gauge and its bytes as
+/// [`Metrics::hot_cache_bytes`].
+pub fn message_hot_cache(cfg: &CacheConfig, metrics: &Metrics) -> HotCache<MessageId, Message> {
+    HotCache::new(cfg.max_messages, Some(metrics.cache_gauge("messages"))).with_byte_limit(
+        cfg.max_message_cache_bytes,
+        message_bytes,
+        Some(metrics.hot_cache_bytes.clone()),
+    )
 }
 
 #[cfg(test)]
@@ -185,6 +286,75 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn hot_cache_evicts_lru_by_bytes() {
+        let bytes_gauge = Arc::new(Gauge::default());
+        let mut cache: HotCache<u32, String> = HotCache::new(100, None).with_byte_limit(
+            10,
+            |s: &String| s.len(),
+            Some(bytes_gauge.clone()),
+        );
+        cache.put(1, "aaaa".into());
+        cache.put(2, "bbbb".into());
+        assert_eq!(cache.bytes(), 8);
+        assert_eq!(bytes_gauge.get(), 8);
+        assert!(cache.get(&1).is_some()); // 2 is now LRU
+        cache.put(3, "cccc".into()); // 12 > 10: evict 2
+        assert_eq!(cache.bytes(), 8);
+        assert_eq!(cache.get(&2), None);
+        assert!(cache.get(&1).is_some() && cache.get(&3).is_some());
+
+        // Replacing a key accounts for the old value's size.
+        assert_eq!(cache.put(3, "c".into()), Some("cccc".into()));
+        assert_eq!(cache.bytes(), 5);
+
+        // A value larger than the whole ceiling is not retained.
+        cache.put(4, "x".repeat(11));
+        assert!(cache.is_empty());
+        assert_eq!(cache.bytes(), 0);
+        assert_eq!(bytes_gauge.get(), 0);
+
+        cache.put(5, "abc".into());
+        cache.remove(&5);
+        assert_eq!(cache.bytes(), 0);
+    }
+
+    #[test]
+    fn hot_cache_item_eviction_releases_bytes() {
+        let mut cache: HotCache<u32, String> =
+            HotCache::new(2, None).with_byte_limit(1_000, |s: &String| s.len(), None);
+        cache.put(1, "aa".into());
+        cache.put(2, "bbb".into());
+        cache.put(3, "c".into()); // evicts 1 by count
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.bytes(), 4);
+        cache.clear();
+        assert_eq!(cache.bytes(), 0);
+    }
+
+    #[test]
+    fn message_hot_cache_uses_config_and_metrics() {
+        let metrics = Metrics::new();
+        let cfg = CacheConfig::default();
+        let mut cache = message_hot_cache(&cfg, &metrics);
+        assert_eq!(cache.max_bytes(), Some(cfg.max_message_cache_bytes));
+        let m = Message {
+            id: MessageId(1),
+            conversation_id: litecord_types::ids::ConversationId(1),
+            author_id: litecord_types::ids::UserId(1),
+            content: "hello".into(),
+            sent_at: Timestamp::from_millis(0),
+            edited_at: None,
+            reply_to: None,
+            extras: Vec::new(),
+        };
+        cache.put(m.id, m.clone());
+        assert_eq!(cache.bytes(), message_bytes(&m));
+        let snap = metrics.snapshot();
+        assert_eq!(snap.hot_cache_bytes, message_bytes(&m) as u64);
+        assert_eq!(snap.cache_sizes.get("messages"), Some(&1));
     }
 
     #[test]

@@ -121,6 +121,7 @@ fn send_to_conversation(data: &DemoData, content: &str) -> AgentAction {
             conversation_id: data.conversations[0].id,
         },
         content: content.into(),
+        reply_to: None,
     }
 }
 
@@ -275,6 +276,7 @@ async fn state_change_after_approval_is_caught_by_revalidation() {
                 AgentAction::SendMessage {
                     target: MessageTarget::User { user_id: friend },
                     content: "hello".into(),
+                    reply_to: None,
                 },
                 agent(),
                 Revision(1),

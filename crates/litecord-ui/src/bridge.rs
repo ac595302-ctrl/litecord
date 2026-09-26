@@ -5,6 +5,7 @@ use litecord_core::ports::VoiceControl;
 use litecord_features::intent::AppIntent;
 use litecord_layout::{Destination, LayoutProfile};
 use litecord_types::{ids::*, notes::UserNote, trust::AgentVisibility, Timestamp};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,29 +22,34 @@ pub struct Selection {
     pub omni_session: Option<i64>,
 }
 
+/// What the UI renders. Heavy views are `Arc`s so a refresh can reuse the
+/// previous value for destinations that are not visible (Stage A: only the
+/// visible destination is reloaded; see [`snapshot`]).
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub selection: Selection,
-    pub conversations: ConversationListViewModel,
-    pub friends: FriendsViewModel,
-    pub chat: Option<ConversationViewModel>,
+    pub conversations: Arc<ConversationListViewModel>,
+    pub friends: Arc<FriendsViewModel>,
+    pub chat: Option<Arc<ConversationViewModel>>,
     pub layouts: LayoutProfilesViewModel,
     pub diagnostics: DiagnosticsViewModel,
-    pub inbox: AgentInboxViewModel,
-    pub tasks: TasksViewModel,
-    pub settings: SettingsViewModel,
-    pub guilds: GuildsViewModel,
-    pub voice: VoiceViewModel,
-    pub rooms: litecord_app::rooms::RoomsViewModel,
-    pub memory: MemoryViewModel,
+    pub inbox: Arc<AgentInboxViewModel>,
+    pub tasks: Arc<TasksViewModel>,
+    pub settings: Arc<SettingsViewModel>,
+    pub guilds: Arc<GuildsViewModel>,
+    pub voice: Arc<VoiceViewModel>,
+    pub rooms: Arc<litecord_app::rooms::RoomsViewModel>,
+    pub memory: Arc<MemoryViewModel>,
     pub palette: CommandPaletteViewModel,
     pub shortcuts: Vec<litecord_features::command::CommandMatch>,
     pub account: litecord_app::people::AccountViewModel,
-    pub contact: Option<litecord_app::people::ContactViewModel>,
+    pub contact: Option<Arc<litecord_app::people::ContactViewModel>>,
     /// Shared files for the open conversation (application Files API).
-    pub files: Option<FilesViewModel>,
-    pub task_detail: Option<TaskDetailViewModel>,
-    pub omni: litecord_app::OmniViewModel,
+    pub files: Option<Arc<FilesViewModel>>,
+    pub task_detail: Option<Arc<TaskDetailViewModel>>,
+    pub omni: Arc<litecord_app::OmniViewModel>,
+    /// Stage C history sync state (Messages inspector, Settings).
+    pub history: Arc<litecord_app::history::HistorySyncViewModel>,
 }
 
 #[derive(Debug)]
@@ -82,6 +88,8 @@ pub enum Command {
     SetTaskPriority(TaskId, litecord_types::tasks::TaskPriority),
     AddTaskComment(TaskId, String),
     Omni(OmniCommand),
+    /// Start (true) or stop (false) full history sync for a conversation.
+    SyncHistory(ConversationId, bool),
 }
 
 /// Omni panel and settings commands.
@@ -164,23 +172,32 @@ impl Bridge {
         let (stream_tx, omni_stream) = watch::channel(None::<(i64, String)>);
         let worker = runtime.spawn(async move {
             let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut last: Option<Arc<Snapshot>> = None;
             loop {
                 let selected = selection_rx.borrow_and_update().clone();
                 let app_copy = app.clone();
-                let result = tokio::task::spawn_blocking(move || snapshot(&app_copy, selected)).await;
+                let prev = last.clone();
+                let result = tokio::task::spawn_blocking(move || snapshot(&app_copy, selected, prev.as_deref())).await;
+                if let Ok(Ok(s)) = &result {
+                    last = Some(Arc::new(s.clone()));
+                }
                 let _ = snapshot_tx.send_replace(match result { Ok(r) => r.map_err(|e|e.to_string()), Err(_) => Err("Could not refresh workspace".into()) });
                 ctx.request_repaint();
                 tokio::select! {
                     biased;
                     command = commands.recv() => {
                         let Some(command) = command else {break};
+                        app.note_user_activity();
                         let completion = match execute(&app,command).await {
                             Ok(c)=>c, Err(e)=>Completion{error:Some(e.to_string()),..Default::default()}
                         };
                         if completion_tx.send(completion).await.is_err() {break;}
                         ctx.request_repaint();
                     }
-                    changed = selection_rx.changed() => if changed.is_err() {break;},
+                    changed = selection_rx.changed() => {
+                        if changed.is_err() {break;}
+                        app.note_user_activity();
+                    }
                     event = events.recv() => {
                         if matches!(event,Err(broadcast::error::RecvError::Closed)) {break;}
                         // Lag and ResyncRequired both trigger a full replacement snapshot.
@@ -223,21 +240,68 @@ impl Bridge {
     }
 }
 
+/// Which destinations need which views. Views a hidden destination needs
+/// are reused from the previous snapshot instead of being reloaded.
+fn needs(d: Destination, what: &str) -> bool {
+    use Destination as D;
+    match what {
+        "conversations" => matches!(d, D::Messages | D::Friends | D::Home | D::Memory | D::Tasks),
+        "chat" => d == D::Messages,
+        "contact" => matches!(d, D::Messages | D::Friends),
+        "friends" => matches!(d, D::Friends | D::Home | D::Memory | D::Settings),
+        "inbox" => matches!(d, D::Home | D::Inbox),
+        "tasks" => matches!(d, D::Tasks | D::Home | D::Inbox),
+        "memory" => matches!(d, D::Memory | D::Home | D::Inbox),
+        "settings" => d == D::Settings,
+        "guilds" => d == D::Servers,
+        "voice" => d == D::Voice,
+        "history" => matches!(d, D::Messages | D::Settings),
+        _ => true,
+    }
+}
+
 pub(crate) fn snapshot(
     app: &LitecordApp,
     mut selection: Selection,
+    prev: Option<&Snapshot>,
 ) -> litecord_core::Result<Snapshot> {
-    let conversations = app.conversations_view(200)?;
+    let d = selection.destination;
+    // Reload when visible (or nothing to reuse yet); otherwise share the
+    // previous value.
+    macro_rules! view {
+        ($field:ident, $what:expr, $load:expr) => {
+            match prev {
+                Some(p) if !needs(d, $what) => p.$field.clone(),
+                _ => Arc::new($load),
+            }
+        };
+    }
+    let conversations = view!(conversations, "conversations", app.conversations_view(200)?);
     if selection.conversation.is_none() {
         selection.conversation = conversations
             .conversations
             .first()
             .map(|r| r.conversation_id);
     }
-    let chat = selection
-        .conversation
-        .map(|id| app.conversation_view(id, 200, selection.before))
-        .transpose()?;
+    let same_conversation = prev.is_some_and(|p| {
+        p.selection.conversation == selection.conversation && p.selection.before == selection.before
+    });
+    let (chat, files) = match prev {
+        Some(p) if !needs(d, "chat") && same_conversation => (p.chat.clone(), p.files.clone()),
+        _ => (
+            selection
+                .conversation
+                .map(|id| {
+                    app.conversation_view(id, 200, selection.before)
+                        .map(Arc::new)
+                })
+                .transpose()?,
+            selection
+                .conversation
+                .map(|id| app.conversation_files_view(id, 30, None).map(Arc::new))
+                .transpose()?,
+        ),
+    };
     let contact_id = selection.contact.or_else(|| {
         conversations
             .conversations
@@ -245,30 +309,45 @@ pub(crate) fn snapshot(
             .find(|r| Some(r.conversation_id) == selection.conversation)
             .and_then(|r| r.recipient_id)
     });
+    let contact = match prev {
+        Some(p) if !needs(d, "contact") && p.selection.contact == selection.contact => {
+            p.contact.clone()
+        }
+        _ => contact_id
+            .map(|id| app.contact_view(id))
+            .transpose()?
+            .flatten()
+            .map(Arc::new),
+    };
+    let task_detail = match prev {
+        Some(p) if d != Destination::Tasks && p.selection.task == selection.task => {
+            p.task_detail.clone()
+        }
+        _ => selection
+            .task
+            .and_then(|id| app.task_detail_view(id).ok())
+            .map(Arc::new),
+    };
     Ok(Snapshot {
-        friends: app.friends_view()?,
+        friends: view!(friends, "friends", app.friends_view()?),
+        inbox: view!(inbox, "inbox", app.agent_inbox_view()?),
+        tasks: view!(tasks, "tasks", app.tasks_view()?),
+        settings: view!(settings, "settings", app.settings_view()?),
+        guilds: view!(guilds, "guilds", app.guilds_view()?),
+        voice: view!(voice, "voice", app.voice_view()?),
+        rooms: view!(rooms, "voice", app.rooms_view()?),
+        memory: view!(memory, "memory", app.memory_view(None, false)?),
+        history: view!(history, "history", app.history_sync_view()?),
+        // Always fresh: header status, rail, shortcuts, Omni badge.
         layouts: app.layout_profiles_view()?,
         diagnostics: app.diagnostics_view()?,
-        inbox: app.agent_inbox_view()?,
-        tasks: app.tasks_view()?,
-        settings: app.settings_view()?,
-        guilds: app.guilds_view()?,
-        voice: app.voice_view()?,
-        rooms: app.rooms_view()?,
-        memory: app.memory_view(None, false)?,
         account: app.account_view()?,
         palette: app.command_palette(&selection.palette_query, selection.conversation)?,
         shortcuts: app.command_shortcuts(selection.conversation)?,
-        contact: contact_id
-            .map(|id| app.contact_view(id))
-            .transpose()?
-            .flatten(),
-        files: selection
-            .conversation
-            .map(|id| app.conversation_files_view(id, 30, None))
-            .transpose()?,
-        task_detail: selection.task.and_then(|id| app.task_detail_view(id).ok()),
-        omni: app.omni().view(selection.omni_session)?,
+        omni: Arc::new(app.omni().view(selection.omni_session)?),
+        contact,
+        files,
+        task_detail,
         selection,
         conversations,
         chat,
@@ -343,6 +422,14 @@ pub(crate) async fn execute(
                 }
             }
         }
+        Command::SyncHistory(id, true) => {
+            app.request_history_sync(id)?;
+            c.effects.push(UiEffect::Notice {
+                message: "Syncing full history in the background. It pauses while you use the app."
+                    .into(),
+            });
+        }
+        Command::SyncHistory(id, false) => app.stop_history_sync(id)?,
         Command::CreateTask(draft) => {
             if let litecord_actions::ProposeOutcome::Executed {
                 result:

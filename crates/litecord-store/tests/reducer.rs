@@ -523,3 +523,231 @@ fn sync_state_and_hydration_jobs_round_trip() {
     assert!(removed.value);
     assert!(db.read(|r| hydration_jobs::list(r)).unwrap().is_empty());
 }
+
+// ---- MessagesPage (paged history backfill) ----
+
+const DAY: i64 = 86_400_000;
+
+fn page(conv: u64, msgs: Vec<Message>) -> DiscordEvent {
+    DiscordEvent::MessagesPage {
+        conversation_id: ConversationId(conv),
+        messages: msgs,
+    }
+}
+
+/// A history page upserts, never deletes messages it does not contain,
+/// emits events only for what actually changed, and moves the cursor back.
+#[test]
+fn messages_page_upserts_never_deletes_and_advances_cursor() {
+    use litecord_store::repos::history_sync;
+
+    let db = Database::open_in_memory().unwrap();
+    let cfg = ReducerConfig::default();
+    let now = 100 * DAY;
+    let recent: Vec<Message> = (100..105)
+        .map(|i| msg(i, 10, 20, "recent", now - DAY + i as i64))
+        .collect();
+    reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::Synthetic,
+            now,
+            DiscordEvent::MessagesSnapshot {
+                conversation_id: ConversationId(10),
+                messages: recent.clone(),
+            },
+        ),
+        &cfg,
+    )
+    .unwrap();
+    db.write(|tx| history_sync::request(tx, ConversationId(10)))
+        .unwrap();
+    let rec = db
+        .read(|r| history_sync::get(r, ConversationId(10)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.oldest_message_id, Some(MessageId(100)));
+
+    // An older page that overlaps one already-known message.
+    let mut older: Vec<Message> = (90..100)
+        .map(|i| msg(i, 10, 21, "old history", now - 50 * DAY + i as i64))
+        .collect();
+    older.push(recent[0].clone());
+    let committed = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, now, page(10, older)),
+        &cfg,
+    )
+    .unwrap();
+
+    let created = committed
+        .events
+        .iter()
+        .filter(|e| matches!(e, UnifiedEvent::MessageCreated { .. }))
+        .count();
+    assert_eq!(created, 10, "only the new messages produce events");
+    assert!(!committed.events.iter().any(|e| matches!(
+        e,
+        UnifiedEvent::MessageDeleted { .. } | UnifiedEvent::MessageUpdated { .. }
+    )));
+
+    // Nothing outside the page was deleted.
+    assert_eq!(
+        db.read(|r| messages::count(r, Some(ConversationId(10))))
+            .unwrap(),
+        15
+    );
+    for id in 100..105 {
+        let rec = db
+            .read(|r| messages::get(r, MessageId(id)))
+            .unwrap()
+            .unwrap();
+        assert!(!rec.deleted);
+    }
+
+    let rec = db
+        .read(|r| history_sync::get(r, ConversationId(10)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.oldest_message_id, Some(MessageId(90)));
+    assert_eq!((rec.pages, rec.messages, rec.complete), (1, 11, false));
+
+    // Re-applying the same page stores nothing new but still counts a page.
+    let again: Vec<Message> = (90..100)
+        .map(|i| msg(i, 10, 21, "old history", now - 50 * DAY + i as i64))
+        .collect();
+    let committed = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, now, page(10, again)),
+        &cfg,
+    )
+    .unwrap();
+    assert!(committed.events.is_empty());
+    assert!(committed.value.followups.is_empty());
+}
+
+/// The page and its cursor share one transaction: if the transaction fails
+/// after reducing, neither the messages nor the cursor move.
+#[test]
+fn messages_page_cursor_rolls_back_with_the_page() {
+    use litecord_store::repos::history_sync;
+    use litecord_store::StoreError;
+
+    let db = Database::open_in_memory().unwrap();
+    db.write(|tx| history_sync::request(tx, ConversationId(10)))
+        .unwrap();
+    let before = db
+        .read(|r| history_sync::get(r, ConversationId(10)))
+        .unwrap()
+        .unwrap();
+
+    let env = envelope(
+        DiscordSource::Synthetic,
+        10 * DAY,
+        page(10, vec![msg(5, 10, 20, "lost", DAY)]),
+    );
+    let result: Result<litecord_store::Committed<()>, StoreError> = db.write(|tx| {
+        reducer::reduce(tx, &env, &ReducerConfig::default())?;
+        Err(StoreError::Invariant("simulated failure".into()))
+    });
+    assert!(result.is_err());
+
+    let after = db
+        .read(|r| history_sync::get(r, ConversationId(10)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(after, before);
+    assert!(db
+        .read(|r| messages::get(r, MessageId(5)))
+        .unwrap()
+        .is_none());
+}
+
+/// An empty page means the beginning of history: the row completes and is
+/// no longer pending.
+#[test]
+fn empty_messages_page_marks_history_sync_complete() {
+    use litecord_store::repos::history_sync;
+
+    let db = Database::open_in_memory().unwrap();
+    db.write(|tx| history_sync::request(tx, ConversationId(10)))
+        .unwrap();
+    assert!(db
+        .read(|r| history_sync::next_pending(r))
+        .unwrap()
+        .is_some());
+
+    let committed = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, DAY, page(10, Vec::new())),
+        &ReducerConfig::default(),
+    )
+    .unwrap();
+    // No unified events, but the cursor row changed: a new revision.
+    assert!(!committed.changed());
+    assert_eq!(committed.revision, Revision(2));
+
+    let rec = db
+        .read(|r| history_sync::get(r, ConversationId(10)))
+        .unwrap()
+        .unwrap();
+    assert!(rec.complete);
+    assert_eq!((rec.pages, rec.messages), (1, 0));
+    assert!(db
+        .read(|r| history_sync::next_pending(r))
+        .unwrap()
+        .is_none());
+
+    // Without a history_sync row an empty page is a pure no-op.
+    let committed = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, DAY, page(11, Vec::new())),
+        &ReducerConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(committed.revision, Revision(2));
+    assert_eq!(db.current_revision().unwrap(), Revision(2));
+}
+
+/// Backfilled history only requests memory extraction for messages sent in
+/// the last 7 days (relative to `observed_at`), so old history cannot flood
+/// memory with stale pending replies.
+#[test]
+fn messages_page_extracts_memory_only_for_recent_messages() {
+    let db = Database::open_in_memory().unwrap();
+    let now = 100 * DAY;
+    let list = vec![
+        msg(1, 10, 20, "ancient", now - 60 * DAY),
+        msg(2, 10, 20, "eight days", now - 8 * DAY),
+        msg(3, 10, 20, "six days", now - 6 * DAY),
+        msg(4, 10, 20, "today", now - 1_000),
+    ];
+    let committed = reducer::apply(
+        &db,
+        &envelope(DiscordSource::Synthetic, now, page(10, list)),
+        &ReducerConfig::default(),
+    )
+    .unwrap();
+
+    let extracted: Vec<MessageId> = committed
+        .value
+        .followups
+        .iter()
+        .filter_map(|f| match f {
+            Followup::ExtractMemory { message_id, .. } => Some(*message_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(extracted, vec![MessageId(3), MessageId(4)]);
+    // All four are stored (and announced) regardless.
+    let created = committed
+        .events
+        .iter()
+        .filter(|e| matches!(e, UnifiedEvent::MessageCreated { .. }))
+        .count();
+    assert_eq!(created, 4);
+    assert!(committed
+        .value
+        .followups
+        .contains(&Followup::Hydrate(HydrationKey::DmSummaries)));
+}

@@ -406,3 +406,91 @@ pub fn nav_row(ui: &mut Ui, label: &str, count: Option<usize>, selected: bool) -
     });
     response
 }
+
+/// A pill tab (A01 conversation filters) with an optional count badge.
+pub fn pill(ui: &mut Ui, label: &str, badge: Option<usize>, selected: bool) -> egui::Response {
+    let font = FontId::proportional(13.0);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), TEXT)
+        .size()
+        .x;
+    let badge_w = if badge.is_some_and(|n| n > 0) {
+        22.0
+    } else {
+        0.0
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(text_w + 20.0 + badge_w, 26.0),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if selected {
+            SELECTED
+        } else if response.hovered() {
+            HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, 7.0, fill);
+        painter.text(
+            rect.left_center() + egui::vec2(10.0, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            font,
+            if selected { TEXT } else { SECONDARY },
+        );
+        if let Some(n) = badge.filter(|n| *n > 0) {
+            let c = egui::pos2(rect.right() - 16.0, rect.center().y);
+            painter.circle_filled(c, 8.0, PRIMARY);
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                if n > 9 {
+                    "9+".to_owned()
+                } else {
+                    n.to_string()
+                },
+                FontId::proportional(10.0),
+                TEXT,
+            );
+        }
+    }
+    let label = label.to_owned();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label)
+    });
+    response
+}
+
+/// A search field with a magnifier glyph (A01 sidebars).
+pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
+    egui::Frame::new()
+        .fill(WORKSPACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(8)
+        .inner_margin(egui::Margin {
+            left: 28,
+            right: 8,
+            top: 5,
+            bottom: 5,
+        })
+        .show(ui, |ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(text)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY),
+            );
+            crate::icons::glyph(
+                ui.painter(),
+                r.rect.left_center() - egui::vec2(15.0, 0.0),
+                13.0,
+                crate::icons::Glyph::Search,
+                MUTED,
+            );
+            r
+        })
+        .inner
+}

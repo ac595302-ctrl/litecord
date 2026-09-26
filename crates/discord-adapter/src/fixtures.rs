@@ -330,6 +330,16 @@ pub fn generate(seed: u64, now: Timestamp) -> DemoData {
             last_message_id,
             last_activity_at,
         });
+        if i == 0 {
+            // Deep history precedes everything above (older ids, older
+            // times), so the recent window is unchanged.
+            messages.extend(deep_history(
+                conversation_id,
+                *recipient,
+                current_user.id,
+                now,
+            ));
+        }
         messages.extend(conv_messages);
     }
 
@@ -507,6 +517,57 @@ const FILLER_MESSAGES: [&str; 12] = [
     "sounds good to me",
 ];
 
+/// Number of synthetic "deep history" messages in the first DM
+/// conversation, so paged/resumable history sync has something to walk.
+pub const DEEP_HISTORY_LEN: usize = 260;
+
+/// First message id of the deep history. Deep-history ids are
+/// `DEEP_HISTORY_FIRST_ID..DEEP_HISTORY_FIRST_ID + DEEP_HISTORY_LEN`, all
+/// below the recent window's ids (which start at 900 000) and increasing
+/// with time.
+pub const DEEP_HISTORY_FIRST_ID: u64 = 880_000;
+
+const DEEP_HISTORY_LINES: &[&str] = &[
+    "sounds good",
+    "haha nice",
+    "ok cool",
+    "same here",
+    "nice one",
+];
+
+/// Deterministic older history (no rng draws, so every other fixture value
+/// is unchanged): one message every 3 hours, ending just before the
+/// 10-day window the recent messages live in, alternating authors.
+fn deep_history(
+    conversation_id: ConversationId,
+    other: UserId,
+    me: UserId,
+    now: Timestamp,
+) -> Vec<Message> {
+    let window_start = now.saturating_sub(DurationMs::from_days(10));
+    (0..DEEP_HISTORY_LEN)
+        .map(|i| {
+            let back = (DEEP_HISTORY_LEN - i) as u64;
+            Message {
+                id: MessageId(DEEP_HISTORY_FIRST_ID + i as u64),
+                conversation_id,
+                author_id: if i % 2 == 0 { other } else { me },
+                content: Arc::from(
+                    format!(
+                        "{} (older chat {i})",
+                        DEEP_HISTORY_LINES[i % DEEP_HISTORY_LINES.len()]
+                    )
+                    .as_str(),
+                ),
+                sent_at: window_start.saturating_sub(DurationMs::from_hours(back * 3)),
+                edited_at: None,
+                reply_to: None,
+                extras: Vec::new(),
+            }
+        })
+        .collect()
+}
+
 /// Produces `n` strictly increasing timestamps spanning roughly the last 10
 /// days, with the final one forced to land within the last few hours (so the
 /// newest message in a conversation looks recent, as an unanswered DM would).
@@ -647,6 +708,26 @@ mod tests {
             .channels
             .iter()
             .all(|c| c.access != ChannelAccess::Native));
+    }
+
+    #[test]
+    fn first_conversation_has_deep_history_older_than_the_recent_window() {
+        let data = generate(42, now());
+        let conv = data.conversations[0].id;
+        let mut msgs: Vec<&Message> = data
+            .messages
+            .iter()
+            .filter(|m| m.conversation_id == conv)
+            .collect();
+        assert!(msgs.len() >= 250);
+        msgs.sort_by_key(|m| m.sent_at);
+        // Id order matches time order, so id cursors page chronologically.
+        assert!(msgs.windows(2).all(|w| w[0].id < w[1].id));
+        assert_eq!(msgs[0].id, MessageId(DEEP_HISTORY_FIRST_ID));
+        assert_eq!(
+            data.conversations[0].last_message_id,
+            Some(msgs[msgs.len() - 1].id)
+        );
     }
 
     #[test]

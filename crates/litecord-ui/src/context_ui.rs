@@ -294,8 +294,61 @@ impl Workspace {
                     "Voice controls stay inside the room when you move this panel.",
                 ));
             }
+            Destination::Settings => {
+                self.runtime_summary(ui);
+                ui.add_space(8.0);
+                self.history_summary(ui);
+                ui.add_space(8.0);
+                self.omni_summary(ui);
+            }
             _ => self.omni_summary(ui),
         }
+    }
+
+    /// Settings inspector: live resource figures (Stage A budgets).
+    fn runtime_summary(&mut self, ui: &mut Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let m = &s.diagnostics.metrics;
+        let kib = |b: u64| format!("{:.0} KiB", b as f64 / 1024.0);
+        section_heading(ui, "Runtime", None);
+        let rows = [
+            (
+                "Memory in use",
+                m.rss_bytes.map_or_else(
+                    || "unknown".to_owned(),
+                    |b| format!("{:.1} MiB", b as f64 / 1_048_576.0),
+                ),
+            ),
+            (
+                "Event queue",
+                format!(
+                    "{} events · {}",
+                    m.event_queue_depth,
+                    kib(m.event_queue_bytes)
+                ),
+            ),
+            ("Message cache", kib(m.hot_cache_bytes)),
+            (
+                "Sync queue",
+                format!(
+                    "{} pending · {} active",
+                    m.hydration_queue_depth, m.hydration_active
+                ),
+            ),
+            ("Revision", s.diagnostics.revision.to_string()),
+        ];
+        egui::Grid::new("runtime_grid")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for (k, v) in rows {
+                    ui.label(theme::meta(k));
+                    ui.label(RichText::new(v).size(13.0).color(theme::SECONDARY));
+                    ui.end_row();
+                }
+            });
     }
 
     /// Compact Omni status + latest check-ins, for Home/Inbox/Servers.
@@ -348,7 +401,7 @@ impl Workspace {
             ui.spinner();
             return;
         }
-        let Some(c) = &s.contact else {
+        let Some(c) = s.contact.clone() else {
             theme::empty_state(
                 ui,
                 "No contact selected",
@@ -359,34 +412,51 @@ impl Workspace {
         egui::ScrollArea::vertical().id_salt("inspector_scroll").show(ui, |ui| {
             let name = self.display(c.alias.as_deref().unwrap_or(&c.display_name));
             let presence = theme::Presence::from_status(c.presence.status.as_str());
-            ui.horizontal(|ui| {
-                theme::avatar_presence(ui, &name, 56.0, presence);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&name).size(18.0).strong());
-                    ui.label(theme::meta(self.display(c.username.as_deref().unwrap_or("Unknown user"))));
-                    ui.label(RichText::new(presence.label()).size(12.0).color(presence.color()));
-                });
-            });
-            if let Some(activity) = &c.presence.activity {
-                ui.label(theme::meta(self.display(&activity.name)));
+            ui.add_space(4.0);
+            theme::avatar_presence(ui, &name, 72.0, presence);
+            ui.add_space(6.0);
+            ui.label(RichText::new(&name).size(20.0).color(theme::TEXT));
+            if let Some(u) = &c.username {
+                ui.label(theme::meta(format!("@{}", self.display(u))));
             }
-            if self.selection.destination == Destination::Friends {
-                if let Some(conv) = s
-                    .conversations
-                    .conversations
-                    .iter()
-                    .find(|r| r.recipient_id == Some(c.user_id))
-                    .map(|r| r.conversation_id)
-                {
-                    if ui.button("Open conversation").clicked() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(presence.label()).size(12.0).color(presence.color()));
+                if let Some(activity) = c.presence.activity.as_ref().filter(|_| !self.private()) {
+                    ui.label(theme::meta(format!("· {}", activity.name)));
+                }
+            });
+            ui.add_space(10.0);
+            let dm = s
+                .conversations
+                .conversations
+                .iter()
+                .find(|r| r.recipient_id == Some(c.user_id))
+                .map(|r| r.conversation_id);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                if round_action(ui, crate::icons::Glyph::Message, "Message", dm.is_some()) {
+                    if let Some(conv) = dm {
                         self.navigate(Destination::Messages);
                         self.open_conversation(conv);
                     }
                 }
-            }
+                if round_action(ui, crate::icons::Glyph::Sparkle, "Ask Omni", true) {
+                    self.omni_open = true;
+                    self.omni_draft = format!("What should I know about {name} right now?");
+                }
+                if round_action(ui, crate::icons::Glyph::Note, "Note", !self.private()) {
+                    ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("contact_note")));
+                }
+                if round_action(ui, crate::icons::Glyph::External, "Discord", true) {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
+                        "https://discord.com/users/{}",
+                        c.user_id
+                    )));
+                }
+            });
             ui.add_space(8.0);
             ui.separator();
-            theme::section_label(ui, "Local note");
+            section_heading(ui, "About", None);
             if self.private() {
                 ui.label(theme::meta("Hidden in privacy mode"));
             } else {
@@ -396,13 +466,15 @@ impl Workspace {
                 if let Some((_, text)) = self.note_draft.as_mut() {
                     ui.add(
                         egui::TextEdit::multiline(text)
+                            .id(egui::Id::new("contact_note"))
                             .desired_rows(3)
                             .desired_width(f32::INFINITY)
-                            .hint_text("Only you can see this note"),
+                            .hint_text("Your private note about them (only you can see it)"),
                     );
                 }
-                let changed = self.note_draft.as_ref().map(|n| n.1.as_str()) != Some(c.note.as_deref().unwrap_or(""));
-                if ui.add_enabled(!self.busy && changed, egui::Button::new("Save note")).clicked() {
+                let changed = self.note_draft.as_ref().map(|n| n.1.as_str())
+                    != Some(c.note.as_deref().unwrap_or(""));
+                if changed && ui.add_enabled(!self.busy, egui::Button::new("Save note")).clicked() {
                     let note = self.note_draft.as_ref().map(|n| n.1.clone()).unwrap_or_default();
                     self.send(Command::Note(UserNote {
                         user_id: c.user_id,
@@ -413,45 +485,30 @@ impl Workspace {
                     }));
                 }
             }
-            if self.selection.destination == Destination::Messages {
-                if let Some(chat) = &s.chat {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    theme::section_label(ui, "Omni access");
-                    let mut v = chat.agent_visibility;
-                    egui::ComboBox::from_id_salt("visibility")
-                        .selected_text(visibility_label(v))
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for opt in [AgentVisibility::Allowed, AgentVisibility::MetadataOnly, AgentVisibility::Hidden] {
-                                ui.selectable_value(&mut v, opt, visibility_label(opt));
-                            }
-                        });
-                    if v != chat.agent_visibility && !self.busy {
-                        self.send(Command::Visibility(chat.conversation_id, v));
-                    }
-                    ui.label(theme::meta(
-                        "What Omni and other agents may read here. Privacy mode only affects what is on screen.",
-                    ));
-                }
-                if let Some(files) = &s.files {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    theme::section_label(ui, &format!("Shared files · {}", files.files.len()));
-                    if files.files.is_empty() {
+            if self.selection.destination != Destination::Messages {
+                return;
+            }
+            let files = s.files.clone();
+            let links = s.chat.as_ref().map(|chat| shared_links(chat)).unwrap_or_default();
+            ui.add_space(6.0);
+            ui.separator();
+            section_heading(ui, "Shared", None);
+            let file_count = files.as_ref().map_or(0, |f| f.files.len());
+            egui::CollapsingHeader::new(format!("{file_count} Files{}", if files.as_ref().is_some_and(|f| f.has_more) { "+" } else { "" }))
+                .id_salt("shared_files")
+                .show(ui, |ui| {
+                    if file_count == 0 {
                         ui.label(theme::meta("No attachments in cached history."));
                     }
-                    for f in files.files.iter().take(12) {
+                    for f in files.iter().flat_map(|f| f.files.iter()).take(20) {
                         let r = ui
-                            .horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.add(egui::Label::new(self.display(&f.filename)).truncate());
-                                    ui.label(theme::meta(format!(
-                                        "{} · {}",
-                                        self.display(&f.author_name),
-                                        human_size(f.size_bytes)
-                                    )));
-                                });
+                            .vertical(|ui| {
+                                ui.add(egui::Label::new(self.display(&f.filename)).truncate());
+                                ui.label(theme::meta(format!(
+                                    "{} · {}",
+                                    self.display(&f.author_name),
+                                    human_size(f.size_bytes)
+                                )));
                             })
                             .response
                             .interact(egui::Sense::click())
@@ -460,12 +517,147 @@ impl Workspace {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(&f.open_in_discord_url));
                         }
                     }
-                    if files.has_more {
-                        ui.label(theme::meta("Older files are in Discord."));
+                });
+            egui::CollapsingHeader::new(format!("{} Links", links.len()))
+                .id_salt("shared_links")
+                .show(ui, |ui| {
+                    if links.is_empty() {
+                        ui.label(theme::meta("No links in the loaded messages."));
                     }
+                    for link in links.iter().take(20) {
+                        if self.private() {
+                            ui.label(theme::meta("Hidden in privacy mode"));
+                            break;
+                        }
+                        if ui.link(link.as_str()).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(link));
+                        }
+                    }
+                });
+            if let Some(chat) = &s.chat {
+                ui.add_space(6.0);
+                ui.separator();
+                section_heading(ui, "Omni access", None);
+                let mut v = chat.agent_visibility;
+                egui::ComboBox::from_id_salt("visibility")
+                    .selected_text(visibility_label(v))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for opt in [AgentVisibility::Allowed, AgentVisibility::MetadataOnly, AgentVisibility::Hidden] {
+                            ui.selectable_value(&mut v, opt, visibility_label(opt));
+                        }
+                    });
+                if v != chat.agent_visibility && !self.busy {
+                    self.send(Command::Visibility(chat.conversation_id, v));
                 }
+                ui.label(theme::meta(
+                    "What Omni and other agents may read here. Privacy mode only affects the screen.",
+                ));
+                ui.add_space(6.0);
+                ui.separator();
+                self.history_section(ui, chat.conversation_id);
             }
         });
+    }
+
+    /// Stage C: user-selected full history sync for one conversation.
+    fn history_section(&mut self, ui: &mut Ui, id: litecord_types::ConversationId) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        section_heading(ui, "History", None);
+        if s.history.quota_bytes == 0 {
+            ui.label(theme::meta(
+                "History sync is off. Set a database size limit to enable it.",
+            ));
+            return;
+        }
+        let row = s.history.row(id);
+        match row {
+            Some(r) if r.complete => {
+                ui.label(theme::meta(format!(
+                    "Full history stored · {} messages in {} pages",
+                    r.messages, r.pages
+                )));
+            }
+            Some(r) if r.enabled => {
+                ui.label(theme::meta(format!(
+                    "Syncing older messages · {} so far",
+                    r.messages
+                )));
+                if let Some(reason) = &r.paused_reason {
+                    ui.label(theme::meta(format!("Paused: {reason}")));
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Stop sync"))
+                    .clicked()
+                {
+                    self.send(Command::SyncHistory(id, false));
+                }
+            }
+            _ => {
+                if let Some(err) = row.and_then(|r| r.last_error.as_ref()) {
+                    ui.label(RichText::new(err).size(12.0).color(theme::PRIORITY));
+                }
+                ui.label(theme::meta(
+                    "Only recent messages are stored. Sync walks back to the start of this conversation in the background.",
+                ));
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Sync full history"))
+                    .clicked()
+                {
+                    self.send(Command::SyncHistory(id, true));
+                }
+            }
+        }
+    }
+
+    /// Settings inspector: every conversation selected for history sync,
+    /// with database size against its quota.
+    fn history_summary(&mut self, ui: &mut Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let h = &s.history;
+        section_heading(ui, "History sync", None);
+        let mib = |b: u64| b as f64 / 1_048_576.0;
+        if h.quota_bytes == 0 {
+            ui.label(theme::meta(format!(
+                "Off · database {:.1} MiB. Set retention.max_database_mb to enable.",
+                mib(h.db_bytes)
+            )));
+            return;
+        }
+        let used = (h.db_bytes as f32 / h.quota_bytes as f32).clamp(0.0, 1.0);
+        ui.add(
+            egui::ProgressBar::new(used)
+                .desired_height(6.0)
+                .text(theme::meta(format!(
+                    "{:.1} of {:.0} MiB",
+                    mib(h.db_bytes),
+                    mib(h.quota_bytes)
+                ))),
+        );
+        if h.rows.is_empty() {
+            ui.label(theme::meta(
+                "No conversations selected. Use Sync full history in a chat's details.",
+            ));
+        }
+        for r in h.rows.iter().take(12) {
+            let state = if r.complete {
+                "complete".to_owned()
+            } else if !r.enabled {
+                "stopped".to_owned()
+            } else if let Some(p) = &r.paused_reason {
+                format!("paused: {p}")
+            } else {
+                "syncing".to_owned()
+            };
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(self.display(&r.title)).truncate());
+                ui.label(theme::meta(format!("{} msgs · {state}", r.messages)));
+            });
+        }
     }
 }
 
@@ -486,6 +678,92 @@ pub(crate) fn visible_attention(items: &[InboxItem]) -> Vec<&InboxItem> {
             _ => true,
         })
         .collect()
+}
+
+/// Round icon action with a caption below (A01 inspector action row).
+fn round_action(ui: &mut Ui, glyph: crate::icons::Glyph, label: &str, enabled: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(52.0, 58.0),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let c = egui::pos2(rect.center().x, rect.top() + 20.0);
+        let fill = if enabled && response.hovered() {
+            theme::HOVER
+        } else {
+            theme::RAISED
+        };
+        painter.circle_filled(c, 19.0, fill);
+        crate::icons::glyph(
+            painter,
+            c,
+            17.0,
+            glyph,
+            if enabled { theme::TEXT } else { theme::BORDER },
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 2.0),
+            egui::Align2::CENTER_BOTTOM,
+            label,
+            egui::FontId::proportional(11.0),
+            if enabled {
+                theme::SECONDARY
+            } else {
+                theme::MUTED
+            },
+        );
+    }
+    let text = label.to_owned();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &text));
+    enabled && response.clicked()
+}
+
+/// Section title with an optional right-aligned "See all" style action.
+pub(crate) fn section_heading(ui: &mut Ui, title: &str, action: Option<&str>) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(14.0).color(theme::TEXT).strong());
+        if let Some(a) = action {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                clicked = ui
+                    .add(
+                        egui::Label::new(RichText::new(a).size(12.0).color(theme::PRIMARY_TEXT))
+                            .sense(egui::Sense::click()),
+                    )
+                    .clicked();
+            });
+        }
+    });
+    clicked
+}
+
+/// Distinct http(s) links in the loaded messages, newest first.
+fn shared_links(chat: &litecord_app::view::ConversationViewModel) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in chat.messages.iter().rev() {
+        for word in m.render.content.split_whitespace() {
+            let w =
+                word.trim_matches(|c: char| matches!(c, '<' | '>' | '(' | ')' | ',' | '.' | '"'));
+            if (w.starts_with("https://") || w.starts_with("http://"))
+                && !out.iter().any(|o| o == w)
+            {
+                out.push(w.to_owned());
+            }
+        }
+        for extra in &m.extras {
+            if let litecord_types::social::MessageExtra::Embed { url: Some(u), .. } = extra {
+                if !out.iter().any(|o| o == u) {
+                    out.push(u.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn visibility_label(v: AgentVisibility) -> &'static str {

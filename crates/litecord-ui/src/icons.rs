@@ -237,3 +237,194 @@ fn arc(
         .collect();
     painter.add(egui::Shape::line(points, stroke));
 }
+
+/// Small action glyphs used across the shell (title bar, composer, chat
+/// header, inspector actions). Stroke-only, like the destination icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glyph {
+    Search,
+    Send,
+    Compose,
+    External,
+    Note,
+    Sparkle,
+    Message,
+    #[allow(dead_code)] // used by Stage D reply UI
+    Reply,
+    Close,
+}
+
+pub fn glyph(painter: &Painter, center: Pos2, size: f32, glyph: Glyph, color: Color32) {
+    let size = size.max(1.0);
+    let stroke = Stroke::new((size * 0.09).clamp(1.3, 2.0), color);
+    match glyph {
+        Glyph::Search => {
+            circle(painter, center, size, 0.43, 0.43, 0.26, stroke);
+            line(painter, center, size, &[(0.62, 0.62), (0.86, 0.86)], stroke);
+        }
+        Glyph::Send => {
+            outline(
+                painter,
+                center,
+                size,
+                &[(0.12, 0.15), (0.9, 0.5), (0.12, 0.85), (0.26, 0.5)],
+                stroke,
+            );
+            line(painter, center, size, &[(0.26, 0.5), (0.6, 0.5)], stroke);
+        }
+        Glyph::Compose => {
+            outline(
+                painter,
+                center,
+                size,
+                &[(0.15, 0.25), (0.5, 0.25), (0.5, 0.25), (0.15, 0.25)],
+                stroke,
+            );
+            line(
+                painter,
+                center,
+                size,
+                &[
+                    (0.45, 0.2),
+                    (0.15, 0.2),
+                    (0.15, 0.85),
+                    (0.8, 0.85),
+                    (0.8, 0.55),
+                ],
+                stroke,
+            );
+            line(painter, center, size, &[(0.42, 0.62), (0.85, 0.18)], stroke);
+        }
+        Glyph::External => {
+            line(
+                painter,
+                center,
+                size,
+                &[
+                    (0.45, 0.2),
+                    (0.18, 0.2),
+                    (0.18, 0.82),
+                    (0.8, 0.82),
+                    (0.8, 0.55),
+                ],
+                stroke,
+            );
+            line(painter, center, size, &[(0.45, 0.55), (0.84, 0.16)], stroke);
+            line(
+                painter,
+                center,
+                size,
+                &[(0.58, 0.16), (0.84, 0.16), (0.84, 0.42)],
+                stroke,
+            );
+        }
+        Glyph::Note => {
+            outline(
+                painter,
+                center,
+                size,
+                &[
+                    (0.2, 0.15),
+                    (0.8, 0.15),
+                    (0.8, 0.62),
+                    (0.58, 0.85),
+                    (0.2, 0.85),
+                ],
+                stroke,
+            );
+            line(painter, center, size, &[(0.32, 0.38), (0.68, 0.38)], stroke);
+            line(painter, center, size, &[(0.32, 0.56), (0.55, 0.56)], stroke);
+        }
+        Glyph::Sparkle => {
+            outline(
+                painter,
+                center,
+                size,
+                &[
+                    (0.5, 0.08),
+                    (0.6, 0.4),
+                    (0.92, 0.5),
+                    (0.6, 0.6),
+                    (0.5, 0.92),
+                    (0.4, 0.6),
+                    (0.08, 0.5),
+                    (0.4, 0.4),
+                ],
+                stroke,
+            );
+        }
+        Glyph::Message => {
+            outline(
+                painter,
+                center,
+                size,
+                &[
+                    (0.14, 0.2),
+                    (0.86, 0.2),
+                    (0.86, 0.7),
+                    (0.42, 0.7),
+                    (0.24, 0.86),
+                    (0.26, 0.7),
+                    (0.14, 0.7),
+                ],
+                stroke,
+            );
+        }
+        Glyph::Reply => {
+            line(
+                painter,
+                center,
+                size,
+                &[(0.42, 0.22), (0.14, 0.48), (0.42, 0.74)],
+                stroke,
+            );
+            arc(
+                painter,
+                center,
+                size,
+                (0.86, 0.9),
+                (0.72, 0.42),
+                (-std::f32::consts::PI, -std::f32::consts::FRAC_PI_2),
+                stroke,
+            );
+        }
+        Glyph::Close => {
+            line(painter, center, size, &[(0.22, 0.22), (0.78, 0.78)], stroke);
+            line(painter, center, size, &[(0.78, 0.22), (0.22, 0.78)], stroke);
+        }
+    }
+}
+
+/// A square icon button with a tooltip (and an accessible label).
+pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, label: &str, enabled: bool) -> egui::Response {
+    let size = 28.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(size, size),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    if ui.is_rect_visible(rect) {
+        let hovered = enabled && response.hovered();
+        if hovered {
+            ui.painter().rect_filled(rect, 6.0, crate::theme::HOVER);
+        }
+        let color = if !enabled {
+            crate::theme::BORDER
+        } else if hovered {
+            crate::theme::TEXT
+        } else {
+            crate::theme::SECONDARY
+        };
+        glyph_paint(ui.painter(), rect.center(), 18.0, glyph, color);
+    }
+    let label = label.to_owned();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
+    response.on_hover_text(label)
+}
+
+fn glyph_paint(painter: &Painter, center: Pos2, size: f32, g: Glyph, color: Color32) {
+    glyph(painter, center, size, g, color);
+}

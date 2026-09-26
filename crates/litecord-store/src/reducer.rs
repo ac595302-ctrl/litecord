@@ -24,19 +24,26 @@
 use litecord_core::events::{DiscordEvent, HydrationKey, SourceEnvelope, UnifiedEvent};
 use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::SessionState;
-use litecord_types::{ConversationId, MessageId};
+use litecord_types::{ConversationId, DurationMs, MessageId};
 
 use crate::db::{Committed, Database, WriteTx};
 use crate::error::StoreResult;
 use crate::repos::{
-    accounts, app_state, channels, conversations, guilds, lobbies, messages, relationships, users,
-    voice,
+    accounts, app_state, channels, conversations, guilds, history_sync, lobbies, messages,
+    relationships, users, voice,
 };
+
+/// History pages only request memory extraction for messages sent within
+/// this window before the envelope's `observed_at`: backfilled history must
+/// not flood memory with stale pending replies.
+pub const HISTORY_EXTRACTION_WINDOW: DurationMs = DurationMs::from_days(7);
 
 // Note: `sync_state`/`hydration_jobs` are deliberately not written here. The
 // reducer only ever produces `Followup::Hydrate` requests; the hydrator owns
 // turning those into `sync_state`/`hydration_jobs` bookkeeping once it acts
-// on them.
+// on them. The one exception is `history_sync`: a `MessagesPage` advances
+// that conversation's backfill cursor in the same transaction as the page,
+// so a page and its checkpoint commit (or roll back) together.
 
 /// Reducer-wide behavior knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +177,7 @@ pub fn reduce(
 
         DiscordEvent::MessageCreated { message } | DiscordEvent::MessageUpdated { message } => {
             let created_conversation_stub =
-                apply_message(tx, message, origin, observed_at, &mut followups)?;
+                apply_message(tx, message, origin, observed_at, true, &mut followups)?;
             if created_conversation_stub {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
             }
@@ -224,11 +231,34 @@ pub fn reduce(
             let mut conversation_stub_created = false;
             for m in list {
                 conversation_stub_created |=
-                    apply_message(tx, m, origin, observed_at, &mut followups)?;
+                    apply_message(tx, m, origin, observed_at, true, &mut followups)?;
             }
             if conversation_stub_created {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
             }
+        }
+
+        DiscordEvent::MessagesPage {
+            conversation_id,
+            messages: list,
+        } => {
+            // Upsert only: a page never deletes what it does not contain.
+            let extract_since = observed_at.saturating_sub(HISTORY_EXTRACTION_WINDOW);
+            let mut conversation_stub_created = false;
+            for m in list {
+                let extract = m.sent_at >= extract_since;
+                conversation_stub_created |=
+                    apply_message(tx, m, origin, observed_at, extract, &mut followups)?;
+            }
+            if conversation_stub_created {
+                followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
+            }
+            let page_oldest = list
+                .iter()
+                .filter(|m| m.conversation_id == *conversation_id)
+                .map(|m| m.id)
+                .min();
+            history_sync::advance(tx, *conversation_id, page_oldest, list.len())?;
         }
 
         DiscordEvent::Invalidated { key } => {
@@ -241,14 +271,16 @@ pub fn reduce(
     })
 }
 
-/// Shared by `MessageCreated`/`MessageUpdated` and `MessagesSnapshot`.
-/// Returns whether a conversation stub was created (so `MessagesSnapshot`
-/// can raise a single `Hydrate(DmSummaries)` for the whole batch).
+/// Shared by `MessageCreated`/`MessageUpdated`, `MessagesSnapshot` and
+/// `MessagesPage`. Returns whether a conversation stub was created (so the
+/// batch variants can raise a single `Hydrate(DmSummaries)`). A newly
+/// created message is queued for memory extraction when `extract` is set.
 fn apply_message(
     tx: &WriteTx<'_>,
     message: &litecord_types::social::Message,
     origin: litecord_types::provenance::Origin,
     observed_at: litecord_types::Timestamp,
+    extract: bool,
     followups: &mut Vec<Followup>,
 ) -> StoreResult<bool> {
     let outcome = messages::upsert(tx, message, origin, observed_at)?;
@@ -257,7 +289,7 @@ fn apply_message(
             user_id: message.author_id,
         }));
     }
-    if matches!(outcome.write, messages::MessageWrite::Created) {
+    if extract && matches!(outcome.write, messages::MessageWrite::Created) {
         followups.push(Followup::ExtractMemory {
             message_id: message.id,
             conversation_id: message.conversation_id,

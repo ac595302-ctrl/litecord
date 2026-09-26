@@ -41,6 +41,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "omni_automations",
         sql: include_str!("../../../migrations/0004_omni_automations.sql"),
     },
+    Migration {
+        version: 5,
+        name: "history_sync",
+        sql: include_str!("../../../migrations/0005_history_sync.sql"),
+    },
 ];
 
 pub fn latest_version() -> u32 {
@@ -117,7 +122,7 @@ mod tests {
         .unwrap();
 
         let applied = run(&mut conn).unwrap();
-        assert_eq!(applied, vec![2, 3, 4]);
+        assert_eq!(applied, vec![2, 3, 4, 5]);
         assert_eq!(current_version(&conn).unwrap(), latest_version());
 
         let priority: String = conn
@@ -137,5 +142,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(parent_id, None);
+    }
+
+    /// A v4 database gains the (empty) `history_sync` table.
+    #[test]
+    fn upgrade_from_v4_adds_history_sync() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                 version    INTEGER PRIMARY KEY,
+                 name       TEXT    NOT NULL,
+                 applied_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 4) {
+            conn.execute_batch(m.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 0)",
+                rusqlite::params![m.version, m.name],
+            )
+            .unwrap();
+        }
+        assert_eq!(run(&mut conn).unwrap(), vec![5]);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history_sync", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

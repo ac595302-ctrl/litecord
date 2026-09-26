@@ -687,7 +687,7 @@ mod tests {
         ws.profile = saved.active().unwrap().clone();
         ws.selection.destination = Destination::Messages;
         ws.snapshot = Some(std::sync::Arc::new(
-            crate::bridge::snapshot(&app, ws.selection.clone()).unwrap(),
+            crate::bridge::snapshot(&app, ws.selection.clone(), None).unwrap(),
         ));
         let original = ws.profile.clone();
         // Right edge of the chat panel.
