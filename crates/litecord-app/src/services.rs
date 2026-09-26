@@ -25,7 +25,7 @@ use litecord_types::memory::{MemoryKind, MemoryPayload, MemoryStatus};
 use litecord_types::notes::UserNote;
 use litecord_types::provenance::{DiscordIdentity, Origin};
 use litecord_types::social::*;
-use litecord_types::tasks::{DraftStatus, ReminderStatus, TaskStatus};
+use litecord_types::tasks::{DraftStatus, ReminderStatus, TaskDraft, TaskPriority, TaskStatus};
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{DurationMs, Revision};
 
@@ -426,6 +426,21 @@ impl LitecordApp {
                         ..Default::default()
                     },
                 )?,
+            })
+        })
+    }
+
+    /// A single task with its subtasks and comments, for a task detail
+    /// screen. `Err(NotFound)` if `id` does not exist.
+    pub fn task_detail_view(&self, id: TaskId) -> Result<TaskDetailViewModel> {
+        self.inner.db.read(|r| -> Result<TaskDetailViewModel> {
+            let task =
+                repos::tasks::get(r, id)?.ok_or_else(|| Error::not_found(format!("task {id}")))?;
+            Ok(TaskDetailViewModel {
+                as_of_revision: r.revision(),
+                subtasks: repos::tasks::subtasks(r, task.id)?,
+                comments: repos::tasks::comments(r, task.id)?,
+                task,
             })
         })
     }
@@ -836,6 +851,29 @@ impl LitecordApp {
     pub fn complete_task(&self, id: TaskId) -> Result<()> {
         self.inner.tasks.complete(id, Origin::UserProvided)?;
         Ok(())
+    }
+
+    /// Create a task typed by the user. Routed through the Action Engine as
+    /// `Actor::User` (`AgentAction::CreateTask`, a `LocalWrite`), so it is
+    /// audited like every other user action; user-created tasks start `Open`
+    /// (see `litecord_actions::executor`).
+    pub async fn create_task(&self, draft: TaskDraft) -> Result<ProposeOutcome> {
+        self.user_action(AgentAction::CreateTask { task: draft })
+            .await
+    }
+
+    pub fn set_task_priority(&self, id: TaskId, priority: TaskPriority) -> Result<bool> {
+        Ok(self
+            .inner
+            .tasks
+            .set_priority(id, priority, Origin::UserProvided)?)
+    }
+
+    pub fn add_task_comment(&self, id: TaskId, body: &str) -> Result<i64> {
+        Ok(self
+            .inner
+            .tasks
+            .add_comment(id, body, Origin::UserProvided)?)
     }
 
     pub fn confirm_memory(&self, id: MemoryId) -> Result<()> {

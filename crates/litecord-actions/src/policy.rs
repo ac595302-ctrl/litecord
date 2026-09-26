@@ -116,7 +116,7 @@ pub(crate) mod tests {
     use litecord_types::actions::*;
     use litecord_types::ids::*;
     use litecord_types::social::PresenceStatus;
-    use litecord_types::tasks::{ReminderDraft, ReminderTrigger, TaskDraft};
+    use litecord_types::tasks::{ReminderDraft, ReminderTrigger, TaskDraft, TaskPriority};
     use litecord_types::Timestamp;
 
     /// One instance of every action variant.
@@ -136,9 +136,11 @@ pub(crate) mod tests {
                 task: TaskDraft {
                     title: "t".into(),
                     description: None,
+                    priority: TaskPriority::default(),
                     due_at: None,
                     related_users: vec![],
                     conversation_id: None,
+                    parent_id: None,
                     source: None,
                 },
             },

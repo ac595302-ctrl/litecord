@@ -20,11 +20,18 @@ impl std::fmt::Debug for Migration {
     }
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../../../migrations/0001_initial.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../../../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "task_details",
+        sql: include_str!("../../../migrations/0002_task_details.sql"),
+    },
+];
 
 pub fn latest_version() -> u32 {
     MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
@@ -67,4 +74,58 @@ pub fn run(conn: &mut Connection) -> StoreResult<Vec<u32>> {
         applied.push(m.version);
     }
     Ok(applied)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A database created with only migration 1 applied (as a real v1
+    /// deployment would have) upgrades cleanly, and existing rows pick up
+    /// migration 2's new `priority` column at its default.
+    #[test]
+    fn upgrade_from_v1_defaults_existing_tasks_to_normal_priority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                 version    INTEGER PRIMARY KEY,
+                 name       TEXT    NOT NULL,
+                 applied_at INTEGER NOT NULL
+             );
+             INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, 'initial', 0);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks \
+                (title, description, status, origin, source_entity, source_note, \
+                 conversation_id, due_at, created_at, updated_at, completed_at, revision) \
+             VALUES ('a v1 task', NULL, 'open', 'user_provided', NULL, NULL, NULL, NULL, 0, 0, NULL, 0)",
+            [],
+        )
+        .unwrap();
+
+        let applied = run(&mut conn).unwrap();
+        assert_eq!(applied, vec![2]);
+        assert_eq!(current_version(&conn).unwrap(), 2);
+
+        let priority: String = conn
+            .query_row(
+                "SELECT priority FROM tasks WHERE title = 'a v1 task'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(priority, "normal");
+
+        let parent_id: Option<i64> = conn
+            .query_row(
+                "SELECT parent_id FROM tasks WHERE title = 'a v1 task'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_id, None);
+    }
 }

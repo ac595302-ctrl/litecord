@@ -19,7 +19,7 @@ use litecord_types::ids::*;
 use litecord_types::memory::{Edge, MemoryItem, MemoryStatus};
 use litecord_types::provenance::Origin;
 use litecord_types::social::*;
-use litecord_types::tasks::{Reminder, Task};
+use litecord_types::tasks::{Reminder, Task, TaskComment};
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{Revision, Timestamp};
 
@@ -164,6 +164,15 @@ pub struct TasksViewModel {
     pub open: Vec<Task>,
     pub candidates: Vec<Task>,
     pub reminders: Vec<Reminder>,
+}
+
+/// A single task with its subtasks and comments, for a task detail screen.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDetailViewModel {
+    pub as_of_revision: Revision,
+    pub task: Task,
+    pub subtasks: Vec<Task>,
+    pub comments: Vec<TaskComment>,
 }
 
 #[derive(Debug, Clone, Serialize)]

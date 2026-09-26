@@ -20,7 +20,7 @@ use litecord_types::entity::EntityId;
 use litecord_types::ids::*;
 use litecord_types::provenance::{DiscordSource, Origin};
 use litecord_types::social::{Relationship, RelationshipKind};
-use litecord_types::tasks::{TaskDraft, TaskStatus};
+use litecord_types::tasks::{TaskDraft, TaskPriority, TaskStatus};
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{DurationMs, Revision, Timestamp};
 
@@ -320,9 +320,11 @@ async fn agent_local_writes_auto_execute_as_candidates() {
                 task: TaskDraft {
                     title: "Send revised design doc".into(),
                     description: None,
+                    priority: TaskPriority::default(),
                     due_at: None,
                     related_users: vec![first_friend(&h.data)],
                     conversation_id: None,
+                    parent_id: None,
                     source: None,
                 },
             },
