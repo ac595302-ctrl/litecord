@@ -40,7 +40,7 @@
 //! produces instead of `SocialSdk`/`Synthetic`. Nothing in `litecord-core` or
 //! above needs to change to add it — that is the point of the port.
 
-pub mod bot_gateway;
+pub mod bot;
 pub mod convert;
 pub mod fixtures;
 pub mod mock;
