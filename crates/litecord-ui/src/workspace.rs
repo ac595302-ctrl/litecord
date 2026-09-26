@@ -49,6 +49,11 @@ pub struct Workspace {
     /// Omni slide-over panel (available on every destination).
     pub omni_open: bool,
     pub omni_draft: String,
+    /// Sign-in inputs (cleared after submit; the key is never kept longer).
+    pub omni_code_draft: String,
+    pub omni_key_draft: String,
+    pub omni_key_option: Option<String>,
+    pub automation_form: crate::omni_ui::AutomationForm,
     /// Tasks screen: new-task form and comment drafts.
     pub task_title_draft: String,
     pub task_priority_draft: litecord_types::tasks::TaskPriority,
@@ -122,6 +127,10 @@ impl Workspace {
             selected_task: None,
             omni_open: false,
             omni_draft: String::new(),
+            omni_code_draft: String::new(),
+            omni_key_draft: String::new(),
+            omni_key_option: None,
+            automation_form: crate::omni_ui::AutomationForm::default(),
             task_title_draft: String::new(),
             task_priority_draft: litecord_types::tasks::TaskPriority::default(),
             task_comment_draft: String::new(),

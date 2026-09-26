@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use litecord_harness::opencode::OpenCodeDriver;
+use litecord_harness::opencode::{missing_paths, OpenCodeDriver, PROTOCOL_PATHS};
 use litecord_harness::*;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -289,6 +289,7 @@ async fn begin_login_prefers_oauth_provider_and_reports_completion() {
         LoginState::SigningIn {
             url: Some("https://example.invalid/auth".into()),
             instructions: Some("Open the link".into()),
+            needs_code: false,
         }
     );
     let auth = fake
@@ -643,4 +644,281 @@ async fn shutdown_emits_exited_once() {
     assert_eq!(next(&mut rx).await, HarnessEvent::Exited { message: None });
     assert!(rx.try_recv().is_err());
     assert_eq!(d.login_state().await, Err(HarnessError::NotRunning));
+}
+
+const AUTH_METHODS: &str = r#"{
+    "zeta":[{"type":"api","label":"API key"}],
+    "anthropic":[{"type":"oauth","label":"Claude Pro/Max"},{"type":"api","label":"API key"}],
+    "openai":[{"type":"oauth","label":"ChatGPT Plus/Pro"},{"type":"api"},{"type":"weird"}],
+    "alpha":[{"type":"oauth","label":"Browser"}]
+}"#;
+
+#[tokio::test]
+async fn login_options_are_sorted_and_labelled() {
+    let fake = serve(|req| {
+        match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, AUTH_METHODS.into()),
+        ("GET", "/provider") => (
+            200,
+            r#"{"all":[{"id":"openai","name":"OpenAI"},{"id":"anthropic","name":"Anthropic"},{"id":"zeta"}],"connected":[]}"#
+                .into(),
+        ),
+        _ => (404, "{}".into()),
+    }
+    });
+    let d = fake.driver();
+    let opts = d.login_options().await.unwrap();
+    let got: Vec<(&str, &str, LoginKind)> = opts
+        .iter()
+        .map(|o| (o.id.as_str(), o.label.as_str(), o.kind))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("openai:0", "OpenAI · ChatGPT Plus/Pro", LoginKind::Browser),
+            ("openai:1", "OpenAI · API key", LoginKind::ApiKey),
+            (
+                "anthropic:0",
+                "Anthropic · Claude Pro/Max",
+                LoginKind::Browser
+            ),
+            ("anthropic:1", "Anthropic · API key", LoginKind::ApiKey),
+            ("alpha:0", "alpha · Browser", LoginKind::Browser),
+            ("zeta:0", "zeta · API key", LoginKind::ApiKey),
+        ]
+    );
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn login_options_without_provider_names_use_ids() {
+    let fake = serve(|req| match req.path.as_str() {
+        "/provider/auth" => (
+            200,
+            r#"{"anthropic":[{"type":"oauth","label":"Max"}]}"#.into(),
+        ),
+        _ => (500, "{}".into()),
+    });
+    let d = fake.driver();
+    let opts = d.login_options().await.unwrap();
+    assert_eq!(opts.len(), 1);
+    assert_eq!(opts[0].label, "anthropic · Max");
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn begin_login_with_rejects_bad_options() {
+    let fake = serve(|req| match req.path.as_str() {
+        "/provider/auth" => (200, AUTH_METHODS.into()),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    for bad in ["", "openai", "openai:x", "a/b:0", ":0"] {
+        assert!(
+            matches!(
+                d.begin_login_with(bad).await,
+                Err(HarnessError::Protocol(_))
+            ),
+            "{bad}"
+        );
+    }
+    for unknown in ["nope:0", "openai:1", "openai:9", "zeta:0"] {
+        assert!(
+            matches!(
+                d.begin_login_with(unknown).await,
+                Err(HarnessError::Unsupported(_))
+            ),
+            "{unknown}"
+        );
+    }
+    assert!(fake
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| !r.path.contains("/oauth/")));
+    assert!(matches!(
+        d.submit_login_code("123").await,
+        Err(HarnessError::Protocol(_))
+    ));
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn code_sign_in_flow() {
+    let fake = serve(|req| {
+        match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, AUTH_METHODS.into()),
+        ("POST", "/provider/anthropic/oauth/authorize") => (
+            200,
+            r#"{"url":"https://example.invalid/code","method":"code","instructions":"Paste the code"}"#
+                .into(),
+        ),
+        ("POST", "/provider/anthropic/oauth/callback") => (200, "true".into()),
+        ("GET", "/provider") => (200, r#"{"connected":["openai","anthropic"]}"#.into()),
+        _ => (404, "{}".into()),
+    }
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    assert_eq!(
+        d.begin_login_with("anthropic:0").await.unwrap(),
+        LoginState::SigningIn {
+            url: Some("https://example.invalid/code".into()),
+            instructions: Some("Paste the code".into()),
+            needs_code: true,
+        }
+    );
+    assert_eq!(
+        fake.find("POST", "/provider/anthropic/oauth/authorize")
+            .unwrap()
+            .body,
+        json!({ "method": 0 })
+    );
+    // No background callback for the code method.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(fake
+        .find("POST", "/provider/anthropic/oauth/callback")
+        .is_none());
+
+    d.submit_login_code(" abc#123 ").await.unwrap();
+    assert_eq!(
+        fake.find("POST", "/provider/anthropic/oauth/callback")
+            .unwrap()
+            .body,
+        json!({ "method": 0, "code": "abc#123" })
+    );
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("anthropic".into())
+        })
+    );
+    // The pending sign-in is consumed.
+    assert!(matches!(
+        d.submit_login_code("again").await,
+        Err(HarnessError::Protocol(_))
+    ));
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn code_sign_in_failure_reports_error() {
+    let fake = serve(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, AUTH_METHODS.into()),
+        ("POST", "/provider/openai/oauth/authorize") => {
+            (200, r#"{"url":"https://x.invalid","method":"code"}"#.into())
+        }
+        ("POST", "/provider/openai/oauth/callback") => (400, "{}".into()),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    d.begin_login_with("openai:0").await.unwrap();
+    assert!(d.submit_login_code("bad-code").await.is_err());
+    let HarnessEvent::Login(LoginState::Error { message }) = next(&mut rx).await else {
+        panic!("expected login error");
+    };
+    assert!(!message.contains("bad-code"), "{message}");
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn api_key_sign_in() {
+    let fake = serve(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("PUT", "/auth/openai") => (200, "true".into()),
+        ("PUT", "/auth/zeta") => (400, r#"{"error":"bad key"}"#.into()),
+        ("GET", "/provider") => (200, r#"{"connected":["openai"]}"#.into()),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    d.login_api_key("openai:1", "sk-SECRET-KEY").await.unwrap();
+    assert_eq!(
+        fake.find("PUT", "/auth/openai").unwrap().body,
+        json!({ "type": "api", "key": "sk-SECRET-KEY" })
+    );
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("openai".into())
+        })
+    );
+    assert!(!format!("{d:?}").contains("SECRET"));
+
+    let err = d
+        .login_api_key("zeta:0", "sk-OTHER-SECRET")
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().contains("SECRET"), "{err}");
+    assert!(!format!("{err:?}").contains("SECRET"), "{err:?}");
+    assert!(matches!(
+        d.login_api_key("a/b:0", "k").await,
+        Err(HarnessError::Protocol(_))
+    ));
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn models_are_listed() {
+    let fake = serve(|req| {
+        match req.path.as_str() {
+        "/config/providers" => (
+            200,
+            r#"{"providers":[
+                {"id":"openai","models":{"gpt-5":{"name":"GPT-5"},"gpt-4o":{}}},
+                {"id":"anthropic","models":[{"id":"claude-sonnet-4"},{"id":"claude-sonnet-4"},{"name":"no id"}]},
+                {"models":{"orphan":{}}},
+                {"id":"empty"}
+            ],"default":{"openai":"gpt-5"}}"#
+                .into(),
+        ),
+        _ => (404, "{}".into()),
+    }
+    });
+    let d = fake.driver();
+    assert_eq!(
+        d.models().await.unwrap(),
+        ["anthropic/claude-sonnet-4", "openai/gpt-4o", "openai/gpt-5"]
+    );
+    d.shutdown().await;
+
+    let broken = serve(|_| (500, "oops".into()));
+    let d = broken.driver();
+    assert_eq!(d.models().await.unwrap(), Vec::<String>::new());
+    d.shutdown().await;
+}
+
+#[test]
+fn missing_paths_normalizes_params() {
+    let mut paths = serde_json::Map::new();
+    for p in PROTOCOL_PATHS {
+        let p = p
+            .replace("/session/{id}", "/session/{sessionID}")
+            .replace("/provider/{id}", "/provider/:id");
+        if p != "/auth/{id}" && p != "/config/providers" {
+            paths.insert(p, json!({}));
+        }
+    }
+    let doc = json!({ "openapi": "3.1.0", "paths": paths });
+    assert_eq!(missing_paths(&doc), ["/config/providers", "/auth/{id}"]);
+    assert_eq!(missing_paths(&json!({})).len(), PROTOCOL_PATHS.len());
+}
+
+#[tokio::test]
+async fn doc_check_reads_openapi() {
+    let fake = serve(|req| match req.path.as_str() {
+        "/doc" => {
+            let paths: serde_json::Map<String, Value> = PROTOCOL_PATHS
+                .iter()
+                .filter(|p| **p != "/event")
+                .map(|p| (p.to_string(), json!({})))
+                .collect();
+            (200, json!({ "paths": paths }).to_string())
+        }
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    assert_eq!(d.doc_check().await.unwrap(), ["/event"]);
+    d.shutdown().await;
 }

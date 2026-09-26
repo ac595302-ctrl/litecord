@@ -231,6 +231,7 @@ impl AppBuilder {
             db.clone(),
             memory.clone(),
             cfg.omni.clone(),
+            cfg.agent.default_visibility,
             self.omni_launchers,
             omni_ctx,
         );
@@ -255,6 +256,13 @@ impl AppBuilder {
                             match o.heartbeat(false).await {
                                 Ok(outcome) => tracing::debug!(?outcome, "omni heartbeat"),
                                 Err(e) => tracing::debug!(error = %e, "omni heartbeat failed"),
+                            }
+                            match o.automations_tick().await {
+                                Ok(outcomes) if !outcomes.is_empty() => {
+                                    tracing::debug!(?outcomes, "omni automations")
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::debug!(error = %e, "omni automations failed"),
                             }
                         }
                     }

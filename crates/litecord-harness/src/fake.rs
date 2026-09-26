@@ -143,9 +143,72 @@ impl HarnessDriver for FakeDriver {
         let state = LoginState::SigningIn {
             url: Some("https://example.invalid/demo-login".into()),
             instructions: None,
+            needs_code: false,
         };
         self.lock().login = Some(state.clone());
         Ok(state)
+    }
+
+    async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        Ok(vec![
+            LoginOption {
+                id: "browser".into(),
+                label: "Demo account (browser)".into(),
+                kind: LoginKind::Browser,
+            },
+            LoginOption {
+                id: "code".into(),
+                label: "Demo account (paste a code)".into(),
+                kind: LoginKind::Browser,
+            },
+            LoginOption {
+                id: "api_key".into(),
+                label: "Demo API key".into(),
+                kind: LoginKind::ApiKey,
+            },
+        ])
+    }
+
+    async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
+        self.check_running()?;
+        let state = LoginState::SigningIn {
+            url: Some("https://example.invalid/demo-login".into()),
+            instructions: (option == "code").then(|| "Paste the code shown in the browser.".into()),
+            needs_code: option == "code",
+        };
+        self.lock().login = Some(state.clone());
+        Ok(state)
+    }
+
+    async fn submit_login_code(&self, code: &str) -> HarnessResult<()> {
+        if !matches!(
+            self.lock().login,
+            Some(LoginState::SigningIn {
+                needs_code: true,
+                ..
+            })
+        ) {
+            return Err(HarnessError::Protocol(
+                "no sign-in is waiting for a code".into(),
+            ));
+        }
+        if code.trim().is_empty() {
+            return Err(HarnessError::Harness("the code was rejected".into()));
+        }
+        self.complete_login();
+        Ok(())
+    }
+
+    async fn login_api_key(&self, _option: &str, key: &str) -> HarnessResult<()> {
+        if key.trim().len() < 8 {
+            return Err(HarnessError::Harness("the key was rejected".into()));
+        }
+        self.complete_login();
+        Ok(())
+    }
+
+    async fn models(&self) -> HarnessResult<Vec<String>> {
+        Ok(vec!["demo-large".into(), "demo-small".into()])
     }
 
     async fn logout(&self) -> HarnessResult<()> {

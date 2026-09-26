@@ -10,7 +10,7 @@
 //! Tracing records ids, kinds and lengths only, never prompt or reply text.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -41,6 +41,11 @@ const PATH_SESSION: &str = "/session";
 const PATH_CONFIG: &str = "/config";
 const PATH_PROVIDER: &str = "/provider";
 const PATH_PROVIDER_AUTH: &str = "/provider/auth";
+const PATH_CONFIG_PROVIDERS: &str = "/config/providers";
+/// Credential store: `PUT /auth/:id`.
+const PATH_AUTH: &str = "/auth";
+/// OpenAPI document.
+const PATH_DOC: &str = "/doc";
 /// Suffixes under `/session/:id`.
 const SUFFIX_PROMPT: &str = "prompt_async";
 const SUFFIX_ABORT: &str = "abort";
@@ -68,6 +73,38 @@ const SUBAGENT_TOOL: &str = "task";
 
 /// Sign-in provider preference; any provider with an OAuth method follows.
 const LOGIN_PREFERENCE: &[&str] = &["openai", "anthropic", "github-copilot"];
+const METHOD_OAUTH: &str = "oauth";
+const METHOD_API: &str = "api";
+/// `oauth/authorize` response `method` for a pasted-code flow.
+const AUTHORIZE_CODE: &str = "code";
+/// Separator in login option ids (`<provider>:<method index>`).
+const OPTION_SEP: char = ':';
+const OPTION_LABEL_SEP: &str = " \u{b7} ";
+const DEFAULT_OAUTH_LABEL: &str = "Sign in with browser";
+const DEFAULT_API_LABEL: &str = "API key";
+const NO_OAUTH: &str = "sign in with `opencode auth login` in a terminal";
+
+/// Every HTTP path the driver uses, in OpenAPI style. Checked against the
+/// server's `GET /doc` by [`missing_paths`].
+pub const PROTOCOL_PATHS: &[&str] = &[
+    "/global/health",
+    "/event",
+    "/session",
+    "/session/{id}",
+    "/session/{id}/prompt_async",
+    "/session/{id}/abort",
+    "/session/{id}/summarize",
+    "/session/{id}/permissions/{permissionID}",
+    "/config",
+    "/config/providers",
+    "/provider",
+    "/provider/auth",
+    "/provider/{id}/oauth/authorize",
+    "/provider/{id}/oauth/callback",
+    "/auth/{id}",
+];
+
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 const HEALTH_POLL: Duration = Duration::from_millis(200);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(20);
@@ -195,6 +232,8 @@ struct Inner {
     kill: Mutex<Option<oneshot::Sender<()>>>,
     monitor: Mutex<Option<JoinHandle<()>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// `(provider, method index)` of a sign-in waiting for a pasted code.
+    pending_code: Mutex<Option<(String, usize)>>,
 }
 
 impl Drop for Inner {
@@ -257,6 +296,192 @@ fn path_segment(s: &str) -> HarnessResult<&str> {
     Ok(s)
 }
 
+/// Providers in sign-in preference order, then alphabetically.
+fn sorted_providers<'a>(ids: impl IntoIterator<Item = &'a String>) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = ids.into_iter().map(String::as_str).collect();
+    ids.sort_by_key(|id| {
+        let rank = LOGIN_PREFERENCE
+            .iter()
+            .position(|p| p == id)
+            .unwrap_or(LOGIN_PREFERENCE.len());
+        (rank, *id)
+    });
+    ids
+}
+
+fn method_type(method: &Value) -> Option<&str> {
+    method.get("type").and_then(Value::as_str)
+}
+
+/// Provider id → display name from `GET /provider` (`all[] {id, name}`).
+fn provider_names(providers: &Value) -> HashMap<String, String> {
+    providers
+        .get("all")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(|p| {
+                    let id = p.get("id").and_then(Value::as_str)?;
+                    let name = p
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|n| !n.trim().is_empty())?;
+                    Some((id.to_owned(), name.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Login options from `GET /provider/auth` and (optionally) `GET /provider`.
+fn login_options_from(auth: &Value, providers: &Value) -> Vec<LoginOption> {
+    let Some(map) = auth.as_object() else {
+        return Vec::new();
+    };
+    let names = provider_names(providers);
+    let mut out = Vec::new();
+    for provider in sorted_providers(map.keys()) {
+        let Some(methods) = map.get(provider).and_then(Value::as_array) else {
+            continue;
+        };
+        let display = names.get(provider).map_or(provider, String::as_str);
+        for (index, method) in methods.iter().enumerate() {
+            let (kind, fallback) = match method_type(method) {
+                Some(METHOD_OAUTH) => (LoginKind::Browser, DEFAULT_OAUTH_LABEL),
+                Some(METHOD_API) => (LoginKind::ApiKey, DEFAULT_API_LABEL),
+                _ => continue,
+            };
+            let label = method
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|l| !l.trim().is_empty())
+                .unwrap_or(fallback);
+            out.push(LoginOption {
+                id: format!("{provider}{OPTION_SEP}{index}"),
+                label: format!("{display}{OPTION_LABEL_SEP}{label}"),
+                kind,
+            });
+        }
+    }
+    out
+}
+
+/// Parses a `<provider>:<index>` option id.
+fn parse_option(option: &str) -> HarnessResult<(String, usize)> {
+    let bad = || HarnessError::Protocol("invalid sign-in option".into());
+    let (provider, index) = option.rsplit_once(OPTION_SEP).ok_or_else(bad)?;
+    let provider = path_segment(provider).map_err(|_| bad())?;
+    let index = index.parse::<usize>().map_err(|_| bad())?;
+    Ok((provider.to_owned(), index))
+}
+
+/// Provider of an option id: `<provider>:<index>` or a bare provider id.
+fn option_provider(option: &str) -> HarnessResult<String> {
+    let provider = match option.rsplit_once(OPTION_SEP) {
+        Some((p, i)) if i.parse::<usize>().is_ok() => p,
+        Some(_) => return Err(HarnessError::Protocol("invalid sign-in option".into())),
+        None => option,
+    };
+    path_segment(provider)
+        .map(str::to_owned)
+        .map_err(|_| HarnessError::Protocol("invalid sign-in option".into()))
+}
+
+/// `"provider/model"` names from `GET /config/providers`.
+fn models_from(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(providers) = v.get("providers").and_then(Value::as_array) else {
+        return out;
+    };
+    for p in providers {
+        let Some(pid) = p
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let ids: Vec<&str> = match p.get("models") {
+            Some(Value::Object(m)) => m
+                .iter()
+                .map(|(k, v)| v.get("id").and_then(Value::as_str).unwrap_or(k))
+                .collect(),
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|m| match m {
+                    Value::String(s) => Some(s.as_str()),
+                    other => other.get("id").and_then(Value::as_str),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        out.extend(
+            ids.into_iter()
+                .filter(|m| !m.is_empty())
+                .map(|m| format!("{pid}/{m}")),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Normalizes an OpenAPI path: every parameter segment (`{id}`,
+/// `{sessionID}`, `:id`) becomes `{}`.
+fn normalize_path(path: &str) -> String {
+    path.trim_end_matches('/')
+        .split('/')
+        .map(|seg| {
+            if seg.starts_with(':') || (seg.starts_with('{') && seg.ends_with('}')) {
+                "{}"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Entries of [`PROTOCOL_PATHS`] absent from an OpenAPI document's `paths`.
+pub fn missing_paths(openapi: &Value) -> Vec<&'static str> {
+    let have: HashSet<String> = openapi
+        .get("paths")
+        .and_then(Value::as_object)
+        .map(|p| p.keys().map(|k| normalize_path(k)).collect())
+        .unwrap_or_default();
+    PROTOCOL_PATHS
+        .iter()
+        .copied()
+        .filter(|p| !have.contains(&normalize_path(p)))
+        .collect()
+}
+
+/// `opencode --version`, or `None` if it is missing or does not answer.
+pub async fn version(path: Option<&Path>) -> Option<String> {
+    let exe = find_executable(BINARY, path)?;
+    let run = Command::new(exe)
+        .arg("--version")
+        .env_clear()
+        .envs(crate::env::child_env())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(VERSION_TIMEOUT, run)
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_owned)
+}
+
 impl OpenCodeDriver {
     /// Connects to a server at `base_url` (e.g. `http://127.0.0.1:4096`)
     /// and starts reading its event stream. `child`, when given, is the
@@ -279,6 +504,7 @@ impl OpenCodeDriver {
             kill: Mutex::new(None),
             monitor: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
+            pending_code: Mutex::new(None),
         });
         let weak = Arc::downgrade(&inner);
         let sse = tokio::spawn(sse_loop(
@@ -378,6 +604,116 @@ impl OpenCodeDriver {
                 account: Some(id.to_owned()),
             },
             None => LoginState::SignedOut,
+        })
+    }
+
+    /// Fetches the server's OpenAPI document (`GET /doc`) and returns the
+    /// protocol paths it lacks.
+    pub async fn doc_check(&self) -> HarnessResult<Vec<&'static str>> {
+        self.check_running()?;
+        let doc = self
+            .json(self.request(reqwest::Method::GET, PATH_DOC), "doc")
+            .await?;
+        Ok(missing_paths(&doc))
+    }
+
+    async fn auth_methods(&self) -> HarnessResult<Value> {
+        self.json(
+            self.request(reqwest::Method::GET, PATH_PROVIDER_AUTH),
+            "provider auth",
+        )
+        .await
+    }
+
+    /// State after `provider` finished signing in.
+    async fn ready_after(&self, provider: &str) -> LoginState {
+        match self
+            .json(
+                self.request(reqwest::Method::GET, PATH_PROVIDER),
+                "provider",
+            )
+            .await
+        {
+            Ok(v) => {
+                let connected: Vec<&str> = v
+                    .get("connected")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let account = if connected.contains(&provider) {
+                    provider
+                } else {
+                    connected.first().copied().unwrap_or(provider)
+                };
+                LoginState::Ready {
+                    account: Some(account.to_owned()),
+                }
+            }
+            Err(_) => LoginState::Ready {
+                account: Some(provider.to_owned()),
+            },
+        }
+    }
+
+    /// `POST /provider/:id/oauth/authorize` and, for the `auto` method, a
+    /// background long-poll on the callback that reports completion.
+    async fn start_oauth(&self, provider: String, index: usize) -> HarnessResult<LoginState> {
+        let provider_seg = path_segment(&provider)?.to_owned();
+        *lock(&self.inner.pending_code) = None;
+        let auth = self
+            .json(
+                self.request(
+                    reqwest::Method::POST,
+                    &format!("{PATH_PROVIDER}/{provider_seg}/{SUFFIX_OAUTH_AUTHORIZE}"),
+                )
+                .json(&json!({ "method": index })),
+                "oauth authorize",
+            )
+            .await?;
+        let url = auth.get("url").and_then(Value::as_str).map(str::to_owned);
+        let instructions = auth
+            .get("instructions")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if auth.get("method").and_then(Value::as_str) == Some(AUTHORIZE_CODE) {
+            tracing::debug!(provider = %provider, "opencode code sign-in started");
+            *lock(&self.inner.pending_code) = Some((provider, index));
+            return Ok(LoginState::SigningIn {
+                url,
+                instructions,
+                needs_code: true,
+            });
+        }
+        tracing::debug!(provider = %provider, "opencode sign-in started");
+
+        let me = self.clone();
+        let task = tokio::spawn(async move {
+            let req = me
+                .inner
+                .http
+                .post(format!(
+                    "{}{PATH_PROVIDER}/{provider_seg}/{SUFFIX_OAUTH_CALLBACK}",
+                    me.inner.base
+                ))
+                .basic_auth(AUTH_USER, Some(&me.inner.password))
+                .json(&json!({ "method": index }));
+            let state = match me.json(req, "oauth callback").await {
+                Ok(Value::Bool(false)) => LoginState::Error {
+                    message: "OpenCode sign-in did not complete".into(),
+                },
+                Ok(_) => me.ready_after(&provider).await,
+                Err(e) => LoginState::Error {
+                    message: format!("OpenCode sign-in failed: {e}"),
+                },
+            };
+            me.emit(HarnessEvent::Login(state));
+        });
+        lock(&self.inner.tasks).push(task);
+        Ok(LoginState::SigningIn {
+            url,
+            instructions,
+            needs_code: false,
         })
     }
 }
@@ -809,83 +1145,117 @@ impl HarnessDriver for OpenCodeDriver {
 
     async fn begin_login(&self) -> HarnessResult<LoginState> {
         self.check_running()?;
-        let methods = self
+        let auth = self.auth_methods().await?;
+        let first = login_options_from(&auth, &Value::Null)
+            .into_iter()
+            .find(|o| o.kind == LoginKind::Browser)
+            .ok_or(HarnessError::Unsupported(NO_OAUTH))?;
+        let (provider, index) = parse_option(&first.id)?;
+        self.start_oauth(provider, index).await
+    }
+
+    async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        self.check_running()?;
+        let auth = self.auth_methods().await?;
+        let providers = self
             .json(
-                self.request(reqwest::Method::GET, PATH_PROVIDER_AUTH),
-                "provider auth",
+                self.request(reqwest::Method::GET, PATH_PROVIDER),
+                "provider",
             )
-            .await?;
-        let Some(map) = methods.as_object() else {
-            return Err(HarnessError::Unsupported(
-                "sign in with `opencode auth login` in a terminal",
-            ));
-        };
-        let oauth_index = |id: &str| -> Option<usize> {
-            map.get(id)?
-                .as_array()?
-                .iter()
-                .position(|m| m.get("type").and_then(Value::as_str) == Some("oauth"))
-        };
-        let mut others: Vec<&String> = map.keys().collect();
-        others.sort();
-        let chosen = LOGIN_PREFERENCE
-            .iter()
-            .copied()
-            .chain(others.into_iter().map(String::as_str))
-            .find_map(|id| oauth_index(id).map(|i| (id.to_owned(), i)));
-        let Some((provider, index)) = chosen else {
-            return Err(HarnessError::Unsupported(
-                "sign in with `opencode auth login` in a terminal",
-            ));
-        };
-        let provider_seg = path_segment(&provider)?.to_owned();
-        let auth = self
+            .await
+            .unwrap_or(Value::Null);
+        Ok(login_options_from(&auth, &providers))
+    }
+
+    async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
+        self.check_running()?;
+        let (provider, index) = parse_option(option)?;
+        let auth = self.auth_methods().await?;
+        let is_oauth = auth
+            .get(&provider)
+            .and_then(Value::as_array)
+            .and_then(|m| m.get(index))
+            .and_then(method_type)
+            == Some(METHOD_OAUTH);
+        if !is_oauth {
+            return Err(HarnessError::Unsupported("unknown browser sign-in option"));
+        }
+        self.start_oauth(provider, index).await
+    }
+
+    async fn submit_login_code(&self, code: &str) -> HarnessResult<()> {
+        self.check_running()?;
+        let (provider, index) = lock(&self.inner.pending_code)
+            .clone()
+            .ok_or_else(|| HarnessError::Protocol("no sign-in is waiting for a code".into()))?;
+        let code = code.trim();
+        if code.is_empty() {
+            return Err(HarnessError::Protocol("empty sign-in code".into()));
+        }
+        let seg = path_segment(&provider)?;
+        let res = self
             .json(
                 self.request(
                     reqwest::Method::POST,
-                    &format!("{PATH_PROVIDER}/{provider_seg}/{SUFFIX_OAUTH_AUTHORIZE}"),
+                    &format!("{PATH_PROVIDER}/{seg}/{SUFFIX_OAUTH_CALLBACK}"),
                 )
-                .json(&json!({ "method": index })),
-                "oauth authorize",
+                .json(&json!({ "method": index, "code": code })),
+                "oauth callback",
             )
-            .await?;
-        let url = auth.get("url").and_then(Value::as_str).map(str::to_owned);
-        let instructions = auth
-            .get("instructions")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        tracing::debug!(provider = %provider, "opencode sign-in started");
-
-        let me = self.clone();
-        let task = tokio::spawn(async move {
-            let req = me
-                .inner
-                .http
-                .post(format!(
-                    "{}{PATH_PROVIDER}/{provider_seg}/{SUFFIX_OAUTH_CALLBACK}",
-                    me.inner.base
-                ))
-                .basic_auth(AUTH_USER, Some(&me.inner.password))
-                .json(&json!({ "method": index }));
-            let state = match me.json(req, "oauth callback").await {
-                Ok(Value::Bool(false)) => LoginState::Error {
+            .await;
+        *lock(&self.inner.pending_code) = None;
+        let (state, result) = match res {
+            Ok(Value::Bool(false)) => (
+                LoginState::Error {
                     message: "OpenCode sign-in did not complete".into(),
                 },
-                Ok(_) => match me.read_login().await {
-                    Ok(s @ LoginState::Ready { .. }) => s,
-                    _ => LoginState::Ready {
-                        account: Some(provider),
-                    },
-                },
-                Err(e) => LoginState::Error {
+                Err(HarnessError::Harness(
+                    "sign-in code was not accepted".into(),
+                )),
+            ),
+            Ok(_) => (self.ready_after(&provider).await, Ok(())),
+            Err(e) => (
+                LoginState::Error {
                     message: format!("OpenCode sign-in failed: {e}"),
                 },
-            };
-            me.emit(HarnessEvent::Login(state));
-        });
-        lock(&self.inner.tasks).push(task);
-        Ok(LoginState::SigningIn { url, instructions })
+                Err(e),
+            ),
+        };
+        tracing::debug!(provider = %provider, ok = result.is_ok(), "opencode code sign-in finished");
+        self.emit(HarnessEvent::Login(state));
+        result
+    }
+
+    async fn login_api_key(&self, option: &str, key: &str) -> HarnessResult<()> {
+        self.check_running()?;
+        let provider = option_provider(option)?;
+        if key.trim().is_empty() {
+            return Err(HarnessError::Protocol("empty API key".into()));
+        }
+        self.call(
+            self.request(reqwest::Method::PUT, &format!("{PATH_AUTH}/{provider}"))
+                .json(&json!({ "type": METHOD_API, "key": key.trim() })),
+            "set API key",
+        )
+        .await?;
+        tracing::debug!(provider = %provider, "opencode API key stored");
+        let state = self.ready_after(&provider).await;
+        self.emit(HarnessEvent::Login(state));
+        Ok(())
+    }
+
+    async fn models(&self) -> HarnessResult<Vec<String>> {
+        if self.check_running().is_err() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .json(
+                self.request(reqwest::Method::GET, PATH_CONFIG_PROVIDERS),
+                "config providers",
+            )
+            .await
+            .map(|v| models_from(&v))
+            .unwrap_or_default())
     }
 
     async fn logout(&self) -> HarnessResult<()> {
@@ -1086,6 +1456,45 @@ impl OpenCodeLauncher {
     pub fn new(path: Option<PathBuf>) -> Self {
         Self { path }
     }
+
+    /// Start `opencode serve` and return the concrete driver (used by
+    /// `launch` and by diagnostics that need OpenCode-specific checks).
+    pub async fn spawn(&self, ctx: &LaunchContext) -> HarnessResult<OpenCodeDriver> {
+        let exe = find_executable(BINARY, self.path.as_deref())
+            .ok_or(HarnessError::NotInstalled("OpenCode"))?;
+        let port = free_port()?;
+        let password = random_password()?;
+        let config = config_content(ctx).to_string();
+        let mut child = Command::new(exe)
+            .args(["serve", "--hostname", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .env_clear()
+            .envs(crate::env::child_env())
+            .env(ENV_PASSWORD, &password)
+            .env(ENV_CONFIG, config)
+            .current_dir(&ctx.workspace)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| HarnessError::Harness(format!("could not start OpenCode: {e}")))?;
+        if let Some(out) = child.stdout.take() {
+            drain(out, "stdout");
+        }
+        if let Some(err) = child.stderr.take() {
+            drain(err, "stderr");
+        }
+        let base = format!("http://127.0.0.1:{port}");
+        if !wait_healthy(&mut child, &base, &password).await {
+            let _ = child.kill().await;
+            return Err(HarnessError::Harness(
+                "OpenCode server did not start".into(),
+            ));
+        }
+        tracing::debug!(port, "opencode server ready");
+        OpenCodeDriver::connect(base, password, Some(child))
+    }
 }
 
 /// The `OPENCODE_CONFIG_CONTENT` for a launch.
@@ -1193,41 +1602,7 @@ impl HarnessLauncher for OpenCodeLauncher {
     }
 
     async fn launch(&self, ctx: &LaunchContext) -> HarnessResult<Arc<dyn HarnessDriver>> {
-        let exe = find_executable(BINARY, self.path.as_deref())
-            .ok_or(HarnessError::NotInstalled("OpenCode"))?;
-        let port = free_port()?;
-        let password = random_password()?;
-        let config = config_content(ctx).to_string();
-        let mut child = Command::new(exe)
-            .args(["serve", "--hostname", "127.0.0.1", "--port"])
-            .arg(port.to_string())
-            .env_clear()
-            .envs(crate::env::child_env())
-            .env(ENV_PASSWORD, &password)
-            .env(ENV_CONFIG, config)
-            .current_dir(&ctx.workspace)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| HarnessError::Harness(format!("could not start OpenCode: {e}")))?;
-        if let Some(out) = child.stdout.take() {
-            drain(out, "stdout");
-        }
-        if let Some(err) = child.stderr.take() {
-            drain(err, "stderr");
-        }
-        let base = format!("http://127.0.0.1:{port}");
-        if !wait_healthy(&mut child, &base, &password).await {
-            let _ = child.kill().await;
-            return Err(HarnessError::Harness(
-                "OpenCode server did not start".into(),
-            ));
-        }
-        tracing::debug!(port, "opencode server ready");
-        let driver = OpenCodeDriver::connect(base, password, Some(child))?;
-        Ok(Arc::new(driver))
+        Ok(Arc::new(self.spawn(ctx).await?))
     }
 }
 

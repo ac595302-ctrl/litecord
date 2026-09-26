@@ -210,6 +210,124 @@ pub fn prune_archived(tx: &WriteTx<'_>, keep: u32) -> StoreResult<usize> {
     )?)
 }
 
+// ---- automations ----
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AutomationRecord {
+    pub id: i64,
+    pub name: String,
+    pub prompt: String,
+    /// JSON trigger, interpreted by the app.
+    pub trigger: String,
+    pub output: String,
+    pub enabled: bool,
+    pub session_id: Option<i64>,
+    pub last_run_at: Option<Timestamp>,
+    pub last_checked_revision: u64,
+    pub runs: u32,
+    pub last_error: Option<String>,
+    pub created_at: Timestamp,
+}
+
+const AUTOMATION_COLUMNS: &str = "id, name, prompt, trigger, output, enabled, session_id, \
+     last_run_at, last_checked_revision, runs, last_error, created_at";
+
+fn row_to_automation(r: &Row<'_>) -> rusqlite::Result<AutomationRecord> {
+    Ok(AutomationRecord {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        prompt: r.get(2)?,
+        trigger: r.get(3)?,
+        output: r.get(4)?,
+        enabled: r.get::<_, i64>(5)? != 0,
+        session_id: r.get(6)?,
+        last_run_at: r.get::<_, Option<i64>>(7)?.map(Timestamp::from_millis),
+        last_checked_revision: r.get::<_, i64>(8)?.max(0) as u64,
+        runs: r.get::<_, i64>(9)?.max(0) as u32,
+        last_error: r.get(10)?,
+        created_at: Timestamp::from_millis(r.get(11)?),
+    })
+}
+
+/// Creates an automation; event triggers start checking from `revision`.
+pub fn create_automation(
+    tx: &WriteTx<'_>,
+    name: &str,
+    prompt: &str,
+    trigger: &str,
+    output: &str,
+    revision: u64,
+) -> StoreResult<i64> {
+    tx.execute(
+        "INSERT INTO omni_automations (name, prompt, trigger, output, last_checked_revision, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        params![
+            truncate(name, 80),
+            truncate(prompt, 4_000),
+            trigger,
+            output,
+            revision as i64,
+            tx.now().as_millis()
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+pub fn automations(conn: &Connection) -> StoreResult<Vec<AutomationRecord>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {AUTOMATION_COLUMNS} FROM omni_automations ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], row_to_automation)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+pub fn automation(conn: &Connection, id: i64) -> StoreResult<Option<AutomationRecord>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {AUTOMATION_COLUMNS} FROM omni_automations WHERE id = ?"),
+            params![id],
+            row_to_automation,
+        )
+        .optional()?)
+}
+
+pub fn set_automation_enabled(tx: &WriteTx<'_>, id: i64, enabled: bool) -> StoreResult<bool> {
+    Ok(tx.execute(
+        "UPDATE omni_automations SET enabled = ? WHERE id = ?",
+        params![enabled, id],
+    )? > 0)
+}
+
+pub fn delete_automation(tx: &WriteTx<'_>, id: i64) -> StoreResult<bool> {
+    Ok(tx.execute("DELETE FROM omni_automations WHERE id = ?", params![id])? > 0)
+}
+
+pub fn set_automation_session(tx: &WriteTx<'_>, id: i64, session_id: i64) -> StoreResult<()> {
+    tx.execute(
+        "UPDATE omni_automations SET session_id = ? WHERE id = ?",
+        params![session_id, id],
+    )?;
+    Ok(())
+}
+
+/// Advance the event-trigger cursor (only ever forward).
+pub fn set_automation_checked(tx: &WriteTx<'_>, id: i64, revision: u64) -> StoreResult<()> {
+    tx.execute(
+        "UPDATE omni_automations SET last_checked_revision = MAX(last_checked_revision, ?) WHERE id = ?",
+        params![revision as i64, id],
+    )?;
+    Ok(())
+}
+
+/// Record a run (successful start or error).
+pub fn record_automation_run(tx: &WriteTx<'_>, id: i64, error: Option<&str>) -> StoreResult<()> {
+    tx.execute(
+        "UPDATE omni_automations SET last_run_at = ?, runs = runs + 1, last_error = ? WHERE id = ?",
+        params![tx.now().as_millis(), error, id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

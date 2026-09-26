@@ -91,6 +91,47 @@ enum Command {
     },
     /// Print database status.
     Status,
+    /// Omni (your Codex/OpenCode harness): sign-in, models, automations.
+    Omni {
+        #[command(subcommand)]
+        cmd: OmniCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OmniCmd {
+    /// Harness, sign-in state, model and automations.
+    Status,
+    /// Choose the harness: `codex` or `opencode`.
+    Harness {
+        kind: String,
+    },
+    /// Sign in. Without `--method`, lists the methods the harness offers.
+    Login {
+        /// A method id from the list (browser or API key).
+        #[arg(long)]
+        method: Option<String>,
+        /// Read an API key from stdin (pipe it; it is never echoed or stored
+        /// by Litecord).
+        #[arg(long)]
+        api_key_stdin: bool,
+    },
+    Logout,
+    /// List models; `--set <model>` or `--default` to choose.
+    Models {
+        #[arg(long)]
+        set: Option<String>,
+        #[arg(long)]
+        default: bool,
+    },
+    /// List automations.
+    Automations,
+    /// Run an automation now.
+    Run {
+        id: i64,
+    },
+    /// Check installed harnesses against what Litecord expects.
+    Doctor,
 }
 
 fn load_config(cli: &Cli) -> litecord_core::Result<LitecordConfig> {
@@ -170,6 +211,7 @@ async fn main() -> std::process::ExitCode {
         Command::Demo { in_memory, ask } => demo(cfg, in_memory, &ask).await,
         Command::Mcp { harness } => mcp(cfg, &harness).await,
         Command::Status => status(&cfg),
+        Command::Omni { cmd } => omni_cli(cfg, cmd).await,
     };
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -282,6 +324,252 @@ async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core:
     Ok(())
 }
 
+async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()> {
+    use litecord_app::harness::{HarnessKind, LoginKind, LoginState};
+    use litecord_core::error::{Error, ErrorKind};
+    let app = with_omni(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)
+        .start()
+        .await?;
+    let omni = app.omni().clone();
+    let result = async {
+        match cmd {
+            OmniCmd::Status => {
+                let v = omni.view(None)?;
+                print_json(&serde_json::json!({
+                    "status": v.status,
+                    "heartbeats": v.heartbeat_enabled,
+                    "automations": v.automations,
+                }));
+            }
+            OmniCmd::Harness { kind } => {
+                let k = HarnessKind::parse(&kind)
+                    .ok_or_else(|| Error::validation("harness must be codex or opencode"))?;
+                omni.select(k).await?;
+                println!("Omni will use {}.", k.label());
+            }
+            OmniCmd::Login {
+                method,
+                api_key_stdin,
+            } => {
+                let options = omni.login_options().await?;
+                let Some(method) = method else {
+                    for o in &options {
+                        let kind = match o.kind {
+                            LoginKind::Browser => "browser",
+                            LoginKind::ApiKey => "api key",
+                        };
+                        println!("{:<24} {} ({kind})", o.id, o.label);
+                    }
+                    println!("\nSign in with: litecord omni login --method <id>");
+                    return Ok(());
+                };
+                let option = options
+                    .iter()
+                    .find(|o| o.id == method)
+                    .ok_or_else(|| Error::validation("unknown sign-in method"))?;
+                if option.kind == LoginKind::ApiKey || api_key_stdin {
+                    let mut key = String::new();
+                    std::io::stdin()
+                        .read_line(&mut key)
+                        .map_err(|e| Error::internal(format!("stdin: {e}")))?;
+                    omni.sign_in_api_key(&option.id, &litecord_core::secrets::Secret::new(key))
+                        .await?;
+                } else {
+                    match omni.sign_in_with(&option.id).await? {
+                        LoginState::SigningIn {
+                            url,
+                            instructions,
+                            needs_code,
+                        } => {
+                            if let Some(url) = url {
+                                println!("Open this page to sign in:\n  {url}");
+                            }
+                            if let Some(i) = instructions {
+                                println!("{i}");
+                            }
+                            if needs_code {
+                                println!("Paste the code shown in the browser, then press Enter:");
+                                let mut code = String::new();
+                                std::io::stdin()
+                                    .read_line(&mut code)
+                                    .map_err(|e| Error::internal(format!("stdin: {e}")))?;
+                                omni.submit_login_code(&code).await?;
+                            }
+                        }
+                        other => print_json(&other),
+                    }
+                }
+                // Wait (bounded) for the harness to confirm.
+                for _ in 0..600 {
+                    if omni.status().login.is_ready() {
+                        println!("Signed in.");
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                return Err(Error::new(
+                    ErrorKind::Authentication,
+                    "sign-in did not complete",
+                ));
+            }
+            OmniCmd::Logout => {
+                omni.sign_out().await?;
+                println!("Signed out.");
+            }
+            OmniCmd::Models { set, default } => {
+                if default {
+                    omni.set_model(None)?;
+                } else if let Some(m) = set {
+                    omni.set_model(Some(&m))?;
+                }
+                let models = omni.models().await?;
+                let current = omni.model();
+                for m in &models {
+                    let mark = if Some(m) == current.as_ref() {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{mark} {m}");
+                }
+                if models.is_empty() {
+                    println!("The harness did not list models.");
+                }
+                println!(
+                    "current: {}",
+                    current.as_deref().unwrap_or("harness default")
+                );
+            }
+            OmniCmd::Automations => print_json(&omni.automations()?),
+            OmniCmd::Run { id } => {
+                print_json(&omni.run_automation(id).await?);
+                // Let the turn finish so results are stored before exit.
+                for _ in 0..240 {
+                    if omni.view(None)?.sessions.iter().all(|s| !s.running) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            OmniCmd::Doctor => doctor(&cfg, &omni).await?,
+        }
+        Ok(())
+    }
+    .await;
+    app.shutdown().await;
+    result
+}
+
+/// Checks what Omni depends on and prints a plain report.
+async fn doctor(
+    cfg: &LitecordConfig,
+    omni: &litecord_app::OmniService,
+) -> litecord_core::Result<()> {
+    let ok = |b: bool| if b { "ok  " } else { "FAIL" };
+    let status = omni.status();
+    println!(
+        "{} Litecord database on disk: {}",
+        ok(status.unavailable.is_none()),
+        cfg.database_path().display()
+    );
+    let secret_blocked =
+        !litecord_harness::env::allowed(std::ffi::OsStr::new("LITECORD_BOT_TOKEN"));
+    println!(
+        "{} Litecord secrets are withheld from the harness",
+        ok(secret_blocked)
+    );
+    for h in &status.harnesses {
+        println!(
+            "\n{}: {}",
+            h.label,
+            if h.installed {
+                "installed"
+            } else {
+                "not installed"
+            }
+        );
+        if !h.installed {
+            continue;
+        }
+        match h.kind {
+            #[cfg(feature = "omni-codex")]
+            litecord_app::harness::HarnessKind::Codex => {
+                let path = cfg.omni.codex_path.as_deref();
+                println!(
+                    "  version: {}",
+                    litecord_harness::codex::version(path)
+                        .await
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                match litecord_harness::codex::schema_check(path).await {
+                    Ok(missing) if missing.is_empty() => {
+                        println!("  ok   protocol: every method Litecord uses is in this version's schema")
+                    }
+                    Ok(missing) => println!(
+                        "  WARN protocol: not in this version's schema: {}",
+                        missing.join(", ")
+                    ),
+                    Err(e) => println!("  WARN protocol: could not generate the schema ({e})"),
+                }
+            }
+            #[cfg(feature = "omni-opencode")]
+            litecord_app::harness::HarnessKind::OpenCode => {
+                let path = cfg.omni.opencode_path.as_deref();
+                println!(
+                    "  version: {}",
+                    litecord_harness::opencode::version(path)
+                        .await
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                let dir =
+                    std::env::temp_dir().join(format!("litecord-doctor-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                let ctx = litecord_harness::LaunchContext {
+                    workspace: dir.clone(),
+                    protected_dir: cfg.data_dir.clone(),
+                    mcp: litecord_harness::McpLaunch {
+                        command: std::env::current_exe().unwrap_or_default(),
+                        args: vec!["mcp".into()],
+                    },
+                };
+                let launcher =
+                    litecord_harness::opencode::OpenCodeLauncher::new(path.map(Into::into));
+                match launcher.spawn(&ctx).await {
+                    Ok(driver) => {
+                        match driver.doc_check().await {
+                            Ok(missing) if missing.is_empty() => {
+                                println!("  ok   API: every endpoint Litecord uses is in this version's OpenAPI")
+                            }
+                            Ok(missing) => println!(
+                                "  WARN API: not in this version's OpenAPI: {}",
+                                missing.join(", ")
+                            ),
+                            Err(e) => println!("  WARN API: could not read /doc ({e})"),
+                        }
+                        use litecord_harness::HarnessDriver as _;
+                        driver.shutdown().await;
+                    }
+                    Err(e) => println!("  FAIL could not start `opencode serve`: {e}"),
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            _ => {}
+        }
+    }
+    if status.selected.is_some() {
+        match omni.refresh_login().await {
+            Ok(l) => println!(
+                "\nsign-in: {}",
+                serde_json::to_string(&l).unwrap_or_default()
+            ),
+            Err(e) => println!("\nsign-in: could not start the harness ({e})"),
+        }
+    }
+    Ok(())
+}
+
 async fn mcp(cfg: LitecordConfig, harness: &str) -> litecord_core::Result<()> {
     let db = Database::open(cfg.database_path(), &cfg.database)?;
     let gateway = standalone_gateway(db, &cfg)?;
@@ -311,7 +599,6 @@ fn status(cfg: &LitecordConfig) -> litecord_core::Result<()> {
 /// Offer Omni harnesses: Codex and OpenCode when compiled in (used only if
 /// installed), plus the clearly labelled demo harness on the demo backend.
 /// The harness runs this executable as its MCP server.
-#[cfg(feature = "gui")]
 fn with_omni(
     mut builder: litecord_app::AppBuilder,
     cfg: &LitecordConfig,

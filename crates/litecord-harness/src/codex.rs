@@ -7,7 +7,7 @@
 //! Parsing is tolerant: unknown notifications and odd payloads are ignored.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -38,6 +38,7 @@ const M_THREAD_RESUME: &str = "thread/resume";
 const M_TURN_START: &str = "turn/start";
 const M_TURN_INTERRUPT: &str = "turn/interrupt";
 const M_COMPACT: &str = "thread/compact/start";
+const M_MODEL_LIST: &str = "model/list";
 
 // Server -> client notifications.
 const N_LOGIN_COMPLETED: &str = "account/login/completed";
@@ -52,6 +53,33 @@ const N_COMPACTED: &str = "thread/compacted";
 // Server -> client requests.
 const R_COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
 const R_FILE_APPROVAL: &str = "item/fileChange/requestApproval";
+
+/// Every JSON-RPC method and notification name this driver sends or handles
+/// (client requests/notifications, server notifications, server requests).
+/// Used by the doctor command and [`schema_check`].
+pub const PROTOCOL_METHODS: &[&str] = &[
+    M_INITIALIZE,
+    M_INITIALIZED,
+    M_ACCOUNT_READ,
+    M_LOGIN_START,
+    M_LOGOUT,
+    M_THREAD_START,
+    M_THREAD_RESUME,
+    M_TURN_START,
+    M_TURN_INTERRUPT,
+    M_COMPACT,
+    M_MODEL_LIST,
+    N_LOGIN_COMPLETED,
+    N_ACCOUNT_UPDATED,
+    N_TURN_STARTED,
+    N_TURN_COMPLETED,
+    N_AGENT_DELTA,
+    N_ITEM_COMPLETED,
+    N_TOKEN_USAGE,
+    N_COMPACTED,
+    R_COMMAND_APPROVAL,
+    R_FILE_APPROVAL,
+];
 
 // Fields.
 const F_CLIENT_INFO: &str = "clientInfo";
@@ -89,11 +117,15 @@ const F_USAGE_LAST: &str = "last";
 const F_USAGE_TOTAL: &str = "total";
 const F_INPUT_TOKENS: &str = "inputTokens";
 const F_OUTPUT_TOKENS: &str = "outputTokens";
+const F_API_KEY: &str = "apiKey";
+const F_DATA: &str = "data";
+const F_MODELS: &str = "models";
 
 // Values.
 const ACCOUNT_CHATGPT: &str = "chatgpt";
 const ACCOUNT_API_KEY: &str = "apiKey";
 const LOGIN_TYPE_CHATGPT: &str = "chatgpt";
+const LOGIN_TYPE_API_KEY: &str = "apiKey";
 const TURN_FAILED: &str = "failed";
 const INPUT_TEXT: &str = "text";
 const DECISION_ACCEPT: &str = "accept";
@@ -117,6 +149,19 @@ const APPROVAL_UNTRUSTED: &str = "untrusted";
 const APPROVAL_ON_REQUEST: &str = "on-request";
 const SANDBOX_READ_ONLY: &str = "read-only";
 const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
+
+// Login options offered to the app.
+const OPTION_CHATGPT: &str = "chatgpt";
+const OPTION_CHATGPT_LABEL: &str = "ChatGPT account";
+const OPTION_API_KEY: &str = "api_key";
+const OPTION_API_KEY_LABEL: &str = "OpenAI API key";
+
+// CLI (doctor).
+const ARG_VERSION: &str = "--version";
+const SUBCOMMAND_SCHEMA: &str = "generate-json-schema";
+const ARG_OUT: &str = "--out";
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHEMA_TIMEOUT: Duration = Duration::from_secs(60);
 
 // JSON-RPC.
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
@@ -684,6 +729,43 @@ fn transcript_item(item: &Value) -> Option<TranscriptItem> {
     Some(TranscriptItem { kind, text })
 }
 
+/// Model names from a `model/list` result. Accepts `{"data":[..]}`,
+/// `{"models":[..]}` or a bare array, whose entries are strings or objects
+/// with `id` / `model`.
+fn parse_models(result: &Value) -> Vec<String> {
+    let list = result
+        .get(F_DATA)
+        .and_then(Value::as_array)
+        .or_else(|| result.get(F_MODELS).and_then(Value::as_array))
+        .or_else(|| result.as_array());
+    let Some(list) = list else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in list {
+        let name = match entry {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(_) => str_field(entry, F_ID).or_else(|| str_field(entry, F_MODEL)),
+            _ => None,
+        };
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// Removes every occurrence of `secret` from `text`.
+fn redact(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(secret, "[redacted]")
+    }
+}
+
 // ---- Trait impls -----------------------------------------------------------
 
 #[async_trait]
@@ -711,7 +793,61 @@ impl HarnessDriver for CodexDriver {
         Ok(LoginState::SigningIn {
             url: Some(url),
             instructions: None,
+            needs_code: false,
         })
+    }
+
+    async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        Ok(vec![
+            LoginOption {
+                id: OPTION_CHATGPT.into(),
+                label: OPTION_CHATGPT_LABEL.into(),
+                kind: LoginKind::Browser,
+            },
+            LoginOption {
+                id: OPTION_API_KEY.into(),
+                label: OPTION_API_KEY_LABEL.into(),
+                kind: LoginKind::ApiKey,
+            },
+        ])
+    }
+
+    async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
+        match option {
+            OPTION_CHATGPT => self.begin_login().await,
+            _ => Err(HarnessError::Unsupported("this sign-in method")),
+        }
+    }
+
+    async fn login_api_key(&self, _option: &str, key: &str) -> HarnessResult<()> {
+        // The key only ever lives in this request body; it is never logged,
+        // stored, or echoed back in errors.
+        let params = json!({ F_TYPE: LOGIN_TYPE_API_KEY, F_API_KEY: key });
+        match self.inner.peer.request(M_LOGIN_START, params).await? {
+            Ok(_) => {}
+            Err(e) => return Err(HarnessError::Harness(redact(&e.message, key))),
+        }
+        let state = self
+            .inner
+            .read_login()
+            .await
+            .unwrap_or(LoginState::Ready { account: None });
+        self.inner.emit(HarnessEvent::Login(state));
+        Ok(())
+    }
+
+    async fn models(&self) -> HarnessResult<Vec<String>> {
+        match self.inner.peer.request(M_MODEL_LIST, json!({})).await {
+            Ok(Ok(result)) => Ok(parse_models(&result)),
+            Ok(Err(e)) => {
+                tracing::debug!(code = e.code, "codex: model/list failed: {}", e.message);
+                Ok(Vec::new())
+            }
+            Err(e) => {
+                tracing::debug!("codex: model/list failed: {e}");
+                Ok(Vec::new())
+            }
+        }
     }
 
     async fn logout(&self) -> HarnessResult<()> {
@@ -907,6 +1043,105 @@ impl HarnessLauncher for CodexLauncher {
     }
 }
 
+// ---- Doctor ----------------------------------------------------------------
+
+/// `codex --version`, trimmed. `None` when not installed or it fails.
+pub async fn version(path: Option<&Path>) -> Option<String> {
+    let exe = find_executable(BINARY, path)?;
+    let run = Command::new(exe)
+        .arg(ARG_VERSION)
+        .env_clear()
+        .envs(crate::env::child_env())
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(CLI_TIMEOUT, run).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Entries of [`PROTOCOL_METHODS`] that do not appear (as quoted strings)
+/// anywhere in `schema_text`.
+fn missing_methods(schema_text: &str) -> Vec<&'static str> {
+    PROTOCOL_METHODS
+        .iter()
+        .copied()
+        .filter(|m| !schema_text.contains(&format!("\"{m}\"")))
+        .collect()
+}
+
+fn unique_temp_dir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir().join(format!(
+        "litecord-codex-schema-{}-{nanos}-{n}",
+        std::process::id()
+    ))
+}
+
+/// Concatenates every readable text file under `dir` (recursively).
+fn read_all_text(dir: &Path) -> String {
+    let mut text = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(s) = std::fs::read_to_string(&p) {
+                text.push_str(&s);
+                text.push('\n');
+            }
+        }
+    }
+    text
+}
+
+/// Generates Codex's JSON schema and returns the [`PROTOCOL_METHODS`] it
+/// does not mention.
+pub async fn schema_check(path: Option<&Path>) -> Result<Vec<&'static str>, HarnessError> {
+    let exe = find_executable(BINARY, path).ok_or(HarnessError::NotInstalled("Codex"))?;
+    let dir = unique_temp_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| HarnessError::Harness(format!("could not create temp dir: {e}")))?;
+    let run = Command::new(exe)
+        .args([SUBCOMMAND, SUBCOMMAND_SCHEMA, ARG_OUT])
+        .arg(&dir)
+        .env_clear()
+        .envs(crate::env::child_env())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    let ok = matches!(
+        tokio::time::timeout(SCHEMA_TIMEOUT, run).await,
+        Ok(Ok(status)) if status.success()
+    );
+    let result = if ok {
+        let d = dir.clone();
+        match tokio::task::spawn_blocking(move || read_all_text(&d)).await {
+            Ok(text) => Ok(missing_methods(&text)),
+            Err(_) => Err(HarnessError::Unsupported("schema generation")),
+        }
+    } else {
+        Err(HarnessError::Unsupported("schema generation"))
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +1153,43 @@ mod tests {
             toml_array(&["mcp".into(), "--x".into()]),
             r#"["mcp", "--x"]"#
         );
+    }
+
+    #[test]
+    fn model_list_shapes() {
+        assert_eq!(
+            parse_models(&json!({"data":[{"id":"gpt-5"},{"model":"o3"},{"x":1}]})),
+            ["gpt-5", "o3"]
+        );
+        assert_eq!(
+            parse_models(&json!({"models":["a", {"id":"b"}, 3]})),
+            ["a", "b"]
+        );
+        assert_eq!(parse_models(&json!(["a", "a", "c"])), ["a", "c"]);
+        assert!(parse_models(&json!({"weird": true})).is_empty());
+        assert!(parse_models(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn schema_missing_methods() {
+        let all: String = PROTOCOL_METHODS
+            .iter()
+            .map(|m| format!("{{\"const\": \"{m}\"}}\n"))
+            .collect();
+        assert!(missing_methods(&all).is_empty());
+        let partial = all.replace("\"model/list\"", "\"model/listing\"");
+        assert_eq!(missing_methods(&partial), ["model/list"]);
+        // Unquoted mentions do not count.
+        assert_eq!(missing_methods("initialize").len(), PROTOCOL_METHODS.len());
+    }
+
+    #[test]
+    fn redaction() {
+        assert_eq!(
+            redact("bad key sk-1 here", "sk-1"),
+            "bad key [redacted] here"
+        );
+        assert_eq!(redact("x", ""), "x");
     }
 
     #[test]

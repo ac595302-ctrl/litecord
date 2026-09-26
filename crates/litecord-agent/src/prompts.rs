@@ -52,6 +52,64 @@ impl HeartbeatPrompt<'_> {
     }
 }
 
+const AUTOMATION: &str = include_str!("../prompts/automation.md");
+
+/// The exact reply that marks an automation run with nothing to report.
+pub const AUTOMATION_OK: &str = "AUTOMATION_OK";
+
+/// Where an automation's result goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomationOutput {
+    Inbox,
+    Tasks,
+    Drafts,
+}
+
+/// Inputs for one automation run.
+#[derive(Debug, Clone)]
+pub struct AutomationPrompt<'a> {
+    pub name: &'a str,
+    /// Human description of what fired, e.g. "daily at 08:00 UTC".
+    pub trigger: &'a str,
+    pub instructions: &'a str,
+    /// Content-free context (ids, counts); may be empty.
+    pub context: &'a str,
+    pub output: AutomationOutput,
+}
+
+impl AutomationPrompt<'_> {
+    pub fn render(&self) -> String {
+        let output_rule = match self.output {
+            AutomationOutput::Inbox => "Finish with at most 5 short bullets for the user's inbox.",
+            AutomationOutput::Tasks => {
+                "Record what needs doing with `create_task` (the user confirms each one), \
+                 then list what you created in at most 3 bullets."
+            }
+            AutomationOutput::Drafts => {
+                "Save any replies with `draft_message` only (the user sends them), \
+                 then list the drafts in at most 3 bullets."
+            }
+        };
+        let context = if self.context.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Context: {}\n", self.context.trim())
+        };
+        AUTOMATION
+            .replace("{{name}}", self.name)
+            .replace("{{trigger}}", self.trigger)
+            .replace("{{instructions}}", self.instructions.trim())
+            .replace("{{context}}\n", &context)
+            .replace("{{output_rule}}", output_rule)
+    }
+}
+
+/// Whether a scheduled reply means "nothing to report".
+pub fn is_quiet_reply(reply: &str) -> bool {
+    let r = reply.trim();
+    r == HEARTBEAT_OK || r == AUTOMATION_OK
+}
+
 /// Whether a check-in reply means "nothing to report".
 pub fn is_heartbeat_ok(reply: &str) -> bool {
     reply.trim() == HEARTBEAT_OK
@@ -71,6 +129,7 @@ mod tests {
         assert!(tokens(OMNI) < 900, "omni.md is {} tokens", tokens(OMNI));
         assert!(tokens(MCP_INSTRUCTIONS) < 200);
         assert!(tokens(HEARTBEAT) < 200);
+        assert!(tokens(AUTOMATION) < 200);
     }
 
     #[test]
@@ -86,6 +145,38 @@ mod tests {
                 assert!(names.contains(&word), "omni.md names unknown tool `{word}`");
             }
         }
+    }
+
+    #[test]
+    fn automation_renders_every_placeholder() {
+        for output in [
+            AutomationOutput::Inbox,
+            AutomationOutput::Tasks,
+            AutomationOutput::Drafts,
+        ] {
+            let p = AutomationPrompt {
+                name: "Morning brief",
+                trigger: "daily at 08:00 UTC",
+                instructions: "What did I miss overnight?",
+                context: "",
+                output,
+            }
+            .render();
+            assert!(!p.contains("{{"), "{p}");
+            assert!(p.contains("Never send"));
+            assert!(!p.contains("Context:"));
+        }
+        let p = AutomationPrompt {
+            name: "Reply radar",
+            trigger: "new DM",
+            instructions: "Draft replies",
+            context: "messages 12, 15",
+            output: AutomationOutput::Drafts,
+        }
+        .render();
+        assert!(p.contains("Context: messages 12, 15"));
+        assert!(p.contains("draft_message"));
+        assert!(is_quiet_reply(" AUTOMATION_OK\n") && is_quiet_reply("HEARTBEAT_OK"));
     }
 
     #[test]

@@ -230,7 +230,7 @@ impl Workspace {
                 }
                 if checkins && !snapshot.omni.checkins.is_empty() {
                     ui.horizontal(|ui| {
-                        theme::section_label(ui, "From Omni's check-ins");
+                        theme::section_label(ui, "From Omni");
                         if ui.small_button("Dismiss all").clicked() {
                             self.send(Command::Omni(crate::bridge::OmniCommand::DismissCheckins));
                         }
@@ -243,6 +243,7 @@ impl Workspace {
                             .inner_margin(10)
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
+                                ui.label(egui::RichText::new(&c.source).size(11.0).color(theme::OMNI));
                                 ui.label(egui::RichText::new(self.display(&c.text)).color(theme::TEXT));
                                 ui.horizontal(|ui| {
                                     if ui.small_button("Continue in Omni").clicked() {

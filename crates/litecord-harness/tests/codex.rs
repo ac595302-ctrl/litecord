@@ -109,7 +109,8 @@ async fn login_flow() {
         state.unwrap(),
         LoginState::SigningIn {
             url: Some("https://auth.example/x".into()),
-            instructions: None
+            instructions: None,
+            needs_code: false,
         }
     );
 
@@ -304,4 +305,101 @@ async fn failed_turn_and_pending_request_on_eof() {
         drop(srv);
     });
     assert_eq!(r, Err(HarnessError::NotRunning));
+}
+
+#[tokio::test]
+async fn login_options_and_unknown_option() {
+    let (driver, _srv) = setup().await;
+    let opts = driver.login_options().await.unwrap();
+    assert_eq!(
+        opts,
+        [
+            LoginOption {
+                id: "chatgpt".into(),
+                label: "ChatGPT account".into(),
+                kind: LoginKind::Browser,
+            },
+            LoginOption {
+                id: "api_key".into(),
+                label: "OpenAI API key".into(),
+                kind: LoginKind::ApiKey,
+            },
+        ]
+    );
+    assert!(matches!(
+        driver.begin_login_with("api_key").await,
+        Err(HarnessError::Unsupported(_))
+    ));
+}
+
+#[tokio::test]
+async fn api_key_login_success_and_failure_redacts_key() {
+    let (driver, mut srv) = setup().await;
+    let mut rx = driver.subscribe();
+    const KEY: &str = "sk-test-SECRET-123";
+
+    let (r, ()) = tokio::join!(driver.login_api_key("api_key", KEY), async {
+        let req = srv.expect("account/login/start").await;
+        assert_eq!(req["params"]["type"], "apiKey");
+        assert_eq!(req["params"]["apiKey"], KEY);
+        srv.reply(&req, json!({})).await;
+        let req = srv.expect("account/read").await;
+        srv.reply(&req, json!({ "account": { "type": "apiKey" } }))
+            .await;
+    });
+    r.unwrap();
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("API key".into())
+        })
+    );
+
+    let (r, ()) = tokio::join!(driver.login_api_key("api_key", KEY), async {
+        let req = srv.expect("account/login/start").await;
+        assert_eq!(req["params"]["apiKey"], KEY);
+        srv.send(json!({"id": req["id"], "error": {"code": -32000, "message": format!("invalid key {KEY}")}}))
+            .await;
+    });
+    let err = r.unwrap_err();
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains(KEY), "key leaked: {text}");
+    assert!(text.contains("invalid key"));
+}
+
+#[tokio::test]
+async fn models_list_and_method_not_found() {
+    let (driver, mut srv) = setup().await;
+
+    let (r, ()) = tokio::join!(driver.models(), async {
+        let req = srv.expect("model/list").await;
+        assert_eq!(req["params"], json!({}));
+        srv.reply(
+            &req,
+            json!({ "data": [{ "id": "gpt-5-codex" }, { "model": "o4-mini" }] }),
+        )
+        .await;
+    });
+    assert_eq!(r.unwrap(), ["gpt-5-codex", "o4-mini"]);
+
+    let (r, ()) = tokio::join!(driver.models(), async {
+        let req = srv.expect("model/list").await;
+        srv.send(json!({"id": req["id"], "error": {"code": -32601, "message": "nope"}}))
+            .await;
+    });
+    assert_eq!(r.unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn protocol_methods_listed() {
+    let m = litecord_harness::codex::PROTOCOL_METHODS;
+    for name in [
+        "initialize",
+        "account/login/start",
+        "model/list",
+        "turn/completed",
+        "item/fileChange/requestApproval",
+    ] {
+        assert!(m.contains(&name), "{name}");
+    }
 }

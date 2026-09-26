@@ -63,6 +63,7 @@ default_token_budget = 8000
 idle_shutdown_secs = 600
 approval_timeout_secs = 120
 keep_archived_sessions = 50
+max_automation_runs_per_hour = 6
 
 [omni.heartbeat]
 enabled = false

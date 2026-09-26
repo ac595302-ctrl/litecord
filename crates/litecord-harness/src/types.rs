@@ -59,6 +59,10 @@ pub enum LoginState {
         /// Extra instructions from the harness (e.g. a device code).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
+        /// The browser shows a code the user must paste back
+        /// ([`crate::HarnessDriver::submit_login_code`]).
+        #[serde(default)]
+        needs_code: bool,
     },
     Ready {
         /// Display label such as "ChatGPT Plus" or a provider name.
@@ -74,6 +78,25 @@ impl LoginState {
     pub fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginKind {
+    /// Opens a browser; may ask for a pasted code.
+    Browser,
+    /// Paste an API key.
+    ApiKey,
+}
+
+/// One way to sign in to the harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginOption {
+    /// Driver-scoped id passed back to `begin_login_with` / `login_api_key`.
+    pub id: String,
+    /// e.g. "ChatGPT account", "OpenAI API key", "Anthropic (Claude Pro/Max)".
+    pub label: String,
+    pub kind: LoginKind,
 }
 
 /// What Omni may touch in a session (see docs/AGENT_HARNESS.md §5).

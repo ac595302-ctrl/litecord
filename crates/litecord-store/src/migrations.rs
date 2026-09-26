@@ -36,6 +36,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "omni",
         sql: include_str!("../../../migrations/0003_omni.sql"),
     },
+    Migration {
+        version: 4,
+        name: "omni_automations",
+        sql: include_str!("../../../migrations/0004_omni_automations.sql"),
+    },
 ];
 
 pub fn latest_version() -> u32 {
@@ -112,7 +117,7 @@ mod tests {
         .unwrap();
 
         let applied = run(&mut conn).unwrap();
-        assert_eq!(applied, vec![2, 3]);
+        assert_eq!(applied, vec![2, 3, 4]);
         assert_eq!(current_version(&conn).unwrap(), latest_version());
 
         let priority: String = conn

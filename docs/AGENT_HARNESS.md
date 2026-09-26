@@ -9,8 +9,14 @@ Status (September 26, 2026): **backend implemented; UI in progress.**
 | OpenCode `serve` driver (feature `opencode`) | `litecord-harness/src/opencode.rs` | fake HTTP/SSE server tests |
 | `OmniService`: lazy sidecar, idle stop, sessions, capped transcripts, approval bridge by mode, "remember" into memory, heartbeats | `litecord-app/src/omni.rs`, `migrations/0003_omni.sql` | `litecord-app/tests/omni.rs` |
 | Desktop wiring (launchers, `litecord mcp --harness`) | `litecord-desktop` | builds |
+| Every sign-in method (browser, pasted code, API key passed straight to the harness), model list and choice | trait defaults in `driver.rs`; `codex.rs`, `opencode.rs`, `OmniService` | driver tests; `tests/omni.rs` |
+| Automations: daily / every N hours / DM from a person / keyword; output to Inbox, suggested tasks or drafts; `AUTOMATION_OK`; hourly budget; Assistant mode only | `litecord-app/src/automations.rs`, `0004_omni_automations.sql`, `prompts/automation.md` | unit + `tests/omni.rs` |
+| CLI: `litecord omni status, harness, login, logout, models, automations, run, doctor` | `litecord-desktop` | run against the demo harness |
 
-**Not yet verified against real binaries.** No Codex or OpenCode binary was
+**Not yet verified against real binaries.** Run `litecord omni doctor`
+with Codex or OpenCode installed. It checks the harness version, whether
+every method or endpoint Litecord uses is in that version's schema (Codex
+`generate-json-schema`, OpenCode `/doc`), and sign-in. No Codex or OpenCode binary was
 available where this was built. Method, event and field names are constants
 at the top of each driver. Before relying on them, check them against the
 installed version (`codex app-server generate-json-schema`, OpenCode

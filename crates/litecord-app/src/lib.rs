@@ -6,6 +6,7 @@
 //! [`view`]). A UI depends on this crate only.
 
 mod app;
+pub mod automations;
 pub mod freshness;
 pub mod omni;
 pub mod people;

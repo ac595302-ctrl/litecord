@@ -245,6 +245,8 @@ pub struct OmniConfig {
     pub approval_timeout_secs: u64,
     /// Archived sessions kept (with transcripts); older ones are deleted.
     pub keep_archived_sessions: u32,
+    /// Automation runs allowed per hour across all automations.
+    pub max_automation_runs_per_hour: u32,
     pub heartbeat: HeartbeatConfig,
 }
 
@@ -257,6 +259,7 @@ impl Default for OmniConfig {
             idle_shutdown_secs: 600,
             approval_timeout_secs: 120,
             keep_archived_sessions: 50,
+            max_automation_runs_per_hour: 6,
             heartbeat: HeartbeatConfig::default(),
         }
     }

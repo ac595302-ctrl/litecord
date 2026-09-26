@@ -24,6 +24,42 @@ pub trait HarnessDriver: Send + Sync + std::fmt::Debug {
     async fn begin_login(&self) -> HarnessResult<LoginState>;
     async fn logout(&self) -> HarnessResult<()>;
 
+    /// Sign-in methods the harness offers (browser OAuth, API key, ...).
+    /// The default is one browser method that maps to [`Self::begin_login`].
+    async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        Ok(vec![LoginOption {
+            id: "default".into(),
+            label: "Sign in with browser".into(),
+            kind: LoginKind::Browser,
+        }])
+    }
+
+    /// Start a specific browser sign-in method from [`Self::login_options`].
+    async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
+        let _ = option;
+        self.begin_login().await
+    }
+
+    /// Finish a sign-in that needs a code pasted from the browser
+    /// (`SigningIn { needs_code: true }`).
+    async fn submit_login_code(&self, code: &str) -> HarnessResult<()> {
+        let _ = code;
+        Err(HarnessError::Unsupported("pasted sign-in codes"))
+    }
+
+    /// Sign in with an API key. The key goes straight to the harness, which
+    /// stores it in its own credential store; Litecord keeps no copy.
+    async fn login_api_key(&self, option: &str, key: &str) -> HarnessResult<()> {
+        let _ = (option, key);
+        Err(HarnessError::Unsupported("API key sign-in"))
+    }
+
+    /// Models the harness can use, as it names them (e.g. `gpt-5-codex`,
+    /// `anthropic/claude-sonnet-4`). Empty when the harness can't list them.
+    async fn models(&self) -> HarnessResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     async fn start_session(&self, cfg: &SessionConfig) -> HarnessResult<ExternalId>;
     /// Reopen a session after a sidecar restart. Drivers that cannot resume
     /// return `Unsupported`; the service then starts a fresh session.

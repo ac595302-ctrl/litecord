@@ -95,12 +95,22 @@ pub enum OmniCommand {
     Answer(String, litecord_app::harness::Decision),
     Remember(i64, u32),
     Select(litecord_app::harness::HarnessKind),
-    SignIn,
     SignOut,
     Refresh,
     Heartbeats(bool),
     CheckNow,
     DismissCheckins,
+    LoadLoginOptions,
+    SignInWith(String),
+    SubmitCode(String),
+    /// Option id + key. `Secret` keeps the key out of Debug output.
+    ApiKey(String, litecord_core::secrets::Secret<String>),
+    LoadModels,
+    SetModel(Option<String>),
+    CreateAutomation(litecord_app::automations::AutomationDraft),
+    SetAutomationEnabled(i64, bool),
+    DeleteAutomation(i64),
+    RunAutomation(i64),
 }
 
 #[derive(Debug, Default)]
@@ -378,11 +388,6 @@ async fn omni(
             });
         }
         OmniCommand::Select(kind) => omni.select(kind).await?,
-        OmniCommand::SignIn => {
-            if let LoginState::SigningIn { url: Some(url), .. } = omni.sign_in().await? {
-                c.effects.push(UiEffect::OpenUrl { url });
-            }
-        }
         OmniCommand::SignOut => omni.sign_out().await?,
         OmniCommand::Refresh => {
             omni.refresh_login().await?;
@@ -397,6 +402,43 @@ async fn omni(
             }),
         },
         OmniCommand::DismissCheckins => omni.dismiss_checkins()?,
+        OmniCommand::LoadLoginOptions => {
+            omni.login_options().await?;
+        }
+        OmniCommand::SignInWith(id) => {
+            if let LoginState::SigningIn { url: Some(url), .. } = omni.sign_in_with(&id).await? {
+                c.effects.push(UiEffect::OpenUrl { url });
+            }
+        }
+        OmniCommand::SubmitCode(code) => omni.submit_login_code(&code).await?,
+        OmniCommand::ApiKey(id, key) => {
+            omni.sign_in_api_key(&id, &key).await?;
+            c.effects.push(UiEffect::Notice {
+                message: "Key handed to the harness. Litecord did not store it.".into(),
+            });
+        }
+        OmniCommand::LoadModels => {
+            omni.models().await?;
+        }
+        OmniCommand::SetModel(m) => omni.set_model(m.as_deref())?,
+        OmniCommand::CreateAutomation(d) => {
+            omni.create_automation(&d)?;
+            c.effects.push(UiEffect::Notice {
+                message: format!("Automation “{}” created.", d.name.trim()),
+            });
+        }
+        OmniCommand::SetAutomationEnabled(id, on) => omni.set_automation_enabled(id, on)?,
+        OmniCommand::DeleteAutomation(id) => omni.delete_automation(id)?,
+        OmniCommand::RunAutomation(id) => {
+            use litecord_app::automations::AutomationOutcome;
+            let message = match omni.run_automation(id).await? {
+                AutomationOutcome::Ran { .. } => {
+                    "Automation started; results appear in Inbox.".into()
+                }
+                AutomationOutcome::Skipped(why) => format!("Automation skipped: {why}."),
+            };
+            c.effects.push(UiEffect::Notice { message });
+        }
     }
     Ok(())
 }

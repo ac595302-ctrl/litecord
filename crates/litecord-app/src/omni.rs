@@ -19,7 +19,8 @@ use litecord_core::config::OmniConfig;
 use litecord_core::error::{Error, ErrorKind, Result};
 use litecord_harness::{
     Decision, HarnessDriver, HarnessError, HarnessEvent, HarnessKind, HarnessLauncher,
-    HarnessRequest, ItemKind, LaunchContext, LoginState, OmniMode, RequestKind, SessionConfig,
+    HarnessRequest, ItemKind, LaunchContext, LoginOption, LoginState, OmniMode, RequestKind,
+    SessionConfig,
 };
 use litecord_memory::MemoryService;
 use litecord_store::repos;
@@ -34,6 +35,8 @@ use litecord_types::MemoryId;
 const SELECTED_KEY: &str = "omni.harness";
 /// Items loaded into the view for the active session.
 const VIEW_ITEMS: u32 = 200;
+const MODEL_KEY: &str = "omni.model";
+const AUTOMATION_TIMES: &str = "omni.automation.times";
 const HB_ENABLED: &str = "omni.heartbeat.enabled";
 const HB_REVISION: &str = "omni.heartbeat.revision";
 const HB_TIMES: &str = "omni.heartbeat.times";
@@ -50,6 +53,8 @@ pub enum HeartbeatOutcome {
 /// A check-in result worth the user's attention (not `HEARTBEAT_OK`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OmniCheckin {
+    /// "Check-in" or the automation's name.
+    pub source: String,
     pub session_id: i64,
     pub seq: u32,
     pub text: String,
@@ -91,6 +96,12 @@ pub struct OmniStatus {
     /// Why Omni cannot start at all (e.g. in-memory database), if so.
     pub unavailable: Option<String>,
     pub last_error: Option<String>,
+    /// Sign-in methods reported by the running harness (empty until asked).
+    pub login_options: Vec<LoginOption>,
+    /// Models reported by the harness (empty until asked).
+    pub models: Vec<String>,
+    /// The chosen model; `None` = the harness default.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -127,6 +138,7 @@ pub struct OmniViewModel {
     /// Recent check-in results for the inbox.
     pub checkins: Vec<OmniCheckin>,
     pub heartbeat_enabled: bool,
+    pub automations: Vec<crate::automations::AutomationRow>,
 }
 
 #[derive(Default)]
@@ -140,6 +152,8 @@ struct Live {
     login: Option<LoginState>,
     last_used: Option<Instant>,
     last_error: Option<String>,
+    login_options: Vec<LoginOption>,
+    models: Vec<String>,
 }
 
 #[derive(Default)]
@@ -149,6 +163,7 @@ struct Runtime {
 }
 
 struct Shared {
+    default_visibility: litecord_types::trust::AgentVisibility,
     db: Database,
     memory: MemoryService,
     cfg: OmniConfig,
@@ -205,12 +220,14 @@ impl OmniService {
         db: Database,
         memory: MemoryService,
         cfg: OmniConfig,
+        default_visibility: litecord_types::trust::AgentVisibility,
         launchers: Vec<Arc<dyn HarnessLauncher>>,
         ctx: Option<LaunchContext>,
     ) -> Self {
         let (tx, _) = broadcast::channel(512);
         Self {
             shared: Arc::new(Shared {
+                default_visibility,
                 db,
                 memory,
                 cfg,
@@ -228,6 +245,59 @@ impl OmniService {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    pub(crate) fn db(&self) -> &Database {
+        &self.shared.db
+    }
+
+    pub(crate) fn config(&self) -> &OmniConfig {
+        &self.shared.cfg
+    }
+
+    pub(crate) fn default_visibility(&self) -> litecord_types::trust::AgentVisibility {
+        self.shared.default_visibility
+    }
+
+    pub(crate) fn notify_changed(&self) {
+        self.notify(None);
+    }
+
+    pub(crate) fn is_running(&self, session_id: i64) -> bool {
+        self.live().running.contains(&session_id)
+    }
+
+    pub(crate) async fn send_system(&self, session_id: i64, text: &str) -> Result<()> {
+        self.send_as(session_id, "system", text).await
+    }
+
+    /// Whether another automation run fits in the hourly budget.
+    pub(crate) fn within_automation_budget(&self) -> Result<bool> {
+        let now = self.shared.db.now().as_millis();
+        let times = self.recent_automation_runs(now)?;
+        Ok((times.len() as u32) < self.shared.cfg.max_automation_runs_per_hour)
+    }
+
+    pub(crate) fn note_automation_run(&self) -> Result<()> {
+        let now = self.shared.db.now().as_millis();
+        let mut times = self.recent_automation_runs(now)?;
+        times.push(now);
+        let json = serde_json::to_string(&times).unwrap_or_else(|_| "[]".into());
+        self.shared
+            .db
+            .write(|tx| repos::app_state::set(tx, AUTOMATION_TIMES, &json))?;
+        Ok(())
+    }
+
+    fn recent_automation_runs(&self, now: i64) -> Result<Vec<i64>> {
+        let mut times: Vec<i64> = self
+            .shared
+            .db
+            .read(|r| repos::app_state::get(r, AUTOMATION_TIMES))?
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        times.retain(|t| now - t < 3_600_000);
+        Ok(times)
     }
 
     fn notify(&self, session_id: Option<i64>) {
@@ -296,6 +366,9 @@ impl OmniService {
                 "Omni needs Litecord's database on disk (it is running in memory)".to_owned()
             }),
             last_error: live.last_error.clone(),
+            login_options: live.login_options.clone(),
+            models: live.models.clone(),
+            model: self.model(),
         }
     }
 
@@ -393,6 +466,79 @@ impl OmniService {
         Ok(l)
     }
 
+    /// Sign-in methods the harness offers (starts the sidecar).
+    pub async fn login_options(&self) -> Result<Vec<LoginOption>> {
+        let d = self.driver().await?;
+        let options = d.login_options().await.map_err(harness_err)?;
+        self.live().login_options = options.clone();
+        self.notify(None);
+        Ok(options)
+    }
+
+    /// Start a specific browser sign-in method.
+    pub async fn sign_in_with(&self, option: &str) -> Result<LoginState> {
+        let d = self.driver().await?;
+        let l = d.begin_login_with(option).await.map_err(harness_err)?;
+        self.live().login = Some(l.clone());
+        self.notify(None);
+        Ok(l)
+    }
+
+    /// Finish a browser sign-in that shows a code to paste back.
+    pub async fn submit_login_code(&self, code: &str) -> Result<()> {
+        let d = self.driver().await?;
+        d.submit_login_code(code.trim())
+            .await
+            .map_err(harness_err)?;
+        self.notify(None);
+        Ok(())
+    }
+
+    /// Sign in with an API key. The key goes straight to the harness, which
+    /// keeps it in its own credential store; Litecord holds no copy.
+    pub async fn sign_in_api_key(
+        &self,
+        option: &str,
+        key: &litecord_core::secrets::Secret<String>,
+    ) -> Result<()> {
+        let d = self.driver().await?;
+        d.login_api_key(option, key.expose_secret().trim())
+            .await
+            .map_err(harness_err)?;
+        self.notify(None);
+        Ok(())
+    }
+
+    /// Models the harness offers (starts the sidecar).
+    pub async fn models(&self) -> Result<Vec<String>> {
+        let d = self.driver().await?;
+        let models = d.models().await.map_err(harness_err)?;
+        self.live().models = models.clone();
+        self.notify(None);
+        Ok(models)
+    }
+
+    /// The chosen model (user preference, else config), `None` = default.
+    pub fn model(&self) -> Option<String> {
+        self.shared
+            .db
+            .read(|r| repos::app_state::get(r, MODEL_KEY))
+            .ok()
+            .flatten()
+            .filter(|m| !m.is_empty())
+            .or_else(|| self.shared.cfg.model.clone())
+    }
+
+    /// Choose the model for new sessions (`None` = harness default).
+    pub fn set_model(&self, model: Option<&str>) -> Result<()> {
+        let value = model.map(str::trim).unwrap_or("");
+        self.shared
+            .db
+            .write(|tx| repos::app_state::set(tx, MODEL_KEY, value))?;
+        self.notify(None);
+        Ok(())
+    }
+
     pub async fn sign_out(&self) -> Result<()> {
         let d = self.driver().await?;
         d.logout().await.map_err(harness_err)?;
@@ -441,7 +587,7 @@ impl OmniService {
         Ok(SessionConfig {
             instructions: session_instructions(mode),
             mode,
-            model: self.shared.cfg.model.clone(),
+            model: self.model(),
             cwd: ctx.workspace.clone(),
             protected_dir: ctx.protected_dir.clone(),
             mcp: ctx.mcp.clone(),
@@ -682,14 +828,22 @@ impl OmniService {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             let mut out = Vec::new();
-            for s in repos::omni::list(r, Some("heartbeat"), true, 3)? {
+            let mut sessions = repos::omni::list(r, Some("heartbeat"), true, 3)?;
+            sessions.extend(repos::omni::list(r, Some("automation"), true, 20)?);
+            for s in sessions {
+                let source = if s.kind == "heartbeat" {
+                    "Check-in".to_owned()
+                } else {
+                    s.title.clone()
+                };
                 for i in repos::omni::items(r, s.id, 40)? {
                     if i.role == "omni"
                         && i.kind == ItemKind::Message.as_str()
                         && i.created_at.as_millis() > dismissed
-                        && !litecord_agent::prompts::is_heartbeat_ok(&i.text)
+                        && !litecord_agent::prompts::is_quiet_reply(&i.text)
                     {
                         out.push(OmniCheckin {
+                            source: source.clone(),
                             session_id: s.id,
                             seq: i.seq,
                             text: i.text,
@@ -699,7 +853,7 @@ impl OmniService {
                 }
             }
             out.sort_by_key(|c| std::cmp::Reverse(c.created_at));
-            out.truncate(5);
+            out.truncate(8);
             Ok(out)
         })
     }
@@ -837,6 +991,7 @@ impl OmniService {
             requests,
             checkins: self.checkins()?,
             heartbeat_enabled: self.heartbeat_enabled(),
+            automations: self.automations()?,
         })
     }
 

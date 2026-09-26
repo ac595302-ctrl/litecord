@@ -172,6 +172,19 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Omni sign-in, models, automations and CLI (September 26, 2026)
+
+See `docs/ROADMAP.md` §1 and the status table in `docs/AGENT_HARNESS.md`.
+- **Sign-in:** every method the harness reports: browser, pasted code, or an
+  API key handed straight to the harness and never stored by Litecord.
+- **Models:** the harness's model list, with the choice saved per install.
+- **Automations:** Settings → Omni → Automations, with four presets and a
+  custom form. They run once a minute alongside check-ins. Results appear in
+  the Inbox labelled with the automation's name.
+- **CLI:** `litecord omni doctor` verifies a real Codex/OpenCode install.
+- **Next** (`ROADMAP.md`): Stage A efficiency, then paged history and sync,
+  then the data-export importer.
+
 ### Omni implemented + UI overhaul + Astra review (September 26, 2026)
 
 - Omni backend: `litecord-harness` (Codex/OpenCode/fake drivers) and

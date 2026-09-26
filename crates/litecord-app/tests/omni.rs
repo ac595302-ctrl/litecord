@@ -394,3 +394,297 @@ fn quiet_hours_wrap_midnight() {
     assert!(!in_quiet_hours(14, 12, 14));
     assert!(!in_quiet_hours(5, 0, 0), "equal bounds disable quiet hours");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_sign_in_method_and_model_choice() {
+    use litecord_app::harness::LoginKind;
+    use litecord_core::secrets::Secret;
+    let h = start(FakeDriver::demo().signed_out(), 600).await;
+    let omni = h.app.omni();
+
+    let options = omni.login_options().await.unwrap();
+    assert!(options.iter().any(|o| o.kind == LoginKind::ApiKey));
+    assert_eq!(omni.status().login_options, options);
+
+    // Pasted-code flow.
+    let l = omni.sign_in_with("code").await.unwrap();
+    assert!(matches!(
+        l,
+        LoginState::SigningIn {
+            needs_code: true,
+            ..
+        }
+    ));
+    assert!(
+        omni.submit_login_code("  ").await.is_err(),
+        "empty code rejected"
+    );
+    omni.submit_login_code("ABCD-1234").await.unwrap();
+    until(|| omni.status().login.is_ready().then_some(())).await;
+
+    // API key flow; the key never appears in status or errors.
+    omni.sign_out().await.unwrap();
+    let err = omni
+        .sign_in_api_key("api_key", &Secret::new("short".into()))
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().contains("short"));
+    omni.sign_in_api_key("api_key", &Secret::new("sk-demo-key-123".into()))
+        .await
+        .unwrap();
+    until(|| omni.status().login.is_ready().then_some(())).await;
+    assert!(!format!("{:?}", omni.status()).contains("sk-demo-key-123"));
+
+    // Models and the saved preference.
+    assert_eq!(omni.models().await.unwrap(), ["demo-large", "demo-small"]);
+    assert_eq!(omni.status().model, None);
+    omni.set_model(Some("demo-small")).unwrap();
+    assert_eq!(omni.status().model.as_deref(), Some("demo-small"));
+    omni.set_model(None).unwrap();
+    assert_eq!(omni.model(), None);
+    h.app.shutdown().await;
+}
+
+mod automations {
+    use super::*;
+    use litecord_app::automations::{
+        AutomationDraft, AutomationOutcome, AutomationOutputKind, AutomationTrigger,
+    };
+    use litecord_core::events::{DiscordEvent, SourceEnvelope};
+    use litecord_store::reducer::{self, ReducerConfig};
+    use litecord_types::provenance::DiscordSource;
+    use litecord_types::social::Message;
+    use litecord_types::{ConversationId, MessageId, UserId};
+
+    fn incoming(app: &LitecordApp, id: u64, conv: ConversationId, author: UserId, text: &str) {
+        let message = Message {
+            id: MessageId(id),
+            conversation_id: conv,
+            author_id: author,
+            content: text.into(),
+            sent_at: Timestamp::now(),
+            edited_at: None,
+            reply_to: None,
+            extras: vec![],
+        };
+        reducer::apply(
+            app.database(),
+            &SourceEnvelope::new(
+                DiscordSource::Synthetic,
+                Timestamp::now(),
+                DiscordEvent::MessageCreated { message },
+            ),
+            &ReducerConfig::default(),
+        )
+        .unwrap();
+    }
+
+    async fn dm(app: &LitecordApp) -> (ConversationId, UserId) {
+        until(|| {
+            app.conversations_view(50)
+                .unwrap()
+                .conversations
+                .into_iter()
+                .find_map(|c| c.recipient_id.map(|r| (c.conversation_id, r)))
+        })
+        .await
+    }
+
+    fn draft(name: &str, trigger: AutomationTrigger) -> AutomationDraft {
+        AutomationDraft {
+            name: name.into(),
+            prompt: "Summarize what matters.".into(),
+            trigger,
+            output: AutomationOutputKind::Inbox,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_automation_runs_once_and_reports_to_inbox() {
+        let h = start(
+            FakeDriver::new(|p| FakeTurn {
+                reply: if p.contains("Quiet one") {
+                    "AUTOMATION_OK".into()
+                } else {
+                    "- Ada is waiting on the build".into()
+                },
+                ..FakeTurn::default()
+            }),
+            600,
+        )
+        .await;
+        let omni = h.app.omni();
+        let loud = omni
+            .create_automation(&draft("Brief", AutomationTrigger::Every { hours: 1 }))
+            .unwrap();
+        omni.create_automation(&draft("Quiet one", AutomationTrigger::Every { hours: 1 }))
+            .unwrap();
+        let outcomes = omni.automations_tick().await.unwrap();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| matches!(o, AutomationOutcome::Ran { .. }))
+                .count(),
+            2
+        );
+        let v = until(|| {
+            let v = omni.view(None).unwrap();
+            (v.automations.iter().all(|a| a.runs == 1)
+                && v.checkins.iter().any(|c| c.source == "Brief"))
+            .then_some(v)
+        })
+        .await;
+        assert_eq!(v.checkins.len(), 1, "AUTOMATION_OK is not surfaced");
+        assert_eq!(v.checkins[0].text, "- Ada is waiting on the build");
+        let row = v.automations.iter().find(|a| a.id == loud).unwrap();
+        assert_eq!(row.trigger_label, "every 1 h");
+        let session = omni.view(row.session_id).unwrap();
+        let active = session.active.unwrap();
+        assert_eq!(
+            (active.kind.as_str(), active.mode),
+            ("automation", OmniMode::Assistant)
+        );
+        assert!(session.items[0].text.contains("Never send"));
+
+        // Not due again within the hour.
+        until(|| {
+            omni.view(None)
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|s| !s.running)
+                .then_some(())
+        })
+        .await;
+        assert!(omni
+            .automations_tick()
+            .await
+            .unwrap()
+            .iter()
+            .all(|o| !matches!(o, AutomationOutcome::Ran { .. })));
+        h.app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn event_triggers_match_new_messages_but_not_hidden_or_own() {
+        let h = start(
+            FakeDriver::new(|_| FakeTurn {
+                reply: "- drafted".into(),
+                ..FakeTurn::default()
+            }),
+            600,
+        )
+        .await;
+        let app = &h.app;
+        let omni = app.omni();
+        let (conv, friend) = dm(app).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let kw = omni
+            .create_automation(&draft(
+                "Launch watch",
+                AutomationTrigger::Keyword {
+                    keyword: "Launch".into(),
+                },
+            ))
+            .unwrap();
+        omni.create_automation(&draft(
+            "From friend",
+            AutomationTrigger::DirectMessageFrom { user_id: friend },
+        ))
+        .unwrap();
+
+        // Nothing new: nothing runs.
+        assert!(omni.automations_tick().await.unwrap().is_empty());
+
+        incoming(app, 880_001, conv, friend, "the LAUNCH is tomorrow");
+        let ran = omni.automations_tick().await.unwrap();
+        assert_eq!(
+            ran.iter()
+                .filter(|o| matches!(o, AutomationOutcome::Ran { .. }))
+                .count(),
+            2,
+            "{ran:?}"
+        );
+        let session = omni
+            .automations()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == kw)
+            .unwrap()
+            .session_id;
+        let first = omni.view(session).unwrap().items[0].text.clone();
+        assert!(
+            first.contains("880001"),
+            "context names the message id: {first}"
+        );
+        assert!(
+            !first.contains("LAUNCH is tomorrow"),
+            "content is not pasted in"
+        );
+
+        // Hidden conversations never trigger automations.
+        until(|| {
+            omni.view(None)
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|s| !s.running)
+                .then_some(())
+        })
+        .await;
+        app.set_conversation_visibility(conv, Some(litecord_types::trust::AgentVisibility::Hidden))
+            .unwrap();
+        incoming(app, 880_002, conv, friend, "launch again");
+        assert!(omni.automations_tick().await.unwrap().is_empty());
+        h.app.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hourly_budget_and_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = LitecordConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..LitecordConfig::default()
+        };
+        cfg.omni.max_automation_runs_per_hour = 1;
+        cfg.omni.heartbeat.quiet_start_hour = 0;
+        cfg.omni.heartbeat.quiet_end_hour = 0;
+        let app = LitecordApp::builder(cfg)
+            .backend(Arc::new(MockBackend::new(fixtures::generate(
+                5,
+                Timestamp::now(),
+            ))))
+            .omni_launcher(Arc::new(FakeLauncher::new(FakeDriver::new(|_| FakeTurn {
+                reply: "ok".into(),
+                ..FakeTurn::default()
+            }))))
+            .omni_mcp_command("/usr/bin/litecord".into())
+            .start()
+            .await
+            .unwrap();
+        let omni = app.omni();
+        assert!(omni
+            .create_automation(&draft(" ", AutomationTrigger::Every { hours: 1 }))
+            .is_err());
+        assert!(omni
+            .create_automation(&draft("x", AutomationTrigger::Every { hours: 0 }))
+            .is_err());
+        omni.create_automation(&draft("A", AutomationTrigger::Every { hours: 1 }))
+            .unwrap();
+        omni.create_automation(&draft("B", AutomationTrigger::Every { hours: 1 }))
+            .unwrap();
+        let outcomes = omni.automations_tick().await.unwrap();
+        assert!(
+            outcomes.contains(&AutomationOutcome::Skipped("hourly limit")),
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| matches!(o, AutomationOutcome::Ran { .. }))
+                .count(),
+            1
+        );
+        app.shutdown().await;
+    }
+}
