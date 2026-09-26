@@ -1,0 +1,22 @@
+[package]
+name = "litecord-hydrator"
+description = "Litecord hydration: event-driven targeted fetches, staleness-based reconciliation and explicit refreshes, feeding the canonical ingest queue."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

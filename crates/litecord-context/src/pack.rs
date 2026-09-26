@@ -18,8 +18,6 @@ use litecord_types::tasks::TaskStatus;
 use litecord_types::trust::{AgentVisibility, TrustLevel};
 use litecord_types::{Revision, Timestamp};
 
-use litecord_retrieval::score::RetrievalScore;
-
 /// A token budget for the whole pack. Token counts are *estimates*
 /// (see [`crate::budget::estimate_tokens`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -246,12 +244,4 @@ pub struct ContextPack {
     pub reminders: Vec<ReminderContext>,
     pub capabilities: AgentCapabilities,
     pub stats: ContextStats,
-}
-
-/// Internal: a scored candidate before budgeting.
-#[derive(Debug, Clone)]
-pub(crate) struct Scored<T> {
-    pub item: T,
-    pub score: RetrievalScore,
-    pub total: f32,
 }
