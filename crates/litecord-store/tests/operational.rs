@@ -17,7 +17,7 @@ use litecord_types::provenance::DiscordIdentity;
 use litecord_types::provenance::{Confidence, Origin, SourceRef};
 use litecord_types::tasks::{
     Draft, DraftStatus, ReminderCondition, ReminderDraft, ReminderStatus, ReminderTrigger,
-    TaskDraft, TaskStatus,
+    TaskDraft, TaskPriority, TaskStatus,
 };
 use litecord_types::{ConversationId, MessageId, Revision, Timestamp, UserId};
 
@@ -333,9 +333,11 @@ fn task_lifecycle_and_search() {
     let draft = TaskDraft {
         title: "Ship the release notes".to_string(),
         description: Some("Summarize v2 changes".to_string()),
+        priority: TaskPriority::default(),
         due_at: None,
         related_users: vec![UserId(7)],
         conversation_id: None,
+        parent_id: None,
         source: None,
     };
     let id = db

@@ -471,7 +471,7 @@ impl Workspace {
                 });
                 if ui
                     .add_enabled(
-                        !self.busy && !(private && reveals),
+                        !(self.busy || private && reveals),
                         egui::Button::new(&action.label),
                     )
                     .clicked()

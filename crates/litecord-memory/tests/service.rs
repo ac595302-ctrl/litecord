@@ -327,3 +327,56 @@ fn gc_expires_due_items_but_keeps_pinned() {
     assert_eq!(get(a), MemoryStatus::Expired);
     assert_eq!(get(b), MemoryStatus::Candidate);
 }
+
+#[test]
+fn task_service_priority_subtasks_and_comments() {
+    let (db, _svc, _) = setup();
+    let tasks = TaskService::new(db.clone());
+    let draft = |title: &str| TaskDraft {
+        title: title.into(),
+        description: None,
+        priority: TaskPriority::Normal,
+        due_at: None,
+        related_users: Vec::new(),
+        conversation_id: None,
+        parent_id: None,
+        source: None,
+    };
+    let parent = db
+        .write(|tx| {
+            repos::tasks::create(
+                tx,
+                &draft("plan launch"),
+                TaskStatus::Open,
+                Origin::UserProvided,
+            )
+        })
+        .unwrap()
+        .value;
+
+    let changed = tasks
+        .set_priority(parent, TaskPriority::Urgent, Origin::UserProvided)
+        .unwrap();
+    assert!(changed);
+    let t = db.read(|r| repos::tasks::get(r, parent)).unwrap().unwrap();
+    assert_eq!(t.priority, TaskPriority::Urgent);
+
+    let mut sub_draft = draft("write invite list");
+    sub_draft.parent_id = Some(parent);
+    let sub = db
+        .write(|tx| repos::tasks::create(tx, &sub_draft, TaskStatus::Open, Origin::UserProvided))
+        .unwrap()
+        .value;
+    let subs = tasks.subtasks(parent).unwrap();
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].id, sub);
+
+    let comment_id = tasks
+        .add_comment(parent, "kicking this off", Origin::UserProvided)
+        .unwrap();
+    assert!(comment_id > 0);
+    let comments = tasks.comments(parent).unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].body, "kicking this off");
+    assert_eq!(comments[0].origin, Origin::UserProvided);
+}

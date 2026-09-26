@@ -32,7 +32,7 @@ use litecord_types::memory::{
     MemoryItem, MemoryKind, MemoryPayload, MemoryStatus, NewMemory, RelationType,
 };
 use litecord_types::provenance::{Confidence, DiscordIdentity, Origin, SourceRef};
-use litecord_types::tasks::{TaskDraft, TaskStatus};
+use litecord_types::tasks::{TaskDraft, TaskPriority, TaskStatus};
 use litecord_types::{DurationMs, MemoryId, MessageId, Timestamp};
 
 use crate::error::MemoryResult;
@@ -438,9 +438,11 @@ fn create_commitment_task_if_new(
     let draft = TaskDraft {
         title,
         description: None,
+        priority: TaskPriority::default(),
         due_at,
         related_users: Vec::new(),
         conversation_id: Some(conversation_id),
+        parent_id: None,
         source: Some(source),
     };
     repos::tasks::create(tx, &draft, TaskStatus::Candidate, Origin::LocalApplication)?;

@@ -399,16 +399,18 @@ pub fn recent_audit(conn: &Connection, limit: u32) -> StoreResult<Vec<ActionAudi
 mod tests {
     use super::*;
     use crate::db::Database;
-    use litecord_types::tasks::TaskDraft;
+    use litecord_types::tasks::{TaskDraft, TaskPriority};
 
     fn sample_action() -> AgentAction {
         AgentAction::CreateTask {
             task: TaskDraft {
                 title: "test".into(),
                 description: None,
+                priority: TaskPriority::default(),
                 due_at: None,
                 related_users: Vec::new(),
                 conversation_id: None,
+                parent_id: None,
                 source: None,
             },
         }

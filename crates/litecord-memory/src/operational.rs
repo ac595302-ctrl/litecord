@@ -11,7 +11,9 @@
 use litecord_store::repos::tasks::TaskFilter;
 use litecord_store::{repos, Database};
 use litecord_types::provenance::Origin;
-use litecord_types::tasks::{ReminderCondition, ReminderStatus, ReminderTrigger, Task, TaskStatus};
+use litecord_types::tasks::{
+    ReminderCondition, ReminderStatus, ReminderTrigger, Task, TaskComment, TaskPriority, TaskStatus,
+};
 use litecord_types::{ConversationId, ReminderId, TaskId, Timestamp};
 
 use crate::error::{MemoryError, MemoryResult};
@@ -176,6 +178,39 @@ impl TaskService {
                 },
             )?)
         })
+    }
+
+    /// Change a task's priority, recorded under `origin` (a user changing it
+    /// is `UserProvided`).
+    pub fn set_priority(
+        &self,
+        id: TaskId,
+        priority: TaskPriority,
+        origin: Origin,
+    ) -> MemoryResult<bool> {
+        let committed = self.db.write(|tx| -> MemoryResult<bool> {
+            Ok(repos::tasks::set_priority(tx, id, priority, origin)?)
+        })?;
+        Ok(committed.value)
+    }
+
+    /// Add a comment to a task. Comments typed by the user are recorded as
+    /// `Origin::UserProvided`.
+    pub fn add_comment(&self, id: TaskId, body: &str, origin: Origin) -> MemoryResult<i64> {
+        let committed = self.db.write(|tx| -> MemoryResult<i64> {
+            Ok(repos::tasks::add_comment(tx, id, body, origin)?)
+        })?;
+        Ok(committed.value)
+    }
+
+    /// Direct subtasks of `id`.
+    pub fn subtasks(&self, id: TaskId) -> MemoryResult<Vec<Task>> {
+        self.db.read(|r| Ok(repos::tasks::subtasks(r, id)?))
+    }
+
+    /// A task's comments, oldest first.
+    pub fn comments(&self, id: TaskId) -> MemoryResult<Vec<TaskComment>> {
+        self.db.read(|r| Ok(repos::tasks::comments(r, id)?))
     }
 }
 

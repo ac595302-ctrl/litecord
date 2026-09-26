@@ -31,7 +31,8 @@ use litecord_types::memory::MemoryStatus;
 use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::{Activity, PresenceStatus, RelationshipKind};
 use litecord_types::tasks::{
-    ReminderCondition, ReminderDraft, ReminderStatus, ReminderTrigger, TaskDraft, TaskStatus,
+    ReminderCondition, ReminderDraft, ReminderStatus, ReminderTrigger, TaskDraft, TaskPriority,
+    TaskStatus,
 };
 use litecord_types::trust::{AgentVisibility, TrustLevel};
 use litecord_types::{DurationMs, Timestamp};
@@ -728,13 +729,21 @@ fn task_action(args: &Value) -> Result<AgentAction, ToolError> {
             .collect::<Result<Vec<UserId>, _>>()?,
         None => Vec::new(),
     };
+    let priority = match arg_str(args, "priority") {
+        Some(s) => {
+            TaskPriority::parse(s).map_err(|e| ToolError::InvalidArguments(e.to_string()))?
+        }
+        None => TaskPriority::default(),
+    };
     Ok(AgentAction::CreateTask {
         task: TaskDraft {
             title: req_str(args, "title")?.to_owned(),
             description: arg_str(args, "description").map(str::to_owned),
+            priority,
             due_at: arg_i64(args, "due_at_ms").map(Timestamp::from_millis),
             related_users,
             conversation_id: arg_id(args, "conversation_id")?,
+            parent_id: arg_id(args, "parent_task_id")?,
             source: None,
         },
     })
@@ -848,4 +857,41 @@ fn channel_json(c: &litecord_types::social::Channel) -> Value {
         "writable": c.capabilities.contains(Caps::WRITABLE),
         "open_external_url": DiscordTarget::Channel { guild_id: c.guild_id, channel_id: c.id }.web_url(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_task_defaults_to_normal_priority() {
+        let action = task_action(&json!({ "title": "write report" })).unwrap();
+        let AgentAction::CreateTask { task } = action else {
+            panic!("expected CreateTask");
+        };
+        assert_eq!(task.priority, TaskPriority::Normal);
+        assert_eq!(task.parent_id, None);
+    }
+
+    #[test]
+    fn create_task_accepts_priority_and_parent() {
+        let action = task_action(&json!({
+            "title": "sub-step",
+            "priority": "urgent",
+            "parent_task_id": 42,
+        }))
+        .unwrap();
+        let AgentAction::CreateTask { task } = action else {
+            panic!("expected CreateTask");
+        };
+        assert_eq!(task.priority, TaskPriority::Urgent);
+        assert_eq!(task.parent_id, Some(TaskId(42)));
+    }
+
+    #[test]
+    fn create_task_rejects_invalid_priority() {
+        let err = task_action(&json!({ "title": "x", "priority": "whenever" })).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
 }

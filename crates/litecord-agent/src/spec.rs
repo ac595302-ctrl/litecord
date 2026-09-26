@@ -188,9 +188,11 @@ pub fn tools() -> Vec<ToolSpec> {
             input_schema: obj(json!({
                 "title": {"type": "string"},
                 "description": {"type": "string"},
+                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
                 "due_at_ms": {"type": "integer"},
                 "conversation_id": {"type": "string", "description": ID},
-                "related_user_ids": {"type": "array", "items": {"type": "string"}}
+                "related_user_ids": {"type": "array", "items": {"type": "string"}},
+                "parent_task_id": {"type": "integer", "description": "Make this a subtask of an existing (top-level) task."}
             }), &["title"]),
         },
         ToolSpec {
