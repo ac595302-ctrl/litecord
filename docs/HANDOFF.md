@@ -60,9 +60,15 @@ log tracks the remaining work.
 
 Earlier Stage 2 verification on Rust 1.98 covered the layout and app profile
 tests, workspace tests, formatting, and all-feature Clippy. For this UI
-checkpoint, full-workspace tests and all-feature Clippy passed before the
-latest small usability changes; the root task is rerunning final checks. Do
-not treat the UI's visual review or Stage 6 as complete yet.
+checkpoint, full-workspace tests, formatting, all-feature Clippy and cargo-deny
+pass locally on Windows. Six UI tests cover canonical bridging, failed sends,
+private rendering, all destinations at two sizes, docking/cancel/apply with
+draft preservation, and registered shortcuts independent of palette queries.
+Native screenshot QA covers all nine destinations, a narrow window, and a
+horizontal layout. Stage 6 remains partial: full mock fidelity, accessibility
+review, and performance goals are not yet complete.
+The release working-set sample was 137.82 MiB, above the proposed 50 MiB
+target; see `UI_QA.md` for the sampling limits and reproducible checks.
 
 ## How to continue (prioritized)
 
@@ -94,6 +100,15 @@ Stages 3–5 now have a working egui/eframe checkpoint:
   by current app data and supported actions. Demo mode is explicitly labelled
   `Demo · synthetic`.
 
+The final polish batch adds capability-gated incoming-request Accept/Decline,
+Remove/Block overflow actions, and Unblock on blocked rows. Relationship writes
+use the typed `change_relationship` user-action service and the Action Engine;
+accept/block/unblock are covered by a canonical backend-event integration test.
+Registered command shortcuts run independently of palette search results.
+The palette focuses its query when opened, displays shortcuts, and runs the
+first available result with Enter. CI exposed a signed-out account test setup
+race; the test now establishes its committed revision explicitly.
+
 This is a functional checkpoint, not a claim of full visual fidelity to the
 mock PDF. `LitecordApp::rooms_view()` supplies known lobby metadata and an
 optional matching conversation ID; it is not a native channel service. Room
@@ -103,8 +118,9 @@ and transcription, device discovery, downloaded rich remote media, task
 priorities/subtasks/comments, and a verified real Social SDK integration are
 not implemented. Existing channel metadata can open in Discord.
 
-**Stage 6 is ongoing:** headless GUI behavior, screenshot/render review, and
-dependency checks remain to be completed. The screenshot path is an optional,
+**Stage 6 is ongoing:** headless GUI, screenshot, and dependency checks have
+a passing baseline; full visual fidelity, accessibility and performance
+review remain. The screenshot path is an optional,
 hidden QA feature (`--features screenshots -- gui --screenshot PATH --screen
 Friends --width 760`); graceful close and joined runtime shutdown have been
 observed. The normal launch command is `cargo run -p litecord-desktop

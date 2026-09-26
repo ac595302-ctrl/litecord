@@ -337,3 +337,48 @@ fn collect_shape_text(shape: &egui::Shape, text: &mut String) {
         _ => {}
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_shortcut_navigates_even_when_palette_query_has_no_matches() {
+    let app = start_app(fixtures::generate(43, Timestamp::now())).await;
+    let (conversation_id, contact_id) = wait_for_conversation(&app).await;
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut workspace = Workspace::new(app.clone(), tokio::runtime::Handle::current(), ctx.clone());
+    let mut selected = selection(400_000, Destination::Messages, conversation_id, contact_id);
+    selected.palette_query = "no_command_matches_this_sentinel".into();
+    workspace.selection = selected.clone();
+    workspace.snapshot = Some(Arc::new(bridge::snapshot(&app, selected).unwrap()));
+    assert!(workspace
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .palette
+        .matches
+        .is_empty());
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    let mut input = raw_input(1586.0, 992.0);
+    input.modifiers = modifiers;
+    input.events = vec![egui::Event::Key {
+        key: egui::Key::Comma,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+    let _ = ctx.run_ui(input, |ui| workspace.draw(ui));
+    for _ in 0..300 {
+        let _ = ctx.run_ui(raw_input(1586.0, 992.0), |ui| workspace.draw(ui));
+        if workspace.selection.destination == Destination::Settings {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(workspace.selection.destination, Destination::Settings);
+    drop(workspace);
+    app.shutdown().await;
+}

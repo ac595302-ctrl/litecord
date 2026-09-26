@@ -39,12 +39,15 @@ pub struct Workspace {
     pub selected_lobby: Option<LobbyId>,
     pub voice_tab: usize,
     pub palette_open: bool,
+    pub palette_focus_requested: bool,
     pub palette_query: String,
     pub close_when_idle: bool,
     pub settings_section: Option<String>,
     pub lobby_text: String,
     pub selected_memory: Option<MemoryId>,
     pub selected_task: Option<TaskId>,
+    pub relationship_confirmation:
+        Option<(UserId, litecord_types::actions::RelationshipAction, String)>,
     #[cfg(feature = "screenshots")]
     pub screenshot_path: Option<std::path::PathBuf>,
     #[cfg(feature = "screenshots")]
@@ -93,12 +96,14 @@ impl Workspace {
             selected_lobby: None,
             voice_tab: 0,
             palette_open: false,
+            palette_focus_requested: false,
             palette_query: String::new(),
             close_when_idle: false,
             settings_section: None,
             lobby_text: String::new(),
             selected_memory: None,
             selected_task: None,
+            relationship_confirmation: None,
             #[cfg(feature = "screenshots")]
             screenshot_path: None,
             #[cfg(feature = "screenshots")]
@@ -167,11 +172,20 @@ impl Workspace {
                         self.open_conversation(conversation_id)
                     }
                     NavTarget::Friends => self.navigate(Destination::Friends),
-                    NavTarget::Guild { .. } => self.navigate(Destination::Servers),
+                    NavTarget::Guild { guild_id } => {
+                        self.selected_guild = Some(guild_id);
+                        self.selected_channel = None;
+                        self.navigate(Destination::Servers);
+                    }
                     NavTarget::AgentInbox => self.navigate(Destination::Inbox),
                     NavTarget::Memory => self.navigate(Destination::Memory),
                     NavTarget::Tasks => self.navigate(Destination::Tasks),
-                    NavTarget::Settings { .. } | NavTarget::Diagnostics => {
+                    NavTarget::Settings { section } => {
+                        self.settings_section = section;
+                        self.navigate(Destination::Settings)
+                    }
+                    NavTarget::Diagnostics => {
+                        self.settings_section = None;
                         self.navigate(Destination::Settings)
                     }
                     NavTarget::Voice => self.navigate(Destination::Voice),
@@ -202,6 +216,13 @@ impl Workspace {
                 self.notice = Some(error);
                 self.saving_layout = false;
             } else {
+                if c.relationship_changed.is_some_and(|id| {
+                    self.relationship_confirmation
+                        .as_ref()
+                        .is_some_and(|(user, _, _)| *user == id)
+                }) {
+                    self.relationship_confirmation = None;
+                }
                 if let Some(id) = c.message_changed {
                     if self
                         .editing_message
@@ -276,6 +297,7 @@ impl Workspace {
             }
             if ui.button("Search & commands   Ctrl+K").clicked() {
                 self.palette_open = true;
+                self.palette_focus_requested = true;
             }
             if let Some(s) = &self.snapshot {
                 theme::chip(
@@ -529,6 +551,7 @@ impl Workspace {
     pub(crate) fn draw(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         self.receive(&ctx);
+        self.command_shortcuts(&ctx);
         if ctx.input_mut(|i| {
             i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -617,6 +640,7 @@ impl Workspace {
         }
         self.profiles_window(&ctx);
         self.message_dialogs(&ctx);
+        self.relationship_dialog(&ctx);
         self.palette_window(&ctx);
         #[cfg(feature = "screenshots")]
         if let Some(path) = &self.screenshot_path {

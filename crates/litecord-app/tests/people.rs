@@ -131,6 +131,10 @@ async fn account_view_does_not_invent_a_self_identity_when_not_signed_in() {
         .await
         .unwrap();
 
+    // Establish a committed revision explicitly. Background startup events may
+    // not have reached the reducer yet when the failed backend returns.
+    app.set_setting("privacy.enabled", serde_json::json!(true))
+        .unwrap();
     let account = app.account_view().unwrap();
     assert_eq!(account.user_id, None);
     assert_eq!(account.display_name, "Not signed in");

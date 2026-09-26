@@ -110,14 +110,14 @@ profile updates.
 |---|---|---|
 | Home | Account identity plus conversation, friend, task, inbox, and diagnostics snapshots | Actual-count metric cards, selected activity previews, and restrained Omni status; generative replies are unavailable. |
 | Messages | `conversations_view(limit)` and `conversation_view(id, 200, before)` | Canonical message list with variable-height virtualization and paged windows; send clears the draft only after successful execution. Edit/delete use confirmation dialogs; context actions run through app intents. |
-| Friends | `friends_view()` plus canonical account/contact snapshots | Presence, contact details, and local notes use app data. Per-conversation agent access is controlled by `set_conversation_visibility`; it is separate from presentation Privacy Mode. |
+| Friends | `friends_view()` plus canonical account/contact snapshots | Presence, contact details, and local notes use app data. Accept/decline incoming requests, remove/block friends, and unblock contacts through capability-gated controls and the typed `change_relationship` service. Per-conversation agent access is controlled by `set_conversation_visibility`; it is separate from presentation Privacy Mode. |
 | Servers | `guilds_view()` → guild/channel metadata, access labels, and Discord URLs | Select guilds/channels and open the selected channel in Discord. There is no native channel message service. |
 | Voice | `rooms_view()` for lobby metadata and an optional matching recent conversation; `voice_view()` for session state, participants, and support flags | Supported voice controls are sent through the app. Room Messages opens the linked conversation in the separate Messages destination. Files requires backend history; device discovery and room transcription are unavailable. |
 | Inbox | `agent_inbox_view()` → `needs_attention` rows and pending actions with full payloads | Pending replies navigate to Messages; candidates/reminders to Tasks; commitments to Memory. Pending actions show the exact content and offer approve/reject. Approval is disabled when privacy masks the payload. |
 | Tasks | `tasks_view()` | Confirm, dismiss, and complete supported tasks. Task priorities, subtasks, and comments are not implemented. |
 | Memory | `memory_view(entity, include_history)` → provenance/status/confidence, supersession, graph edges, and counts | Confirm or reject supported memory items; commitments from Inbox open Memory. |
 | Settings and profiles | `settings_view()` plus `layout_profiles_view()` | Feature settings and profile create/rename/duplicate/delete/activate/reset. Layout edit uses Edit/Apply/Cancel and typed profile saves. |
-| Palette and diagnostics | `command_palette(query, active_conversation)`, `diagnostics_view()` | Run available commands and inspect revision, session, backend mode, capabilities, queues, counts, and measured metrics. |
+| Palette and diagnostics | `command_palette(query, active_conversation)`, `command_shortcuts(active_conversation)`, `diagnostics_view()` | Run available commands by palette or registered shortcut; Enter runs the first available current result. Inspect revision, session, backend mode, capabilities, queues, counts, and measured metrics. |
 
 `UiEffect` is what the backend cannot do for you: `Navigate`, `CopyToClipboard`,
 `OpenUrl` (always user-initiated), `Notice`.

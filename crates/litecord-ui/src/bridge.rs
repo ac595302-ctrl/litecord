@@ -33,6 +33,7 @@ pub struct Snapshot {
     pub rooms: litecord_app::rooms::RoomsViewModel,
     pub memory: MemoryViewModel,
     pub palette: CommandPaletteViewModel,
+    pub shortcuts: Vec<litecord_features::command::CommandMatch>,
     pub account: litecord_app::people::AccountViewModel,
     pub contact: Option<litecord_app::people::ContactViewModel>,
 }
@@ -47,6 +48,7 @@ pub enum Command {
     Visibility(ConversationId, AgentVisibility),
     Setting(String, serde_json::Value),
     Voice(VoiceControl),
+    Relationship(UserId, litecord_types::actions::RelationshipAction),
     CompleteTask(TaskId),
     ConfirmTask(TaskId),
     DismissTask(TaskId),
@@ -70,6 +72,7 @@ pub struct Completion {
     pub effects: Vec<UiEffect>,
     pub sent: Option<(ConversationId, String)>,
     pub message_changed: Option<MessageId>,
+    pub relationship_changed: Option<UserId>,
     pub error: Option<String>,
 }
 
@@ -128,7 +131,9 @@ impl Bridge {
                         tokio::time::sleep(std::time::Duration::from_millis(32)).await;
                         // Collapse an event burst before the next snapshot. A busy
                         // hydrator must not cause one full database read per event.
-                        while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = events.try_recv() {}
+                        for _ in 0..256 {
+                            if matches!(events.try_recv(),Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed)) {break;}
+                        }
                     }
                     _ = poll.tick() => {}
                 }
@@ -179,6 +184,7 @@ pub(crate) fn snapshot(
         memory: app.memory_view(None, false)?,
         account: app.account_view()?,
         palette: app.command_palette(&selection.palette_query, selection.conversation)?,
+        shortcuts: app.command_shortcuts(selection.conversation)?,
         contact: contact_id
             .map(|id| app.contact_view(id))
             .transpose()?
@@ -222,6 +228,14 @@ pub(crate) async fn execute(
         Command::Voice(control) => {
             app.voice(control).await?;
         }
+        Command::Relationship(user, action) => match app.change_relationship(user, action).await? {
+            litecord_actions::ProposeOutcome::Executed { .. } => {
+                c.relationship_changed = Some(user)
+            }
+            _ => c.effects.push(UiEffect::Notice {
+                message: "Relationship change requires review in Inbox.".into(),
+            }),
+        },
         Command::CompleteTask(id) => app.complete_task(id)?,
         Command::ConfirmTask(id) => app.confirm_task(id)?,
         Command::DismissTask(id) => app.dismiss_task(id)?,

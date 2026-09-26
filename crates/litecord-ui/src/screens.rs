@@ -3,8 +3,10 @@ use eframe::egui::{self, Align2, FontId, Rect, Sense, Ui};
 use litecord_app::view::{FriendRow, MessageRow};
 use litecord_layout::{Destination, Orientation};
 use litecord_types::{
+    actions::RelationshipAction,
+    capability::Capability,
     notes::UserNote,
-    social::{ConversationKind, PresenceStatus},
+    social::{ConversationKind, PresenceStatus, RelationshipKind},
     trust::AgentVisibility,
     Timestamp,
 };
@@ -511,7 +513,7 @@ impl Workspace {
     }
     fn friends(&mut self, ui: &mut Ui) {
         ui.heading("Friends");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (i, label) in ["Online", "All", "Pending", "Blocked"]
                 .into_iter()
                 .enumerate()
@@ -567,14 +569,109 @@ impl Workspace {
                                         self.request();
                                     }
                                     ui.label(
-                                        egui::RichText::new(r.status.as_str())
-                                            .size(12.0)
-                                            .color(theme::MUTED),
+                                        egui::RichText::new(
+                                            if matches!(
+                                                r.relationship,
+                                                RelationshipKind::PendingIncoming
+                                                    | RelationshipKind::PendingOutgoing
+                                            ) {
+                                                if r.relationship
+                                                    == RelationshipKind::PendingIncoming
+                                                {
+                                                    "Incoming request"
+                                                } else {
+                                                    "Outgoing request"
+                                                }
+                                            } else {
+                                                r.status.as_str()
+                                            },
+                                        )
+                                        .size(12.0)
+                                        .color(theme::MUTED),
                                     );
                                 });
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        let enabled = !self.busy
+                                            && !self.private()
+                                            && s.diagnostics.session.is_online();
+                                        let requests = enabled
+                                            && s.diagnostics
+                                                .capabilities
+                                                .is_usable(Capability::FriendRequests);
+                                        let blocking = enabled
+                                            && s.diagnostics
+                                                .capabilities
+                                                .is_usable(Capability::Blocking);
+                                        if r.relationship == RelationshipKind::PendingIncoming {
+                                            if ui
+                                                .add_enabled(requests, egui::Button::new("Decline"))
+                                                .clicked()
+                                            {
+                                                self.relationship_confirmation = Some((
+                                                    r.user_id,
+                                                    RelationshipAction::RejectFriendRequest,
+                                                    r.display_name.clone(),
+                                                ));
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    requests,
+                                                    egui::Button::new("Accept")
+                                                        .fill(theme::PRIMARY),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.send(Command::Relationship(
+                                                    r.user_id,
+                                                    RelationshipAction::AcceptFriendRequest,
+                                                ));
+                                            }
+                                        } else if r.relationship == RelationshipKind::Blocked {
+                                            if ui
+                                                .add_enabled(blocking, egui::Button::new("Unblock"))
+                                                .clicked()
+                                            {
+                                                self.relationship_confirmation = Some((
+                                                    r.user_id,
+                                                    RelationshipAction::Unblock,
+                                                    r.display_name.clone(),
+                                                ));
+                                            }
+                                        } else {
+                                            ui.menu_button("More", |ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        blocking,
+                                                        egui::Button::new("Block user"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.relationship_confirmation = Some((
+                                                        r.user_id,
+                                                        RelationshipAction::Block,
+                                                        r.display_name.clone(),
+                                                    ));
+                                                    ui.close();
+                                                }
+                                                if r.relationship == RelationshipKind::Friend
+                                                    && ui
+                                                        .add_enabled(
+                                                            requests,
+                                                            egui::Button::new("Remove friend"),
+                                                        )
+                                                        .clicked()
+                                                {
+                                                    self.relationship_confirmation = Some((
+                                                        r.user_id,
+                                                        RelationshipAction::RemoveFriend,
+                                                        r.display_name.clone(),
+                                                    ));
+                                                    ui.close();
+                                                }
+                                            });
+                                        }
                                         if ui
                                             .add_enabled(
                                                 r.dm_conversation_id.is_some(),
@@ -630,6 +727,46 @@ impl Workspace {
         } else {
             theme::section_label(ui, "Context");
             ui.label("Select a contact to inspect their profile.");
+        }
+    }
+    pub fn relationship_dialog(&mut self, ctx: &egui::Context) {
+        if self.private() {
+            return;
+        }
+        let Some((user, action, name)) = self.relationship_confirmation.clone() else {
+            return;
+        };
+        let label = match action {
+            RelationshipAction::Block => "Block user",
+            RelationshipAction::Unblock => "Unblock user",
+            RelationshipAction::RemoveFriend => "Remove friend",
+            RelationshipAction::RejectFriendRequest => "Decline request",
+            _ => "Change relationship",
+        };
+        let mut open = true;
+        egui::Window::new(label)
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(format!("{label}: {name}?"));
+                ui.label("This changes your relationship on the connected backend.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new(label))
+                        .clicked()
+                    {
+                        self.send(Command::Relationship(user, action));
+                    }
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.relationship_confirmation = None;
+                    }
+                });
+            });
+        if !open && !self.busy {
+            self.relationship_confirmation = None;
         }
     }
     fn context_sidebar(&mut self, ui: &mut Ui) {

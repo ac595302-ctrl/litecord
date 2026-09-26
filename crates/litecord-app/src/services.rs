@@ -571,6 +571,24 @@ impl LitecordApp {
         })
     }
 
+    /// All registered shortcuts, independent of palette query and result limit.
+    pub fn command_shortcuts(
+        &self,
+        active: Option<ConversationId>,
+    ) -> Result<Vec<litecord_features::command::CommandMatch>> {
+        let ctx = self.command_context(active)?;
+        let commands = self
+            .inner
+            .commands
+            .read()
+            .map_err(|_| Error::internal("command registry poisoned"))?;
+        Ok(commands
+            .search("", &ctx, usize::MAX)
+            .into_iter()
+            .filter(|command| command.shortcut.is_some())
+            .collect())
+    }
+
     pub async fn run_command(
         &self,
         id: &str,
@@ -685,6 +703,16 @@ impl LitecordApp {
 
     pub async fn delete_message(&self, message_id: MessageId) -> Result<ProposeOutcome> {
         self.user_action(AgentAction::DeleteMessage { message_id })
+            .await
+    }
+
+    /// Perform a user initiated relationship change through the Action Engine.
+    pub async fn change_relationship(
+        &self,
+        user_id: UserId,
+        action: RelationshipAction,
+    ) -> Result<ProposeOutcome> {
+        self.user_action(AgentAction::RelationshipChange { user_id, action })
             .await
     }
 
