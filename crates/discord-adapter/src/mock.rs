@@ -408,6 +408,24 @@ impl SocialBackend for MockBackend {
             },
         )
         .await;
+        // Like the SDK's presence callbacks after connecting, report the
+        // current presence of every known user.
+        let presences: Vec<(UserId, Presence)> = {
+            let s = self.lock();
+            let mut v: Vec<_> = s.presences.iter().map(|(u, p)| (*u, p.clone())).collect();
+            v.sort_by_key(|(u, _)| *u);
+            v
+        };
+        // These mimic callback-thread delivery, so they use the non-blocking
+        // path (drop + resync on a full queue) instead of awaiting capacity.
+        let now = self.clock.now();
+        for (user_id, presence) in presences {
+            let _ = sink.try_send(SourceEnvelope::new(
+                DiscordSource::Synthetic,
+                now,
+                DiscordEvent::PresenceChanged { user_id, presence },
+            ));
+        }
         Ok(())
     }
 
@@ -978,8 +996,8 @@ mod tests {
         let backend = MockBackend::demo(7, now());
         let (tx, mut rx) = ingest_channel(32);
         backend.connect(tx).await.unwrap();
-        rx.recv().await;
-        rx.recv().await;
+        // Drain session + initial presence events.
+        while rx.try_recv().is_some() {}
 
         backend
             .relationship_action(UserId(1001), RelationshipAction::Block)
@@ -1035,8 +1053,8 @@ mod tests {
         let backend = MockBackend::demo(9, now());
         let (tx, mut rx) = ingest_channel(32);
         backend.connect(tx).await.unwrap();
-        rx.recv().await;
-        rx.recv().await;
+        // Drain session + initial presence events.
+        while rx.try_recv().is_some() {}
 
         let conversations = backend.conversations().await.unwrap();
         let conv = conversations.first().cloned().unwrap();
