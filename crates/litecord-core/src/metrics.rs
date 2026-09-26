@@ -86,7 +86,8 @@ pub struct Metrics {
     pub event_queue_depth: Gauge,
     /// Approximate bytes queued in the ingest queue (shared with the bus).
     pub event_queue_bytes: Arc<Gauge>,
-    /// Approximate bytes held by the message hot cache.
+    /// Approximate bytes of the most recently loaded conversation window
+    /// (bounded by `cache.max_message_cache_bytes`).
     pub hot_cache_bytes: Arc<Gauge>,
     pub events_ingested: Counter,
     pub events_dropped: Counter,

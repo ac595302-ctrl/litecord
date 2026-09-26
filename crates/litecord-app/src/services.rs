@@ -264,6 +264,12 @@ impl LitecordApp {
                 recent.truncate(keep);
                 has_more = true;
             }
+            // Reported in Settings as the open conversation's window size.
+            let window_bytes: usize = recent
+                .iter()
+                .map(|m| litecord_core::events::message_approx_bytes(&m.message))
+                .sum();
+            self.inner.metrics.hot_cache_bytes.set(window_bytes as u64);
             recent.reverse();
             let mut messages = Vec::with_capacity(recent.len());
             for m in recent {

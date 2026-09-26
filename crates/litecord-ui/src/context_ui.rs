@@ -329,7 +329,7 @@ impl Workspace {
                     kib(m.event_queue_bytes)
                 ),
             ),
-            ("Message cache", kib(m.hot_cache_bytes)),
+            ("Open conversation", kib(m.hot_cache_bytes)),
             (
                 "Sync queue",
                 format!(
@@ -433,21 +433,23 @@ impl Workspace {
                 .find(|r| r.recipient_id == Some(c.user_id))
                 .map(|r| r.conversation_id);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 14.0;
-                if round_action(ui, crate::icons::Glyph::Message, "Message", dm.is_some()) {
+                // Four actions share the panel width; never wider than it.
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let w = ((ui.available_width() - 12.0) / 4.0).clamp(40.0, 60.0);
+                if round_action(ui, w, crate::icons::Glyph::Message, "Message", dm.is_some()) {
                     if let Some(conv) = dm {
                         self.navigate(Destination::Messages);
                         self.open_conversation(conv);
                     }
                 }
-                if round_action(ui, crate::icons::Glyph::Sparkle, "Ask Omni", true) {
+                if round_action(ui, w, crate::icons::Glyph::Sparkle, "Ask Omni", true) {
                     self.omni_open = true;
                     self.omni_draft = format!("What should I know about {name} right now?");
                 }
-                if round_action(ui, crate::icons::Glyph::Note, "Note", !self.private()) {
+                if round_action(ui, w, crate::icons::Glyph::Note, "Note", !self.private()) {
                     ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("contact_note")));
                 }
-                if round_action(ui, crate::icons::Glyph::External, "Discord", true) {
+                if round_action(ui, w, crate::icons::Glyph::External, "Discord", true) {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
                         "https://discord.com/users/{}",
                         c.user_id
@@ -629,15 +631,12 @@ impl Workspace {
             return;
         }
         let used = (h.db_bytes as f32 / h.quota_bytes as f32).clamp(0.0, 1.0);
-        ui.add(
-            egui::ProgressBar::new(used)
-                .desired_height(6.0)
-                .text(theme::meta(format!(
-                    "{:.1} of {:.0} MiB",
-                    mib(h.db_bytes),
-                    mib(h.quota_bytes)
-                ))),
-        );
+        ui.add(egui::ProgressBar::new(used).desired_height(6.0));
+        ui.label(theme::meta(format!(
+            "Database {:.1} of {:.0} MiB",
+            mib(h.db_bytes),
+            mib(h.quota_bytes)
+        )));
         if h.rows.is_empty() {
             ui.label(theme::meta(
                 "No conversations selected. Use Sync full history in a chat's details.",
@@ -681,9 +680,15 @@ pub(crate) fn visible_attention(items: &[InboxItem]) -> Vec<&InboxItem> {
 }
 
 /// Round icon action with a caption below (A01 inspector action row).
-fn round_action(ui: &mut Ui, glyph: crate::icons::Glyph, label: &str, enabled: bool) -> bool {
+fn round_action(
+    ui: &mut Ui,
+    width: f32,
+    glyph: crate::icons::Glyph,
+    label: &str,
+    enabled: bool,
+) -> bool {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(52.0, 58.0),
+        egui::vec2(width, 58.0),
         if enabled {
             egui::Sense::click()
         } else {

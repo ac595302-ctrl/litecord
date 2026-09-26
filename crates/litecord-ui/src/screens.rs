@@ -171,8 +171,9 @@ impl Workspace {
             .iter()
             .filter(|r| r.awaiting_reply)
             .count();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+        // Wraps rather than widening the panel when it is narrow.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(2.0, 4.0);
             for (i, (label, badge)) in [
                 ("All", None),
                 ("Unread", Some(waiting)),
