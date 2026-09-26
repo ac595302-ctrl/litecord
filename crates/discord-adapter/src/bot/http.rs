@@ -20,7 +20,9 @@ use super::rest::{self, Method, RestRequest, API_BASE};
 use super::transport::{BotTransport, GatewaySocket, SocketEvent};
 
 const USER_AGENT: &str = concat!(
-    "DiscordBot (https://github.com/Halo4God/Litecord, ",
+    "DiscordBot (",
+    env!("CARGO_PKG_REPOSITORY"),
+    ", ",
     env!("CARGO_PKG_VERSION"),
     ")"
 );
@@ -54,10 +56,12 @@ impl BotTransport for HttpTransport {
             Method::Patch => self.client.patch(&url),
             Method::Delete => self.client.delete(&url),
         };
-        let mut builder = builder.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bot {}", token.expose_secret()),
-        );
+        // Marked sensitive so reqwest/hyper redact it from Debug output.
+        let mut auth =
+            reqwest::header::HeaderValue::from_str(&format!("Bot {}", token.expose_secret()))
+                .map_err(|_| BackendError::Authentication("malformed bot token".into()))?;
+        auth.set_sensitive(true);
+        let mut builder = builder.header(reqwest::header::AUTHORIZATION, auth);
         if let Some(body) = &req.body {
             builder = builder.json(body);
         }

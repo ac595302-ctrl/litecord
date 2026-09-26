@@ -481,12 +481,7 @@ impl SocialBackend for MockBackend {
                 .with(Capability::CurrentUser, SupportLevel::Full)
                 .with(Capability::GuildListing, SupportLevel::Full)
                 .with(Capability::GuildChannels, SupportLevel::Full)
-                .with(Capability::GuildMessages, SupportLevel::Full)
-                .with(Capability::DmList, SupportLevel::Full)
-                .with(Capability::DmHistory, SupportLevel::Full)
-                .with(Capability::DmSend, SupportLevel::Full)
-                .with(Capability::DmEdit, SupportLevel::Full)
-                .with(Capability::DmDelete, SupportLevel::Full);
+                .with(Capability::GuildMessages, SupportLevel::Full);
         }
         let mut set = CapabilitySet::default()
             .with(Capability::CurrentUser, SupportLevel::Full)

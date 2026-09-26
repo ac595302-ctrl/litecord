@@ -215,12 +215,15 @@ async fn run_socket(
                     Err(e) => tracing::warn!(event = %event, error = %e, "untranslatable dispatch"),
                 },
                 Output::Ready => *backoff = shared.cfg.reconnect_min,
-                Output::Resumed => shared.emit(
-                    sink,
-                    DiscordEvent::SessionChanged {
-                        state: SessionState::Ready,
-                    },
-                ),
+                Output::Resumed => {
+                    *backoff = shared.cfg.reconnect_min;
+                    shared.emit(
+                        sink,
+                        DiscordEvent::SessionChanged {
+                            state: SessionState::Ready,
+                        },
+                    );
+                }
                 Output::Reconnect { resume, url } => {
                     socket.close().await;
                     return Next::Reconnect {
@@ -263,7 +266,7 @@ async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToke
             return;
         }
         let url = match resume_url.take() {
-            Some(u) => Ok(u),
+            Some(u) => Ok(rest::gateway_connect_url(&u)),
             None => match shared.call(rest::gateway_bot()).await {
                 Ok(v) => rest::parse_gateway_url(&v).map_err(bad_payload),
                 Err(e) => Err(e),
@@ -323,12 +326,20 @@ async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToke
                     },
                 );
                 resume_url = url;
-                if wait {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(shared.cfg.reconnect_min.max(Duration::from_secs(1))) => {}
-                    }
+                // Always pause before reconnecting. The delay doubles while
+                // sessions keep dropping before READY/RESUMED (which reset
+                // it), so a flapping gateway is never hammered. Discord asks
+                // for at least 1 s before a fresh identify.
+                let pause = if wait {
+                    backoff.max(Duration::from_secs(1))
+                } else {
+                    backoff
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(pause) => {}
                 }
+                backoff = (backoff * 2).min(shared.cfg.reconnect_max);
             }
         }
     }
@@ -350,11 +361,6 @@ impl SocialBackend for BotBackend {
             .with(Capability::GuildListing, SupportLevel::Full)
             .with(Capability::GuildChannels, SupportLevel::Full)
             .with(Capability::GuildMessages, SupportLevel::Full)
-            .with(Capability::DmList, SupportLevel::Full)
-            .with(Capability::DmHistory, SupportLevel::Full)
-            .with(Capability::DmSend, SupportLevel::Full)
-            .with(Capability::DmEdit, SupportLevel::Full)
-            .with(Capability::DmDelete, SupportLevel::Full)
     }
 
     async fn connect(&self, sink: IngestSender) -> BackendResult<()> {

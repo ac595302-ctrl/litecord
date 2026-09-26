@@ -172,6 +172,27 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Audit fixes — September 26, 2026
+
+- **Agent visibility leak (fixed):** commitment tasks and reminders carry
+  message-derived text plus a `conversation_id`, but `list_tasks`,
+  `discord://tasks`/`reminders` and the context compiler listed them without
+  checking that conversation's visibility. They now follow
+  `VisibilityPolicy::allows_content` like everything else (the retriever
+  already did). Tests: `litecord-context/tests/compiler.rs`,
+  `litecord-app/tests/bot.rs`.
+- **Capability honesty:** the bot backends advertised `Dm*` capabilities
+  only because the engine checked `DmSend`/`DmEdit`/`DmDelete` for every
+  message write. The engine now requires `GuildMessages` for writes in guild
+  channels and `Dm*` for DMs (`required_capability` in `engine.rs`); the
+  bot no longer claims DM support, and the conversation view's
+  `can_edit`/`can_delete` use the same rule.
+- **Bot gateway:** resume now connects with `?v=10&encoding=json` appended
+  (`rest::gateway_connect_url`); every reconnect pauses for a backoff that
+  doubles until READY/RESUMED, so a flapping gateway is never hammered; the
+  `Authorization` header is marked sensitive so it is redacted from Debug
+  output; the User-Agent URL comes from the workspace `repository`.
+
 ### Memory footprint note (for UI performance work)
 
 `litecord demo --in-memory` (release, headless: full runtime, SQLite, demo

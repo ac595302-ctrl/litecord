@@ -171,7 +171,17 @@ pub fn parse_gateway_url(v: &Value) -> Result<String, TranslateError> {
         .get("url")
         .and_then(Value::as_str)
         .ok_or(TranslateError::Missing("url"))?;
-    Ok(format!("{url}/?v=10&encoding=json"))
+    Ok(gateway_connect_url(url))
+}
+
+/// Appends the required `v`/`encoding` query to a gateway base URL. Discord
+/// requires it on both the `/gateway/bot` URL and READY's
+/// `resume_gateway_url`. URLs that already carry a query are left alone.
+pub fn gateway_connect_url(base: &str) -> String {
+    if base.contains('?') {
+        return base.to_owned();
+    }
+    format!("{}/?v=10&encoding=json", base.trim_end_matches('/'))
 }
 
 /// Maps an HTTP error response to a [`BackendError`].
@@ -297,6 +307,11 @@ mod tests {
             parse_gateway_url(&v).unwrap(),
             "wss://gateway.discord.gg/?v=10&encoding=json"
         );
+        assert_eq!(
+            gateway_connect_url("wss://gateway-us-east1-b.discord.gg/"),
+            "wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json"
+        );
+        assert_eq!(gateway_connect_url("wss://x/?v=10"), "wss://x/?v=10");
     }
 
     #[test]

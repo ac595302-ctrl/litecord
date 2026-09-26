@@ -4,6 +4,7 @@ description = "Discord backend implementations of litecord-core::ports::SocialBa
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = []

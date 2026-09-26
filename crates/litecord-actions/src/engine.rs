@@ -561,6 +561,33 @@ pub fn validate_static(action: &AgentAction) -> Result<(), ActionError> {
     Ok(())
 }
 
+/// The capability an action needs. Message writes in guild channels need
+/// `GuildMessages` (a bot can; the Social SDK cannot); in DMs the per-action
+/// `Dm*` capability applies.
+fn required_capability(
+    conn: &Connection,
+    action: &AgentAction,
+) -> Result<Option<Capability>, ActionError> {
+    let conversation = match action {
+        AgentAction::SendMessage {
+            target: MessageTarget::Conversation { conversation_id },
+            ..
+        } => Some(*conversation_id),
+        AgentAction::EditMessage { message_id, .. } | AgentAction::DeleteMessage { message_id } => {
+            repos::messages::get(conn, *message_id)?.map(|m| m.message.conversation_id)
+        }
+        _ => None,
+    };
+    if let Some(id) = conversation {
+        if repos::conversations::get(conn, id)?
+            .is_some_and(|c| c.conversation.kind == ConversationKind::GuildChannel)
+        {
+            return Ok(Some(Capability::GuildMessages));
+        }
+    }
+    Ok(action.required_capability())
+}
+
 /// Checks against current state. Run at proposal, approval **and** right
 /// before execution (revalidation).
 fn validate_state(
@@ -594,7 +621,7 @@ fn validate_state(
             )));
         }
     }
-    if let Some(cap) = action.required_capability() {
+    if let Some(cap) = required_capability(conn, action)? {
         if !caps.entries.is_empty() && !caps.is_usable(cap) {
             return Err(ActionError::Invalid(format!(
                 "the connected Discord backend does not support {cap:?}"

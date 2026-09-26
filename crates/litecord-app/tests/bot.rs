@@ -170,3 +170,56 @@ async fn agent_bot_proposals_show_identity_and_need_approval() {
     assert!(err.is_err());
     app.shutdown().await;
 }
+
+/// Tasks and reminders extracted from a conversation carry its text, so
+/// agent listings follow that conversation's visibility.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_task_listings_respect_conversation_visibility() {
+    use litecord_store::repos;
+    use litecord_types::provenance::Origin;
+    use litecord_types::tasks::{TaskDraft, TaskPriority, TaskStatus};
+    use litecord_types::trust::AgentVisibility;
+
+    let (app, _, _) = start().await;
+    let dm = app
+        .conversations_view(100)
+        .unwrap()
+        .conversations
+        .into_iter()
+        .find(|c| c.kind == ConversationKind::DirectMessage)
+        .unwrap()
+        .conversation_id;
+    let draft = TaskDraft {
+        title: "secret plan from the DM".into(),
+        description: None,
+        priority: TaskPriority::default(),
+        due_at: None,
+        related_users: Vec::new(),
+        conversation_id: Some(dm),
+        parent_id: None,
+        source: None,
+    };
+    app.database()
+        .write(|tx| {
+            repos::tasks::create(tx, &draft, TaskStatus::Candidate, Origin::LocalApplication)
+        })
+        .unwrap();
+
+    let gateway = app.agent_gateway();
+    let caller = Caller::new("test-agent");
+    let listed = |v: serde_json::Value| v.to_string().contains("secret plan from the DM");
+    let tasks = gateway
+        .call_tool("list_tasks", json!({}), &caller)
+        .await
+        .unwrap();
+    assert!(listed(tasks), "visible conversation: task is listed");
+
+    app.set_conversation_visibility(dm, Some(AgentVisibility::Hidden))
+        .unwrap();
+    let tasks = gateway
+        .call_tool("list_tasks", json!({}), &caller)
+        .await
+        .unwrap();
+    assert!(!listed(tasks), "hidden conversation: task is withheld");
+    assert!(!listed(gateway.read_resource("discord://tasks").unwrap()));
+}

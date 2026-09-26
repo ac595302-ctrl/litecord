@@ -297,8 +297,16 @@ impl LitecordApp {
                 has_more,
                 capabilities: ConversationCapabilities {
                     can_send: send_identity.is_some(),
-                    can_edit: caps.is_usable(Capability::DmEdit),
-                    can_delete: caps.is_usable(Capability::DmDelete),
+                    can_edit: if is_guild_channel {
+                        caps.is_usable(Capability::GuildMessages)
+                    } else {
+                        caps.is_usable(Capability::DmEdit)
+                    },
+                    can_delete: if is_guild_channel {
+                        caps.is_usable(Capability::GuildMessages)
+                    } else {
+                        caps.is_usable(Capability::DmDelete)
+                    },
                     history: caps.dm_history.clone(),
                     open_in_discord_url: DiscordTarget::Conversation {
                         conversation_id: id,

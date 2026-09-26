@@ -285,3 +285,45 @@ fn superseded_memories_only_with_history() {
     let pack = c.compile(&req, TokenBudget::default()).unwrap();
     assert!(pack.memories.iter().any(|m| m.memory_id == old));
 }
+
+#[test]
+fn tasks_from_hidden_conversations_are_excluded() {
+    use litecord_types::tasks::{TaskDraft, TaskPriority, TaskStatus};
+    let (db, c) = setup();
+    let task = |title: &str, conversation_id| TaskDraft {
+        title: title.into(),
+        description: None,
+        priority: TaskPriority::default(),
+        due_at: None,
+        related_users: Vec::new(),
+        conversation_id,
+        parent_id: None,
+        source: None,
+    };
+    db.write(|tx| {
+        repos::tasks::create(
+            tx,
+            &task("Review the deck", Some(A)),
+            TaskStatus::Open,
+            Origin::UserProvided,
+        )?;
+        repos::tasks::create(
+            tx,
+            &task("Leak the prototype", Some(C)),
+            TaskStatus::Candidate,
+            Origin::LocalApplication,
+        )?;
+        repos::tasks::create(
+            tx,
+            &task("Buy milk", None),
+            TaskStatus::Open,
+            Origin::UserProvided,
+        )
+    })
+    .unwrap();
+    let pack = compile(&c, "what are my tasks?");
+    let titles: Vec<_> = pack.tasks.iter().map(|t| t.title.as_str()).collect();
+    assert!(titles.contains(&"Review the deck"), "{titles:?}");
+    assert!(titles.contains(&"Buy milk"), "{titles:?}");
+    assert!(!titles.contains(&"Leak the prototype"), "{titles:?}");
+}

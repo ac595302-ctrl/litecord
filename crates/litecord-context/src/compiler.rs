@@ -402,6 +402,10 @@ impl ContextCompiler {
                     .related_users
                     .iter()
                     .any(|u| intent.resolved_entities.contains(&EntityId::User(*u)));
+                // Tasks extracted from a conversation carry its text.
+                if !t.conversation_id.is_none_or(|c| vis.allows_content(c)) {
+                    continue;
+                }
                 if intent.wants_tasks || related || task_ids.contains(&t.id) {
                     tasks.push(TaskContext {
                         task_id: t.id,
@@ -424,6 +428,9 @@ impl ContextCompiler {
                     ..Default::default()
                 },
             )? {
+                if !rem.conversation_id.is_none_or(|c| vis.allows_content(c)) {
+                    continue;
+                }
                 reminders.push(ReminderContext {
                     reminder_id: rem.id,
                     title: rem.title,

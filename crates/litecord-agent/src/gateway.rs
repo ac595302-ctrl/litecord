@@ -634,6 +634,14 @@ impl AgentGateway {
                     ..Default::default()
                 },
             )?;
+            // Tasks extracted from a conversation carry its text; they
+            // follow that conversation's agent visibility.
+            let vis = VisibilityPolicy::load(r, self.default_visibility)
+                .map_err(litecord_core::Error::from)?;
+            let tasks: Vec<_> = tasks
+                .into_iter()
+                .filter(|t| t.conversation_id.is_none_or(|c| vis.allows_content(c)))
+                .collect();
             Ok(json!({ "tasks": to_value(&tasks)? }))
         })
     }
@@ -648,6 +656,12 @@ impl AgentGateway {
                     ..Default::default()
                 },
             )?;
+            let vis = VisibilityPolicy::load(r, self.default_visibility)
+                .map_err(litecord_core::Error::from)?;
+            let reminders: Vec<_> = reminders
+                .into_iter()
+                .filter(|m| m.conversation_id.is_none_or(|c| vis.allows_content(c)))
+                .collect();
             Ok(json!({ "reminders": to_value(&reminders)? }))
         })
     }
