@@ -43,6 +43,28 @@ pub enum Priority {
     Immediate,
 }
 
+impl Priority {
+    /// Stable integer form for persistence (`hydration_jobs.priority`).
+    pub const fn as_i32(self) -> i32 {
+        match self {
+            Priority::Background => 0,
+            Priority::Normal => 1,
+            Priority::High => 2,
+            Priority::Immediate => 3,
+        }
+    }
+
+    /// Inverse of [`Priority::as_i32`]; out-of-range values clamp.
+    pub const fn from_i32(v: i32) -> Priority {
+        match v {
+            i32::MIN..=0 => Priority::Background,
+            1 => Priority::Normal,
+            2 => Priority::High,
+            _ => Priority::Immediate,
+        }
+    }
+}
+
 /// Why a hydration was requested. Purely informational (logging, tracing,
 /// deciding rerun-vs-coalesce behavior) — it never changes what gets fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -535,6 +557,19 @@ impl HydrationScheduler {
     pub fn pending_snapshot(&self) -> Vec<(HydrationKey, Priority)> {
         let mut v: Vec<_> = self.pending.iter().map(|(k, p)| (*k, p.priority)).collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.1));
+        v
+    }
+
+    /// Everything not yet completed: pending plus in-flight jobs (which a
+    /// shutdown interrupts). Used to persist the queue for restart recovery.
+    pub fn unfinished_snapshot(&self) -> Vec<(HydrationKey, Priority)> {
+        let mut v = self.pending_snapshot();
+        for (k, a) in &self.active {
+            if !v.iter().any(|(pk, _)| pk == k) {
+                v.push((*k, a.priority));
+            }
+        }
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
 }

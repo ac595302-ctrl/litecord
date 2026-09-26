@@ -158,6 +158,9 @@ impl AppBuilder {
         }
 
         backend.connect(ingest.clone()).await?;
+        if let Err(e) = crate::recovery::restore(&db, &hydrator) {
+            tracing::warn!(error = %e, "could not restore hydration queue");
+        }
         hydrator.initial_hydration();
         tracing::info!(mode = ?backend.mode(), "litecord started");
 
@@ -255,7 +258,14 @@ impl LitecordApp {
             tracing::warn!(error = %e, "backend disconnect failed");
         }
         let grace = Duration::from_millis(self.inner.cfg.runtime.shutdown_grace_ms);
-        self.inner.supervisor.shutdown(grace).await
+        let report = self.inner.supervisor.shutdown(grace).await;
+        // Tasks are stopped, so the queue is stable now.
+        match crate::recovery::persist(&self.inner.db, &self.inner.hydrator) {
+            Ok(n) if n > 0 => tracing::info!(persisted = n, "hydration queue saved"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "could not persist hydration queue"),
+        }
+        report
     }
 }
 

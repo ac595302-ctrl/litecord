@@ -237,6 +237,11 @@ impl Hydrator {
         self.request_core_set(HydrationReason::Reconciliation);
     }
 
+    /// Pending + in-flight jobs, for persisting across restarts.
+    pub fn unfinished_snapshot(&self) -> Vec<(HydrationKey, Priority)> {
+        self.lock_scheduler().unfinished_snapshot()
+    }
+
     pub fn pending_len(&self) -> usize {
         self.lock_scheduler().pending_len()
     }
