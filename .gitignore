@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.db
+*.db-wal
+*.db-shm
+.env
+/vendor/discord-sdk/*
+!/vendor/discord-sdk/README.md

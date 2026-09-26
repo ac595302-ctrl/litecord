@@ -1,0 +1,191 @@
+//! Tasks, reminders and drafts (operational memory).
+//!
+//! The pipeline keeps three things apart (V2 §22):
+//! *source message* → *derived candidate* (`TaskStatus::Candidate`) →
+//! *confirmed* task/reminder. Provenance survives every step.
+
+use serde::{Deserialize, Serialize};
+
+use crate::ids::*;
+use crate::provenance::{Origin, SourceRef};
+use crate::{Revision, Timestamp};
+
+str_enum! {
+    pub enum TaskStatus {
+        /// Derived from content; awaiting user confirmation.
+        Candidate => "candidate",
+        Open => "open",
+        Done => "done",
+        Cancelled => "cancelled",
+        /// A candidate the user rejected.
+        Dismissed => "dismissed",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: TaskId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: TaskStatus,
+    pub origin: Origin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceRef>,
+    #[serde(default)]
+    pub related_users: Vec<UserId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Timestamp>,
+    pub revision: Revision,
+}
+
+/// Input for creating a task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskDraft {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub due_at: Option<Timestamp>,
+    #[serde(default)]
+    pub related_users: Vec<UserId>,
+    #[serde(default)]
+    pub conversation_id: Option<ConversationId>,
+    #[serde(default)]
+    pub source: Option<SourceRef>,
+}
+
+/// A condition evaluated locally (no LLM) to decide whether a conditional
+/// reminder should fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReminderCondition {
+    /// Fire only if `user_id` has not sent a message in `conversation_id`
+    /// after `since`.
+    NoReplyFrom {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        since: Timestamp,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReminderTrigger {
+    At {
+        at: Timestamp,
+    },
+    /// Evaluate `condition` at `check_at`; fire if it holds, otherwise mark
+    /// the reminder `Satisfied`.
+    Conditional {
+        condition: ReminderCondition,
+        check_at: Timestamp,
+    },
+}
+
+impl ReminderTrigger {
+    pub fn due_at(&self) -> Timestamp {
+        match self {
+            ReminderTrigger::At { at } => *at,
+            ReminderTrigger::Conditional { check_at, .. } => *check_at,
+        }
+    }
+}
+
+str_enum! {
+    pub enum ReminderStatus {
+        Pending => "pending",
+        Fired => "fired",
+        /// Conditional reminder whose condition no longer holds.
+        Satisfied => "satisfied",
+        Dismissed => "dismissed",
+        Cancelled => "cancelled",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reminder {
+    pub id: ReminderId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub trigger: ReminderTrigger,
+    pub status: ReminderStatus,
+    pub origin: Origin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceRef>,
+    pub created_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired_at: Option<Timestamp>,
+    pub revision: Revision,
+}
+
+/// Input for creating a reminder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReminderDraft {
+    pub title: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub trigger: ReminderTrigger,
+    #[serde(default)]
+    pub conversation_id: Option<ConversationId>,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    #[serde(default)]
+    pub source: Option<SourceRef>,
+}
+
+str_enum! {
+    pub enum DraftStatus {
+        Open => "open",
+        /// Turned into a send proposal awaiting approval.
+        Proposed => "proposed",
+        Sent => "sent",
+        Discarded => "discarded",
+    }
+}
+
+/// A local message draft. Drafts never leave the machine by themselves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Draft {
+    pub id: DraftId,
+    pub conversation_id: ConversationId,
+    pub content: String,
+    pub origin: Origin,
+    pub status: DraftStatus,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub revision: Revision,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reminder_trigger_serialization() {
+        let t = ReminderTrigger::Conditional {
+            condition: ReminderCondition::NoReplyFrom {
+                user_id: UserId(1),
+                conversation_id: ConversationId(2),
+                since: Timestamp(3),
+            },
+            check_at: Timestamp(4),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["type"], "conditional");
+        assert_eq!(v["condition"]["type"], "no_reply_from");
+        assert_eq!(t.due_at(), Timestamp(4));
+        let back: ReminderTrigger = serde_json::from_value(v).unwrap();
+        assert_eq!(back, t);
+    }
+}

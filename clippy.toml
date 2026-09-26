@@ -1,0 +1,4 @@
+# unwrap/expect are denied in runtime code (workspace lints) but are the
+# idiomatic way to fail a test.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

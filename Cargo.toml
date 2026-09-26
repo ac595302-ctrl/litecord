@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Halo4God/Litecord"
+
+[workspace.dependencies]
+# Internal crates
+litecord-types = { path = "crates/litecord-types" }
+litecord-core = { path = "crates/litecord-core" }
+litecord-store = { path = "crates/litecord-store" }
+litecord-memory = { path = "crates/litecord-memory" }
+litecord-hydrator = { path = "crates/litecord-hydrator" }
+litecord-retrieval = { path = "crates/litecord-retrieval" }
+litecord-context = { path = "crates/litecord-context" }
+litecord-actions = { path = "crates/litecord-actions" }
+litecord-agent = { path = "crates/litecord-agent" }
+litecord-mcp = { path = "crates/litecord-mcp" }
+litecord-features = { path = "crates/litecord-features" }
+litecord-app = { path = "crates/litecord-app" }
+discord-ffi = { path = "crates/discord-ffi" }
+discord-adapter = { path = "crates/discord-adapter" }
+
+# External crates (keep this list intentional)
+async-trait = "0.1.89"
+blake3 = "1.8"
+clap = { version = "4.5", features = ["derive"] }
+lru = "0.18"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "io-std"] }
+tokio-util = "0.7"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
