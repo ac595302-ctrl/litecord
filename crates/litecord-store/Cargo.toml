@@ -1,0 +1,21 @@
+[package]
+name = "litecord-store"
+description = "SQLite persistence for Litecord: migrations, revisioned transactions, repositories, FTS and the canonical state reducer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

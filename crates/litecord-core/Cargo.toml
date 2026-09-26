@@ -1,0 +1,24 @@
+[package]
+name = "litecord-core"
+description = "Litecord application core: errors, configuration, events, event bus, backend ports, secrets, metrics, clock and task supervision."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

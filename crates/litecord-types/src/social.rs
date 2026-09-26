@@ -180,6 +180,8 @@ str_enum! {
         GroupDm => "group_dm",
         Lobby => "lobby",
         GuildChannel => "guild_channel",
+        /// Seen via a message before its conversation was hydrated.
+        Unknown => "unknown",
     }
 }
 
