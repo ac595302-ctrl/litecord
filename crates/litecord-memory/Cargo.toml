@@ -1,0 +1,18 @@
+[package]
+name = "litecord-memory"
+description = "Unified-memory services: deduplication, supersession, confirmation, expiry, heuristic candidate extraction, entity graph, hot/warm/cold tiers, tasks and reminders."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+lru.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

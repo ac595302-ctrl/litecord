@@ -299,6 +299,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "litecord-memory"
+version = "0.1.0"
+dependencies = [
+ "litecord-core",
+ "litecord-store",
+ "litecord-types",
+ "lru",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "litecord-retrieval"
 version = "0.1.0"
 dependencies = [
@@ -332,6 +345,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
