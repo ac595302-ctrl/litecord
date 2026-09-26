@@ -14,6 +14,7 @@ litecord-hydrator.workspace = true
 litecord-retrieval.workspace = true
 litecord-context.workspace = true
 litecord-actions.workspace = true
+litecord-agent.workspace = true
 litecord-features.workspace = true
 discord-adapter.workspace = true
 serde.workspace = true

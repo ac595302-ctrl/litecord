@@ -67,7 +67,7 @@ impl std::fmt::Display for SummaryLevel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Summary {
     pub id: i64,
     pub conversation_id: Option<ConversationId>,

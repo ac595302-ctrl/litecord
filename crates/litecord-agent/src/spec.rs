@@ -261,20 +261,60 @@ pub fn tools() -> Vec<ToolSpec> {
 
 pub fn resources() -> Vec<ResourceSpec> {
     vec![
-        ResourceSpec { uri: "discord://me", name: "me", description: "The signed-in Discord user." },
-        ResourceSpec { uri: "discord://relationships", name: "relationships", description: "Friends, pending and blocked users." },
-        ResourceSpec { uri: "discord://conversations", name: "conversations", description: "Recent conversations." },
-        ResourceSpec { uri: "discord://guilds", name: "guilds", description: "Guilds the user belongs to." },
-        ResourceSpec { uri: "discord://tasks", name: "tasks", description: "Open and candidate tasks." },
-        ResourceSpec { uri: "discord://reminders", name: "reminders", description: "Pending reminders." },
-        ResourceSpec { uri: "discord://memory/recent", name: "recent memory", description: "Recently recorded active memories with provenance." },
-        ResourceSpec { uri: "discord://actions/pending", name: "pending actions", description: "Proposals awaiting user approval." },
+        ResourceSpec {
+            uri: "discord://me",
+            name: "me",
+            description: "The signed-in Discord user.",
+        },
+        ResourceSpec {
+            uri: "discord://relationships",
+            name: "relationships",
+            description: "Friends, pending and blocked users.",
+        },
+        ResourceSpec {
+            uri: "discord://conversations",
+            name: "conversations",
+            description: "Recent conversations.",
+        },
+        ResourceSpec {
+            uri: "discord://guilds",
+            name: "guilds",
+            description: "Guilds the user belongs to.",
+        },
+        ResourceSpec {
+            uri: "discord://tasks",
+            name: "tasks",
+            description: "Open and candidate tasks.",
+        },
+        ResourceSpec {
+            uri: "discord://reminders",
+            name: "reminders",
+            description: "Pending reminders.",
+        },
+        ResourceSpec {
+            uri: "discord://memory/recent",
+            name: "recent memory",
+            description: "Recently recorded active memories with provenance.",
+        },
+        ResourceSpec {
+            uri: "discord://actions/pending",
+            name: "pending actions",
+            description: "Proposals awaiting user approval.",
+        },
     ]
 }
 
 pub fn resource_templates() -> Vec<ResourceTemplate> {
     vec![
-        ResourceTemplate { uri_template: "discord://conversations/{id}", name: "conversation", description: "A conversation with recent messages." },
-        ResourceTemplate { uri_template: "discord://guilds/{id}", name: "guild", description: "A guild with its channels." },
+        ResourceTemplate {
+            uri_template: "discord://conversations/{id}",
+            name: "conversation",
+            description: "A conversation with recent messages.",
+        },
+        ResourceTemplate {
+            uri_template: "discord://guilds/{id}",
+            name: "guild",
+            description: "A guild with its channels.",
+        },
     ]
 }

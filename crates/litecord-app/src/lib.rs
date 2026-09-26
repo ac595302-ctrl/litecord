@@ -11,4 +11,4 @@ mod runtime;
 pub mod services;
 pub mod view;
 
-pub use app::{AppBuilder, LitecordApp};
+pub use app::{standalone_gateway, AppBuilder, LitecordApp};

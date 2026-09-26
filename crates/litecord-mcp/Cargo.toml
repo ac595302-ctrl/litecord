@@ -14,11 +14,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+litecord-app.workspace = true
 litecord-core.workspace = true
-litecord-store.workspace = true
-litecord-retrieval.workspace = true
-litecord-context.workspace = true
-litecord-actions.workspace = true
 discord-adapter.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# Temporarily excluded until the retriever/compiler land (see docs/HANDOFF.md).
-exclude = ["crates/litecord-agent", "crates/litecord-mcp"]
 
 [workspace.package]
 version = "0.1.0"

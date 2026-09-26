@@ -5,10 +5,20 @@
 //! deterministically. Semantic relevance is an optional re-ranking signal
 //! from an [`embedding::EmbeddingProvider`].
 //!
-//! Retrieval never bypasses agent visibility: callers pass the conversations
-//! that are hidden or metadata-only and those are excluded from content
-//! results.
+//! Retrieval never bypasses agent visibility: every result is checked against
+//! a [`VisibilityPolicy`]; hidden and metadata-only conversations never
+//! contribute content.
 
 pub mod embedding;
+pub mod error;
+pub mod retriever;
 pub mod score;
 pub mod temporal;
+pub mod visibility;
+
+pub use error::RetrievalError;
+pub use retriever::{
+    DocKind, RetrievalFilters, RetrievalQuery, RetrievedDoc, RetrievedItem, Retriever,
+};
+pub use score::{RetrievalScore, ScoringWeights};
+pub use visibility::VisibilityPolicy;

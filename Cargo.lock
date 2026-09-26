@@ -264,11 +264,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "litecord-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "discord-adapter",
+ "litecord-actions",
+ "litecord-context",
+ "litecord-core",
+ "litecord-retrieval",
+ "litecord-store",
+ "litecord-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "litecord-app"
 version = "0.1.0"
 dependencies = [
  "discord-adapter",
  "litecord-actions",
+ "litecord-agent",
  "litecord-context",
  "litecord-core",
  "litecord-features",
@@ -338,6 +358,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "litecord-mcp"
+version = "0.1.0"
+dependencies = [
+ "discord-adapter",
+ "litecord-agent",
+ "litecord-app",
+ "litecord-core",
+ "litecord-types",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

@@ -258,3 +258,61 @@ impl LitecordApp {
         self.inner.supervisor.shutdown(grace).await
     }
 }
+
+impl LitecordApp {
+    /// Build the harness-neutral agent gateway over this app's memory. The
+    /// gateway receives only a propose-only handle to the Action Engine.
+    pub fn agent_gateway(&self) -> litecord_agent::AgentGateway {
+        agent_gateway_for(
+            &self.inner.db,
+            &self.inner.cfg,
+            self.inner.actions.proposer(),
+            Some(self.inner.metrics.clone()),
+        )
+    }
+}
+
+/// Build an agent gateway over a database without a running app — used by
+/// the standalone MCP process, which has no Discord backend: local writes
+/// execute, Discord writes can only be proposed (the app executes them after
+/// user approval).
+pub fn standalone_gateway(
+    db: Database,
+    cfg: &LitecordConfig,
+) -> Result<litecord_agent::AgentGateway> {
+    let executor = Arc::new(DefaultExecutor::new(db.clone(), None));
+    let engine = ActionEngine::new(db.clone(), &cfg.agent, executor)?;
+    Ok(agent_gateway_for(&db, cfg, engine.proposer(), None))
+}
+
+fn agent_gateway_for(
+    db: &Database,
+    cfg: &LitecordConfig,
+    proposer: litecord_actions::ActionProposer,
+    metrics: Option<Arc<Metrics>>,
+) -> litecord_agent::AgentGateway {
+    use litecord_context::{CompilerConfig, ContextCompiler};
+    use litecord_retrieval::{Retriever, ScoringWeights};
+    let mut retriever = Retriever::new(ScoringWeights::default());
+    if let Some(m) = &metrics {
+        retriever = retriever.with_metrics(m.clone());
+    }
+    let mut compiler = ContextCompiler::new(
+        db.clone(),
+        retriever.clone(),
+        CompilerConfig {
+            default_visibility: cfg.agent.default_visibility,
+            ..CompilerConfig::default()
+        },
+    );
+    if let Some(m) = metrics {
+        compiler = compiler.with_metrics(m);
+    }
+    litecord_agent::AgentGateway::new(
+        db.clone(),
+        Arc::new(compiler),
+        Arc::new(retriever),
+        proposer,
+        &cfg.agent,
+    )
+}

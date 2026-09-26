@@ -21,8 +21,8 @@ use litecord_actions::{ActionProposer, ProposeOutcome};
 use litecord_context::{AgentRequest, ContextCompiler, MessageContext, TokenBudget};
 use litecord_core::config::AgentConfig;
 use litecord_retrieval::{DocKind, RetrievalQuery, RetrievedDoc, Retriever, VisibilityPolicy};
-use litecord_store::repos::{self, Connection};
 use litecord_store::repos::messages::MessageRecord;
+use litecord_store::repos::{self, Connection};
 use litecord_store::Database;
 use litecord_types::actions::*;
 use litecord_types::capability::DiscordTarget;
@@ -30,7 +30,9 @@ use litecord_types::ids::*;
 use litecord_types::memory::MemoryStatus;
 use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::{Activity, PresenceStatus, RelationshipKind};
-use litecord_types::tasks::{ReminderCondition, ReminderDraft, ReminderTrigger, ReminderStatus, TaskDraft, TaskStatus};
+use litecord_types::tasks::{
+    ReminderCondition, ReminderDraft, ReminderStatus, ReminderTrigger, TaskDraft, TaskStatus,
+};
 use litecord_types::trust::{AgentVisibility, TrustLevel};
 use litecord_types::{DurationMs, Timestamp};
 
@@ -75,7 +77,9 @@ type ToolResult = Result<Value, ToolError>;
 // ---- argument helpers ----
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
@@ -83,7 +87,8 @@ fn req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
 }
 
 fn arg_i64(args: &Value, key: &str) -> Option<i64> {
-    args.get(key).and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+    args.get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
 }
 
 fn arg_bool(args: &Value, key: &str) -> bool {
@@ -99,7 +104,11 @@ fn arg_id<T: FromStr>(args: &Value, key: &str) -> Result<Option<T>, ToolError> {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
         Value::Null => return Ok(None),
-        _ => return Err(ToolError::InvalidArguments(format!("`{key}` must be an id"))),
+        _ => {
+            return Err(ToolError::InvalidArguments(format!(
+                "`{key}` must be an id"
+            )))
+        }
     };
     s.parse()
         .map(Some)
@@ -117,7 +126,8 @@ fn limit(args: &Value, default: u32, max: u32) -> u32 {
 }
 
 fn to_value<T: serde::Serialize>(v: &T) -> ToolResult {
-    serde_json::to_value(v).map_err(|e| ToolError::Core(litecord_core::Error::internal(e.to_string())))
+    serde_json::to_value(v)
+        .map_err(|e| ToolError::Core(litecord_core::Error::internal(e.to_string())))
 }
 
 impl AgentGateway {
@@ -344,7 +354,8 @@ impl AgentGateway {
         let (ok, items, tokens, err) = match &result {
             Ok(p) => (
                 true,
-                (p.messages.len() + p.memories.len() + p.tasks.len() + p.conversations.len()) as u32,
+                (p.messages.len() + p.memories.len() + p.tasks.len() + p.conversations.len())
+                    as u32,
                 p.stats.used_tokens,
                 None,
             ),
@@ -386,7 +397,12 @@ impl AgentGateway {
 
     fn search_memory(&self, args: &Value) -> ToolResult {
         let mut q = RetrievalQuery::new(req_str(args, "query")?);
-        q.kinds = vec![DocKind::Memory, DocKind::Task, DocKind::Note, DocKind::Summary];
+        q.kinds = vec![
+            DocKind::Memory,
+            DocKind::Task,
+            DocKind::Note,
+            DocKind::Summary,
+        ];
         q.limit_per_kind = limit(args, 10, 50);
         if arg_bool(args, "include_history") {
             q.filters.memory_statuses = Some(vec![
@@ -594,7 +610,9 @@ impl AgentGateway {
 
     fn list_tasks(&self, args: &Value) -> ToolResult {
         let statuses = match arg_str(args, "status") {
-            Some(s) => vec![TaskStatus::parse(s).map_err(|e| ToolError::InvalidArguments(e.to_string()))?],
+            Some(s) => {
+                vec![TaskStatus::parse(s).map_err(|e| ToolError::InvalidArguments(e.to_string()))?]
+            }
             None => vec![TaskStatus::Open, TaskStatus::Candidate],
         };
         self.db.read(|r| -> ToolResult {
@@ -665,7 +683,10 @@ impl AgentGateway {
             }
         };
         let conversation_id: Option<ConversationId> = arg_id(args, "conversation_id")?;
-        let trigger = match (arg_id::<UserId>(args, "unless_reply_from")?, conversation_id) {
+        let trigger = match (
+            arg_id::<UserId>(args, "unless_reply_from")?,
+            conversation_id,
+        ) {
             (Some(user_id), Some(conversation_id)) => ReminderTrigger::Conditional {
                 condition: ReminderCondition::NoReplyFrom {
                     user_id,
@@ -746,7 +767,11 @@ fn conversation_title(
 }
 
 /// Discord content is always rendered as untrusted external data.
-fn message_context(conn: &Connection, m: &MessageRecord, score: f32) -> Result<MessageContext, ToolError> {
+fn message_context(
+    conn: &Connection,
+    m: &MessageRecord,
+    score: f32,
+) -> Result<MessageContext, ToolError> {
     Ok(MessageContext {
         kind: "external_message",
         message_id: m.message.id,

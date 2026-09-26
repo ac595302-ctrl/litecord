@@ -37,7 +37,11 @@ pub trait AgentHarness: Send + Sync + std::fmt::Debug {
     /// Stable identifier recorded as the actor for audit.
     fn id(&self) -> &str;
 
-    async fn execute(&self, instruction: &str, gateway: &AgentGateway) -> Result<AgentResponse, ToolError>;
+    async fn execute(
+        &self,
+        instruction: &str,
+        gateway: &AgentGateway,
+    ) -> Result<AgentResponse, ToolError>;
 }
 
 /// Deterministic harness: executes predefined tool calls in order.
@@ -63,7 +67,11 @@ impl AgentHarness for ScriptedHarness {
         "scripted"
     }
 
-    async fn execute(&self, instruction: &str, gateway: &AgentGateway) -> Result<AgentResponse, ToolError> {
+    async fn execute(
+        &self,
+        instruction: &str,
+        gateway: &AgentGateway,
+    ) -> Result<AgentResponse, ToolError> {
         let caller = Caller::new(self.id());
         let mut calls = Vec::with_capacity(self.steps.len());
         for (tool, args) in &self.steps {
