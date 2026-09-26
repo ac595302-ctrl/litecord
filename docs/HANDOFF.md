@@ -48,17 +48,47 @@ written).
 | Batch | Scope | State |
 |---|---|---|
 | 1 | workspace, `litecord-types` | done, tested |
-| 2 | `litecord-core` (errors, config, events, bus, ports, secrets, metrics, clock, supervisor) | done, tested |
-| 3 | `litecord-store` db core + schema + migrations + FTS helper | done, tested |
-| 4 | store repositories + reducer; discord-ffi + discord-adapter (mock/demo); features/commands; hydrator | done, tested |
-| 5 | memory service, retrieval, actions | todo |
-| 6 | context compiler, agent gateway, MCP server | todo |
-| 7 | app wiring + view models + desktop bin + docs + CI | todo |
+| 2 | `litecord-core` | done, tested |
+| 3 | store db core, schema, migrations, FTS | done, tested |
+| 4 | store repositories + reducer; discord-ffi + discord-adapter; features/commands; hydrator | done, tested |
+| 5 | memory service, retrieval, Action Engine | done, tested |
+| 6 | context compiler, agent gateway, MCP server | done, tested |
+| 7 | app wiring, view models, `litecord` binary, docs, CI | done, tested |
 
-## How to continue
+Verification at the last commit: `cargo fmt --all --check` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --workspace` → 270 passed, 0 failed.
 
-```
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+## How to continue (prioritized)
+
+1. **UI** — follow `docs/UI_INTEGRATION.md`. Add `crates/litecord-ui`,
+   depend on `litecord-app` only.
+2. **Real Social SDK backend** — vendor the SDK (`crates/discord-ffi/README.md`),
+   verify/compile `native/discord_bridge.cpp`, implement
+   `discord-adapter/src/social_sdk.rs` (OAuth2 PKCE, token storage via an OS
+   keychain `SecretStore`, callback thread → `IngestSender::try_send`, a
+   dedicated thread pumping `lc_bridge_run_callbacks`). The mock backend's
+   behaviour and tests describe the expected contract.
+3. **Summaries** — `repos::summaries` is ready; add a summarizer behind a
+   trait in `litecord-memory` (non-LLM segment stats first, LLM optional).
+4. **Hydration queue persistence** — `repos::hydration_jobs` exists; persist
+   `HydrationScheduler::pending_snapshot()` on shutdown and restore on start.
+5. **Raw-message retention** — add `messages::prune_before` (FTS triggers
+   already handle deletes) and call it from `MemoryService::apply_retention`.
+6. **Bot gateway adapter** — another `SocialBackend` with
+   `DiscordSource::BotGateway`; proposals already record `DiscordIdentity`.
+7. Dedicated retriever tests (`crates/litecord-retrieval/tests/`), agent
+   profiles (V2 §45), themes (V1 §18).
+
+## Gotchas learned the hard way
+
+* Supersession and pending-reply expiry must follow **observation time**,
+  not processing order: hydration backfills older messages after newer live
+  ones (`litecord-memory/tests/service.rs` has the regressions).
+* Code that emits events from "callback-like" contexts must use
+  `IngestSender::try_send`; awaiting capacity can deadlock tests and SDK
+  threads.
+* `clippy.toml` allows unwrap only inside `#[test]` fns; integration test
+  files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
+* Internally tagged serde enums cannot wrap bare strings or nest another
+  internally tagged enum in a tuple variant — use struct variants.
