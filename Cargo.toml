@@ -22,6 +22,7 @@ litecord-agent = { path = "crates/litecord-agent" }
 litecord-mcp = { path = "crates/litecord-mcp" }
 litecord-features = { path = "crates/litecord-features" }
 litecord-app = { path = "crates/litecord-app" }
+litecord-layout = { path = "crates/litecord-layout" }
 discord-ffi = { path = "crates/discord-ffi" }
 discord-adapter = { path = "crates/discord-adapter" }
 

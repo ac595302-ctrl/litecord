@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 litecord-types.workspace = true
+litecord-layout.workspace = true
+blake3.workspace = true
 litecord-core.workspace = true
 litecord-store.workspace = true
 litecord-memory.workspace = true

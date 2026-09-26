@@ -7,8 +7,10 @@
 
 mod app;
 pub mod freshness;
+pub mod people;
 mod runtime;
 pub mod services;
 pub mod view;
+pub mod workspace;
 
 pub use app::{standalone_gateway, AppBuilder, LitecordApp};

@@ -740,6 +740,9 @@ impl LitecordApp {
     }
 
     pub fn set_setting(&self, key: &str, value: serde_json::Value) -> Result<()> {
+        if key == litecord_layout::SETTINGS_KEY {
+            return Err(Error::validation("use the typed layout profile service"));
+        }
         if let Some(id) = key
             .strip_prefix("features.")
             .and_then(|k| k.strip_suffix(".enabled"))

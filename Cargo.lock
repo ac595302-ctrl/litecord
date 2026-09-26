@@ -409,6 +409,7 @@ dependencies = [
 name = "litecord-app"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "discord-adapter",
  "litecord-actions",
  "litecord-agent",
@@ -416,6 +417,7 @@ dependencies = [
  "litecord-core",
  "litecord-features",
  "litecord-hydrator",
+ "litecord-layout",
  "litecord-memory",
  "litecord-retrieval",
  "litecord-store",
@@ -500,6 +502,15 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "litecord-layout"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

@@ -6,11 +6,12 @@ in code · **Deferred** = not started (design slot exists).
 
 An interface existing is never counted as "implemented".
 
-UI stage 1 (September 26, 2026): visual contract, framework direction, panel
-and profile contract, and source-based screen/API inventory are documented in
-`UI_DESIGN.md`, `UI_WORKSPACE.md`, and `UI_SCREEN_MATRIX.md`. This completes
-design/planning only; a GUI and docking renderer remain unimplemented at this
-checkpoint. Subsequent stages must update this statement as they land.
+UI stages 1 and 2 (September 26, 2026): the visual contract and native
+egui/eframe direction, screen/API inventory, framework-independent layout
+model, and typed app profile persistence are in place. The `litecord-ui`
+crate has a manifest and helper scaffolding, but no implemented workspace or
+screen widgets and no working native GUI/docking renderer. See
+`UI_INTEGRATION.md` for the Stage 3 handoff.
 
 | Component | Status | Implemented | Tested | Deferred | Notes |
 |---|---|---|---|---|---|
@@ -39,7 +40,8 @@ checkpoint. Subsequent stages must update this statement as they land.
 | Action Engine | Done | central policy, proposals, payload-hash-bound expiring single-use MAC'd tokens, edit invalidation, revalidation, executor, audit | 7 integration + policy exhaustive tests | Administrative actions (none defined) | |
 | Security & trust | Done (foundation) | trust labels, visibility, credential isolation (`Secret<T>`), prompt-injection labelling, FTS query sanitization | credential-exclusion + injection tests | OS keychain store, DB encryption at rest | see SECURITY.md |
 | Feature & command system | Done | registry, 7 built-in features, fuzzy command palette backend, intents | 38 tests | themes (V1 §18), dynamic plugins (deliberately not planned) | |
-| Application layer & view models | Done | runtime wiring, supervised tasks, 10 view models, services | app e2e test | agent profiles (V2 §45), Model Context Debugger view model (use `compile_context`) | |
-| Desktop binary | Partial | `litecord demo`, `litecord mcp`, `litecord status` | smoke-tested | GUI (delegated to the UI model) | |
+| Application layer & view models | Done | runtime wiring, supervised tasks, UI view models, services, and typed workspace profile view | app e2e test; workspace-profile integration tests listed below | agent profiles (V2 §45), Model Context Debugger view model (use `compile_context`) | |
+| Workspace layout & profiles (`litecord-layout`, `litecord-app`) | Done | validated structural trees, panel registry and minimum-size metadata, contextual projection, transactional dock/resize/reorder, bounded versioned profile CRUD/edit sessions, typed SQLite persistence | 19 layout tests + 5 app workspace-profile integration tests; includes restart, stale-token, event, and recovery coverage | native renderer, widget factories, viewport/minimum-size enforcement, edit/profile UI | reserved setting key `workspace.layout_profiles`; optimistic setting tokens and atomic transactions; corrupt/future raw data stays preserved until explicit reset-all; generic settings writes reject the key |
+| Desktop binary / native GUI | Partial | `litecord demo`, `litecord mcp`, `litecord status`; `litecord-ui` manifest and helper scaffolding | CLI smoke-tested; no native UI validation | implemented workspace/screen widgets and egui/eframe docking renderer (Stage 3) | Current scaffold is not a working GUI |
 | Observability | Done | tracing spans (startup, reduce, hydrate, retrieval, context, tools, actions), metrics registry with real RSS | metrics tests | exporting metrics | message content never logged |
 | CI | Done | fmt, clippy (all features), tests on Linux/macOS/Windows, cargo-deny | — | — | `.github/workflows/ci.yml` |

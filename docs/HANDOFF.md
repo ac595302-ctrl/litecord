@@ -5,9 +5,9 @@ work next. **Update it at every commit batch.**
 
 Source specs (not in repo): "V2 — Unified Memory and Agent Layer" (primary),
 "Rust-Based Discord Social Client Hackathon Plan" (V1), UI mock PDF (visual
-only). The build brief asked for a production-quality *foundation*; UI is
-explicitly delegated to a later model (see `docs/UI_INTEGRATION.md` once
-written).
+only). The build brief asked for a production-quality *foundation*. UI design
+and workspace persistence are now staged and documented; the native GUI is
+still future work described in `docs/UI_INTEGRATION.md`.
 
 ## Architecture decisions (settled — do not relitigate without reason)
 
@@ -54,30 +54,45 @@ written).
 | 5 | memory service, retrieval, Action Engine | done, tested |
 | 6 | context compiler, agent gateway, MCP server | done, tested |
 | 7 | app wiring, view models, `litecord` binary, docs, CI | done, tested |
+| 8 | layout model, panel registry, profile persistence APIs | done, tested |
 
-Verification at the last commit: `cargo fmt --all --check` clean;
-`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean;
-`cargo test --workspace` → 270 passed, 0 failed.
+Stage 2 verification on Rust 1.98, before the pending GUI dependency work: 19
+`litecord-layout` tests and 5 app workspace-profile integration tests;
+`cargo test --workspace`, `cargo fmt --all --check`, and
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` all
+passed. Clippy required two harmless baseline modernizations:
+`sort_by_key(Reverse(..))` in the hydrator and `as_chunks` in embeddings.
 
 ## How to continue (prioritized)
+
+Account/contact snapshots also expose canonical identity, presence and local notes.
+The two focused people tests and app test-target Clippy check pass. Two harmless
+Rust 1.98 lint updates use reverse priority keys and fixed-size embedding chunks.
 
 ### UI work — September 26, 2026
 
 Stage 1 is complete: `UI_DESIGN.md` fixes the PDF-derived visual contract and
 native egui/eframe direction; `UI_WORKSPACE.md` defines structural layouts,
-transactional profiles and recovery; `UI_SCREEN_MATRIX.md` audits actual code
-against all nine destinations. A01 Messages remains the visual anchor.
-The GUI has not been implemented in this batch. No backend checks were needed
-for these documentation-only changes. Stage 2 starts with a pure
-`litecord-layout` crate and typed application profile services; stage 3 must
-verify the renderer visually and functionally before claiming completion.
+profiles and recovery; `UI_SCREEN_MATRIX.md` audits actual code against all
+nine destinations. A01 Messages remains the visual anchor. Stage 2 is also
+complete: `litecord-layout` supplies the framework-independent tree, panel
+metadata, contextual projection, transactional dock/resize/reorder operations,
+and bounded versioned profile/edit-session types. `litecord-app` persists
+profiles through typed services with optimistic per-setting tokens, atomic
+transactions, change events, and explicit recovery for corrupt or future data.
+The native GUI and docking renderer are not implemented. Stage 3 must build
+the egui/eframe interface and verify it visually and functionally.
 
 Local build preparation uses workspace-local Rust/LLVM-MinGW because this
 host initially had no Rust compiler. No system PATH changes are required.
 
 
-1. **UI** — follow `docs/UI_INTEGRATION.md`. Add `crates/litecord-ui`,
-   depend on `litecord-app` only.
+1. **UI Stage 3** — follow `docs/UI_INTEGRATION.md`. Complete the existing
+   `crates/litecord-ui` scaffold in the chosen native egui/eframe direction.
+   Bind to `litecord-app` for services and persistence; use `litecord-layout`
+   for tree, profile, and panel-registry types, plus `litecord-types` /
+   `litecord-features` where view models expose those domain and render types.
+   The native GUI is still unimplemented.
 2. **Real Social SDK backend** — vendor the SDK (`crates/discord-ffi/README.md`),
    verify/compile `native/discord_bridge.cpp`, implement
    `discord-adapter/src/social_sdk.rs` (OAuth2 PKCE, token storage via an OS

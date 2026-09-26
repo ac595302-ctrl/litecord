@@ -35,15 +35,20 @@ pub fn set_json(tx: &WriteTx<'_>, key: &str, value: &serde_json::Value) -> Store
 
 /// Read a raw JSON value.
 pub fn get_json(conn: &Connection, key: &str) -> StoreResult<Option<serde_json::Value>> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?",
-            params![key],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let raw = get_raw(conn, key)?;
     raw.map(|s| serde_json::from_str(&s).map_err(Into::into))
         .transpose()
+}
+
+/// Read without parsing, for preference recovery that must preserve corrupt data.
+pub fn get_raw(conn: &Connection, key: &str) -> StoreResult<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?",
+        params![key],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Read and deserialize a typed setting.

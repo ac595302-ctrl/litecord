@@ -534,7 +534,7 @@ impl HydrationScheduler {
     /// Snapshot of pending keys and their priority, highest priority first.
     pub fn pending_snapshot(&self) -> Vec<(HydrationKey, Priority)> {
         let mut v: Vec<_> = self.pending.iter().map(|(k, p)| (*k, p.priority)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
         v
     }
 }
