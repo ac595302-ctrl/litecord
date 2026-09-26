@@ -1,0 +1,17 @@
+[package]
+name = "litecord-features"
+description = "Vencord-style compiled-in feature system and the backend for the command palette. Feature hooks never mutate state; they return AppIntents for the application layer to interpret."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
