@@ -4,13 +4,17 @@
 use std::sync::Arc;
 
 use litecord_core::clock::{Clock, ManualClock};
+use litecord_core::config::RetentionConfig;
 use litecord_core::events::{DiscordEvent, SourceEnvelope};
 use litecord_memory::{MemoryService, RecordOutcome, ReminderEngine, TaskService};
 use litecord_store::reducer::{self, ReducerConfig};
+use litecord_store::repos::notes;
+use litecord_store::repos::summaries::SummaryLevel;
 use litecord_store::{repos, Database};
 use litecord_types::entity::EntityId;
 use litecord_types::ids::*;
 use litecord_types::memory::{MemoryKind, MemoryStatus, NewMemory};
+use litecord_types::notes::Bookmark;
 use litecord_types::provenance::{DiscordSource, Origin};
 use litecord_types::social::*;
 use litecord_types::tasks::*;
@@ -326,4 +330,176 @@ fn gc_expires_due_items_but_keeps_pinned() {
     };
     assert_eq!(get(a), MemoryStatus::Expired);
     assert_eq!(get(b), MemoryStatus::Candidate);
+}
+
+#[test]
+fn retention_prunes_old_raw_messages_but_keeps_bookmarked_and_recent() {
+    let (db, svc, _) = setup();
+    let old_at = NOW.saturating_sub(DurationMs::from_days(60));
+    message(&db, &svc, 1, ADA, old_at, "an old ordinary message");
+    message(&db, &svc, 2, ADA, old_at, "an old bookmarked message");
+    message(&db, &svc, 3, ADA, NOW, "a recent message");
+    db.write(|tx| {
+        notes::add_bookmark(
+            tx,
+            &Bookmark {
+                message_id: MessageId(2),
+                conversation_id: CONV,
+                note: None,
+                created_at: NOW,
+            },
+            Origin::UserProvided,
+        )
+    })
+    .unwrap();
+
+    let cfg = RetentionConfig {
+        raw_messages_days: Some(30),
+        ..RetentionConfig::default()
+    };
+    let report = svc.apply_retention(NOW, &cfg).unwrap();
+    assert_eq!(report.messages_pruned, 1);
+    assert!(db
+        .read(|r| repos::messages::get(r, MessageId(1)))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .read(|r| repos::messages::get(r, MessageId(2)))
+        .unwrap()
+        .is_some());
+    assert!(db
+        .read(|r| repos::messages::get(r, MessageId(3)))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn retention_with_no_raw_message_days_prunes_nothing() {
+    let (db, svc, _) = setup();
+    let old_at = NOW.saturating_sub(DurationMs::from_days(400));
+    message(&db, &svc, 1, ADA, old_at, "ancient message");
+
+    let report = svc
+        .apply_retention(NOW, &RetentionConfig::default())
+        .unwrap();
+    assert_eq!(report.messages_pruned, 0);
+    assert!(db
+        .read(|r| repos::messages::get(r, MessageId(1)))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn summarize_conversation_writes_and_supersedes_on_new_messages() {
+    let (db, svc, _) = setup();
+    message(&db, &svc, 1, ADA, NOW, "The prototype review went well");
+    message(
+        &db,
+        &svc,
+        2,
+        ME,
+        NOW.saturating_add(DurationMs::from_hours(1)),
+        "Did you finish the prototype review?",
+    );
+    message(
+        &db,
+        &svc,
+        3,
+        ADA,
+        NOW.saturating_add(DurationMs::from_hours(2)),
+        "I'll send the prototype review notes tomorrow",
+    );
+
+    let window_start = NOW.saturating_sub(DurationMs::from_days(1));
+    let window_end = NOW.saturating_add(DurationMs::from_hours(3));
+    let first = svc
+        .summarize_conversation(CONV, SummaryLevel::Weekly, window_start, window_end)
+        .unwrap()
+        .expect("3 messages is enough for a summary");
+
+    let unknown = svc
+        .summarize_conversation(
+            ConversationId(999_999),
+            SummaryLevel::Weekly,
+            window_start,
+            window_end,
+        )
+        .unwrap();
+    assert!(unknown.is_none(), "unknown conversation yields None");
+
+    // A new message inside a wider window changes the digest (message
+    // count), so summarizing again must supersede rather than duplicate.
+    message(
+        &db,
+        &svc,
+        4,
+        ADA,
+        NOW.saturating_add(DurationMs::from_hours(4)),
+        "one more unrelated update",
+    );
+    let wider_end = NOW.saturating_add(DurationMs::from_hours(5));
+    let second = svc
+        .summarize_conversation(CONV, SummaryLevel::Weekly, window_start, wider_end)
+        .unwrap()
+        .expect("still enough messages");
+    assert_ne!(first, second);
+
+    let history = db
+        .read(|r| repos::summaries::list_for_conversation(r, CONV, true))
+        .unwrap();
+    assert_eq!(
+        history.len(),
+        2,
+        "both summaries stay queryable: {history:?}"
+    );
+    let current = db
+        .read(|r| repos::summaries::list_for_conversation(r, CONV, false))
+        .unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].id, second);
+}
+
+#[test]
+fn refresh_recent_summaries_skips_unchanged_conversations() {
+    let (db, svc, _) = setup();
+    // All fixture messages must be sent *before* the `now` passed to
+    // `refresh_recent_summaries`, since its weekly window is `[now - 7d,
+    // now]`.
+    let refresh_at = NOW.saturating_add(DurationMs::from_hours(3));
+    message(&db, &svc, 1, ADA, NOW, "The prototype review went well");
+    message(
+        &db,
+        &svc,
+        2,
+        ME,
+        NOW.saturating_add(DurationMs::from_hours(1)),
+        "Did you finish the prototype review?",
+    );
+    message(
+        &db,
+        &svc,
+        3,
+        ADA,
+        NOW.saturating_add(DurationMs::from_hours(2)),
+        "I'll send the prototype review notes tomorrow",
+    );
+
+    let written = svc.refresh_recent_summaries(refresh_at).unwrap();
+    assert_eq!(written, 1, "a fresh weekly summary is written");
+
+    let again = svc.refresh_recent_summaries(refresh_at).unwrap();
+    assert_eq!(again, 0, "no new messages since the last weekly summary");
+
+    message(
+        &db,
+        &svc,
+        4,
+        ADA,
+        refresh_at.saturating_add(DurationMs::from_mins(30)),
+        "Quick follow-up on the review",
+    );
+    let after_new_message = svc
+        .refresh_recent_summaries(refresh_at.saturating_add(DurationMs::from_hours(1)))
+        .unwrap();
+    assert_eq!(after_new_message, 1, "new activity triggers a refresh");
 }

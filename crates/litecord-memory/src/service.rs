@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use litecord_core::config::RetentionConfig;
 use litecord_store::repos::memory::MemoryFilter;
+use litecord_store::repos::summaries::{NewSummary, SummaryLevel};
 use litecord_store::repos::tasks::TaskFilter;
 use litecord_store::{repos, Database, WriteTx};
 use litecord_types::entity::EntityId;
@@ -32,11 +33,13 @@ use litecord_types::memory::{
     MemoryItem, MemoryKind, MemoryPayload, MemoryStatus, NewMemory, RelationType,
 };
 use litecord_types::provenance::{Confidence, DiscordIdentity, Origin, SourceRef};
+use litecord_types::social::Message;
 use litecord_types::tasks::{TaskDraft, TaskStatus};
-use litecord_types::{DurationMs, MemoryId, MessageId, Timestamp};
+use litecord_types::{ConversationId, DurationMs, MemoryId, MessageId, Timestamp};
 
 use crate::error::MemoryResult;
 use crate::extract::{CandidateExtractor, ExtractionInput, HeuristicExtractor};
+use crate::summary::{HeuristicSummarizer, Summarizer, SummaryInput};
 
 /// A large-but-finite `LIMIT` used where a repo query wants "all of them" and
 /// the underlying `repos::*::Filter` only offers an explicit cap (never
@@ -159,7 +162,27 @@ pub struct GcReport {
 pub struct RetentionReport {
     pub events_pruned: usize,
     pub agent_runs_pruned: usize,
+    /// Raw messages pruned by [`repos::messages::prune_before`]. Always `0`
+    /// when `RetentionConfig::raw_messages_days` is `None` (the default:
+    /// keep everything the SDK gave us).
+    pub messages_pruned: usize,
 }
+
+/// Messages read for one [`MemoryService::summarize_conversation`] window.
+/// Conversations busier than this within `[since, now]` are summarized from
+/// only their first `SUMMARIZE_MESSAGE_CAP` messages in the window — an
+/// honest undercount (the digest still describes only what it saw) rather
+/// than an unbounded read.
+const SUMMARIZE_MESSAGE_CAP: u32 = 500;
+
+/// How far back [`MemoryService::refresh_recent_summaries`] looks for
+/// "recently active" conversations, and the width of the weekly window it
+/// (re)computes for each one.
+const RECENT_ACTIVITY_WINDOW: DurationMs = DurationMs::from_days(7);
+
+/// How many of the most recently active conversations
+/// [`MemoryService::refresh_recent_summaries`] considers per call.
+const REFRESH_CONVERSATION_LIMIT: u32 = 50;
 
 /// The unified-memory service: dedup, supersession, confirmation, expiry/GC,
 /// and the wiring between message ingestion and the (pluggable, non-LLM by
@@ -171,14 +194,20 @@ pub struct RetentionReport {
 pub struct MemoryService {
     db: Database,
     extractor: Arc<dyn CandidateExtractor>,
+    summarizer: Arc<dyn Summarizer>,
 }
 
 impl MemoryService {
     /// Build a service around any [`CandidateExtractor`] (e.g. a future
     /// model-backed one, which must still emit `Origin::AgentDerived`
-    /// candidates per that trait's contract).
+    /// candidates per that trait's contract). Summarization defaults to
+    /// [`HeuristicSummarizer`]; use [`Self::with_summarizer`] to replace it.
     pub fn new(db: Database, extractor: Arc<dyn CandidateExtractor>) -> Self {
-        Self { db, extractor }
+        Self {
+            db,
+            extractor,
+            summarizer: Arc::new(HeuristicSummarizer),
+        }
     }
 
     /// Build a service using the deterministic, dependency-free
@@ -186,6 +215,15 @@ impl MemoryService {
     /// this workspace ships. No LLM required.
     pub fn with_heuristics(db: Database) -> Self {
         Self::new(db, Arc::new(HeuristicExtractor))
+    }
+
+    /// Replace the [`Summarizer`] (default: [`HeuristicSummarizer`]). A
+    /// future model-backed summarizer must still be paired, by whoever
+    /// constructs it, with `Origin::AgentDerived` storage — see
+    /// [`Self::summarize_conversation`].
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = summarizer;
+        self
     }
 
     /// Record one memory in its own transaction. See [`record_tx`] for the
@@ -352,15 +390,15 @@ impl MemoryService {
         Ok(committed.value)
     }
 
-    /// Apply time-based retention to the event log and agent-run history.
+    /// Apply time-based retention to the event log, agent-run history and
+    /// (when configured) raw messages, in one transaction.
     ///
-    /// Raw-message retention (`RetentionConfig::raw_messages_days`) is
-    /// **not** implemented here: pruning canonical `messages` rows safely
-    /// needs a dedicated `repos::messages` prune function (respecting
-    /// `deleted`/undeleted semantics and any foreign keys) plus FTS5
-    /// external-content cleanup (`messages_fts` triggers assume the base
-    /// row still exists), which is out of scope for this batch. Wiring it up
-    /// is a small, self-contained follow-up once that repo function exists.
+    /// Raw-message retention only runs when `cfg.raw_messages_days` is
+    /// `Some(d)`: messages with `sent_at` older than `d` days are deleted via
+    /// [`repos::messages::prune_before`] with `keep_bookmarked = true` —
+    /// bookmarking is an explicit "keep this" signal, so it is never pruned
+    /// by an age-based policy. `None` (the default) keeps every message the
+    /// SDK gave us and prunes nothing.
     pub fn apply_retention(
         &self,
         now: Timestamp,
@@ -375,12 +413,165 @@ impl MemoryService {
                 tx,
                 now.saturating_sub(DurationMs::from_days(cfg.agent_runs_days as u64)),
             )?;
+            let messages_pruned = match cfg.raw_messages_days {
+                Some(days) => repos::messages::prune_before(
+                    tx,
+                    now.saturating_sub(DurationMs::from_days(days as u64)),
+                    true,
+                )?,
+                None => 0,
+            };
             Ok(RetentionReport {
                 events_pruned,
                 agent_runs_pruned,
+                messages_pruned,
             })
         })?;
         Ok(committed.value)
+    }
+
+    /// Compute and store a heuristic (non-LLM, unless a different
+    /// [`Summarizer`] was installed via [`Self::with_summarizer`]) summary of
+    /// `conversation_id` over `[since, now]`, at the given [`SummaryLevel`].
+    ///
+    /// Returns `Ok(None)` — writing nothing — when the conversation does not
+    /// exist, or when the configured summarizer declines (e.g.
+    /// [`HeuristicSummarizer`] on too few messages). Otherwise the new
+    /// summary is inserted with `Origin::LocalApplication`, which
+    /// [`repos::summaries::insert`] explicitly supersedes the previous
+    /// current summary for `(conversation_id, level)` with, and its id is
+    /// returned.
+    ///
+    /// A model-backed summarizer must be stored under `Origin::AgentDerived`
+    /// instead; that choice belongs to the caller wiring one in, since this
+    /// method has no way to tell a heuristic summarizer from a model-backed
+    /// one.
+    pub fn summarize_conversation(
+        &self,
+        conversation_id: ConversationId,
+        level: SummaryLevel,
+        since: Timestamp,
+        now: Timestamp,
+    ) -> MemoryResult<Option<i64>> {
+        let prepared = self.db.read(|r| -> MemoryResult<_> {
+            let Some(conv) = repos::conversations::get(r, conversation_id)? else {
+                return Ok(None);
+            };
+            let title = conv
+                .conversation
+                .title
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            let records = repos::messages::in_range(
+                r,
+                Some(conversation_id),
+                since,
+                Some(now),
+                SUMMARIZE_MESSAGE_CAP,
+            )?;
+            let mut named: Vec<(String, Message)> = Vec::with_capacity(records.len());
+            for record in records {
+                let name = repos::users::get(r, record.message.author_id)?
+                    .map(|u| u.user.display_name().to_string())
+                    .unwrap_or_else(|| record.message.author_id.to_string());
+                named.push((name, record.message));
+            }
+            Ok(Some((title, named)))
+        })?;
+        let Some((title, named)) = prepared else {
+            return Ok(None);
+        };
+
+        let refs: Vec<(String, &Message)> = named.iter().map(|(n, m)| (n.clone(), m)).collect();
+        let input = SummaryInput {
+            conversation_title: &title,
+            messages: &refs,
+            period_start: since,
+            period_end: now,
+        };
+        let Some(content) = self.summarizer.summarize(&input) else {
+            return Ok(None);
+        };
+        let from_message_id = named.first().map(|(_, m)| m.id);
+        let to_message_id = named.last().map(|(_, m)| m.id);
+
+        let committed = self.db.write(|tx| -> MemoryResult<i64> {
+            Ok(repos::summaries::insert(
+                tx,
+                &NewSummary {
+                    conversation_id: Some(conversation_id),
+                    level,
+                    content,
+                    from_message_id,
+                    to_message_id,
+                    period_start: Some(since),
+                    period_end: Some(now),
+                    origin: Origin::LocalApplication,
+                },
+            )?)
+        })?;
+        Ok(Some(committed.value))
+    }
+
+    /// Refresh [`SummaryLevel::Weekly`] summaries for conversations active in
+    /// the last 7 days, and return how many were (re)written.
+    ///
+    /// Considers up to [`REFRESH_CONVERSATION_LIMIT`] of the most recently
+    /// active conversations ([`repos::conversations::list_recent`]),
+    /// filtered to those whose `last_activity_at` falls within
+    /// [`RECENT_ACTIVITY_WINDOW`] of `now`. For each, a weekly summary
+    /// covering `[now - 7d, now]` is only (re)computed when there is a
+    /// message newer than the existing weekly summary's `period_end` — a
+    /// conversation with no new activity since its last weekly summary is
+    /// left untouched, so this can be called on a timer without constantly
+    /// superseding unchanged summaries.
+    pub fn refresh_recent_summaries(&self, now: Timestamp) -> MemoryResult<usize> {
+        let window_start = now.saturating_sub(RECENT_ACTIVITY_WINDOW);
+        let recent = self.db.read(|r| -> MemoryResult<_> {
+            Ok(repos::conversations::list_recent(
+                r,
+                REFRESH_CONVERSATION_LIMIT,
+                0,
+            )?)
+        })?;
+
+        let mut written = 0usize;
+        for conv in recent {
+            let Some(last_activity) = conv.conversation.last_activity_at else {
+                continue;
+            };
+            if last_activity < window_start {
+                continue;
+            }
+            let conversation_id = conv.conversation.id;
+
+            let prior_period_end = self.db.read(|r| -> MemoryResult<_> {
+                Ok(
+                    repos::summaries::latest(r, Some(conversation_id), SummaryLevel::Weekly)?
+                        .and_then(|s| s.period_end),
+                )
+            })?;
+            if let Some(prior_end) = prior_period_end {
+                let since = prior_end.saturating_add(DurationMs::from_millis(1));
+                let has_new = self.db.read(|r| -> MemoryResult<_> {
+                    Ok(
+                        !repos::messages::in_range(r, Some(conversation_id), since, None, 1)?
+                            .is_empty(),
+                    )
+                })?;
+                if !has_new {
+                    continue;
+                }
+            }
+
+            if self
+                .summarize_conversation(conversation_id, SummaryLevel::Weekly, window_start, now)?
+                .is_some()
+            {
+                written += 1;
+            }
+        }
+        Ok(written)
     }
 }
 
