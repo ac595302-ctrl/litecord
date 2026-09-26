@@ -16,10 +16,12 @@
 //! transport (the gateway websocket client and HTTP client) that will be
 //! added separately to drive these pure functions.
 
+pub mod backend;
 pub mod gateway;
 pub mod rest;
 pub mod time;
 pub mod translate;
+pub mod transport;
 
 pub use rest::{
     channel_messages, create_message, current_user, current_user_guilds, delete_message,
@@ -28,3 +30,6 @@ pub use rest::{
 };
 pub use time::parse_iso8601;
 pub use translate::{channel, channel_conversation, dispatch, message, user, TranslateError};
+
+pub use backend::{BotBackend, BotConfig};
+pub use transport::{BotTransport, GatewaySocket, SocketEvent};
