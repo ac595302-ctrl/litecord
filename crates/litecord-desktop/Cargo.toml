@@ -10,6 +10,7 @@ name = "litecord"
 path = "src/main.rs"
 
 [dependencies]
+discord-adapter = { workspace = true, optional = true }
 litecord-ui = { workspace = true, optional = true }
 litecord-core.workspace = true
 litecord-store.workspace = true
@@ -31,3 +32,5 @@ workspace = true
 default = []
 gui = ["dep:litecord-ui"]
 screenshots = ["gui", "litecord-ui/screenshots"]
+# Real application-bot source; enabled at runtime by LITECORD_BOT_TOKEN.
+discord-bot = ["dep:discord-adapter", "discord-adapter/discord-bot"]

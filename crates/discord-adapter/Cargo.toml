@@ -7,6 +7,9 @@ license.workspace = true
 
 [features]
 default = []
+# Real network transport for the optional application-bot adapter
+# (reqwest + tokio-tungstenite, rustls). Needs a bot token at runtime.
+discord-bot = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
 # Enables `social_sdk::SocialSdkBackend`, a skeleton that links the real
 # Discord Social SDK through discord-ffi. See src/social_sdk.rs: it is not yet
 # verified against the SDK and never fakes data.
@@ -26,6 +29,10 @@ lru.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+
+reqwest = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

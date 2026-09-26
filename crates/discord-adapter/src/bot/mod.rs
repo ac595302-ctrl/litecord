@@ -18,6 +18,8 @@
 
 pub mod backend;
 pub mod gateway;
+#[cfg(feature = "discord-bot")]
+pub mod http;
 pub mod rest;
 pub mod time;
 pub mod translate;
@@ -32,4 +34,6 @@ pub use time::parse_iso8601;
 pub use translate::{channel, channel_conversation, dispatch, message, user, TranslateError};
 
 pub use backend::{BotBackend, BotConfig};
+#[cfg(feature = "discord-bot")]
+pub use http::HttpTransport;
 pub use transport::{BotTransport, GatewaySocket, SocketEvent};

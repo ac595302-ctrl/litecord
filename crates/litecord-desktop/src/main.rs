@@ -165,7 +165,7 @@ async fn gui(
     cfg: LitecordConfig,
     options: litecord_ui::WindowOptions,
 ) -> litecord_core::Result<()> {
-    let app = LitecordApp::builder(cfg).start().await?;
+    let app = with_bot(LitecordApp::builder(cfg))?.start().await?;
     let result =
         litecord_ui::run_with_options(app.clone(), tokio::runtime::Handle::current(), options);
     let report = app.shutdown().await;
@@ -181,7 +181,7 @@ fn litecord_layout_destination(name: &str) -> Option<litecord_ui::Destination> {
 }
 
 async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core::Result<()> {
-    let mut builder = LitecordApp::builder(cfg);
+    let mut builder = with_bot(LitecordApp::builder(cfg))?;
     if in_memory {
         builder = builder.in_memory();
     }
@@ -275,4 +275,37 @@ fn status(cfg: &LitecordConfig) -> litecord_core::Result<()> {
     })?;
     print_json(&v);
     Ok(())
+}
+
+/// Attach the real application-bot source when built with `discord-bot` and
+/// `LITECORD_BOT_TOKEN` is set. The token is read here (the binary is the
+/// only place that touches secret environment variables), wrapped in a
+/// `Secret`, and handed to the adapter; it never enters configuration.
+#[cfg(feature = "discord-bot")]
+fn with_bot(builder: litecord_app::AppBuilder) -> litecord_core::Result<litecord_app::AppBuilder> {
+    use std::sync::Arc;
+
+    use discord_adapter::bot::{BotBackend, BotConfig, HttpTransport};
+    use litecord_core::secrets::Secret;
+
+    let Ok(token) = std::env::var("LITECORD_BOT_TOKEN") else {
+        return Ok(builder);
+    };
+    if token.trim().is_empty() {
+        return Ok(builder);
+    }
+    let transport = HttpTransport::new()?;
+    let bot = BotBackend::new(
+        Arc::new(transport),
+        Secret::new(token.trim().to_owned()),
+        BotConfig::default(),
+        Arc::new(litecord_core::clock::SystemClock),
+    );
+    tracing::info!("application-bot source enabled");
+    Ok(builder.bot_backend(Arc::new(bot)))
+}
+
+#[cfg(not(feature = "discord-bot"))]
+fn with_bot(builder: litecord_app::AppBuilder) -> litecord_core::Result<litecord_app::AppBuilder> {
+    Ok(builder)
 }
