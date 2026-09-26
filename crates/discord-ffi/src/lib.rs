@@ -13,6 +13,16 @@
 //! [`LcStr`] still exist (so `discord-adapter` can depend on this crate
 //! unconditionally and its `convert.rs` module can be always-compiled), but
 //! no `extern "C"` declarations and no [`Bridge`] type are compiled in.
+//!
+//! ## Borrowed string views are lifetime-checked
+//!
+//! [`LcStr`] carries a lifetime parameter (`LcStr<'a>`) and its `ptr`/`len`
+//! fields are private: safe code can only build one over a Rust byte slice it
+//! actually owns/borrows ([`LcStr::from_bytes`]), or receive one that
+//! [`Bridge`]'s query methods hand out already tied to the bridge's borrow
+//! (see [`Bridge::current_user`] / [`Bridge::get_message`]). There is no safe
+//! way to construct an `LcStr` pointing at memory that isn't provably alive
+//! for at least `'a`.
 #![allow(
     unsafe_code,
     reason = "this is the one crate in the workspace allowed to call into \
@@ -20,105 +30,204 @@
               is deliberately overridden here and nowhere else"
 )]
 
+use std::marker::PhantomData;
+
 /// `true` when this crate was built with the `discord-social-sdk` feature
 /// (i.e. the native bridge and its `extern "C"` declarations are compiled
 /// in). Does **not** imply the SDK was actually vendored/linked — see
 /// `build.rs` for the case where the feature is on but linking will fail.
 pub const SDK_LINKED: bool = cfg!(feature = "discord-social-sdk");
 
-/// A borrowed, non-owning string view mirroring the C `LcStr` struct. Valid
-/// only for as long as the native side's lifetime contract allows (see
-/// `native/discord_bridge.h` — string views live until the next
-/// `lc_bridge_run_callbacks` call).
+/// A borrowed, non-owning string view mirroring the C `LcStr` struct's ABI
+/// layout (a `(ptr, len)` pair). Valid only for as long as the native side's
+/// lifetime contract allows (see `native/discord_bridge.h` — string views
+/// live until the next `lc_bridge_run_callbacks` call), which the `'a`
+/// lifetime parameter tracks: a value of type `LcStr<'a>` asserts that, if
+/// its pointer is non-null, it points to at least `len` initialized,
+/// readable bytes that remain valid (not mutated or freed) for the entire
+/// lifetime `'a`.
+///
+/// # Why the fields are private
+///
+/// If `ptr`/`len` were public, safe code could set them independently (e.g.
+/// `LcStr { ptr: 0xdead as *const u8, len: 100, .. }`) and produce a value
+/// that violates the invariant above regardless of what `'a` says, since
+/// nothing checks that `ptr`/`len` actually describe live memory. Keeping
+/// them private means the only ways to build an `LcStr<'a>` are
+/// [`LcStr::from_bytes`] (which derives `ptr`/`len` from a real `&'a [u8]`,
+/// so the invariant holds by construction) and [`LcStr::NULL`]/
+/// [`LcStr::from_raw_parts`] (the latter `unsafe` and crate-private, used
+/// only at the FFI boundary in `bridge` where the invariant is upheld by a
+/// documented `SAFETY` argument instead).
+///
+/// ```compile_fail
+/// // Safe code cannot construct or mutate an `LcStr` by hand: its fields
+/// // are private, so this fails to compile ("field `ptr` of struct
+/// // `LcStr` is private").
+/// let bad = discord_ffi::LcStr::from_bytes(b"ok");
+/// let _ = discord_ffi::LcStr { ptr: bad_ptr(), len: 100, _marker: std::marker::PhantomData };
+/// fn bad_ptr() -> *const u8 { std::ptr::null() }
+/// ```
+///
+/// ```compile_fail
+/// // A view cannot outlive the bytes it borrows: `v` is dropped at the end
+/// // of the inner block while `s` (which borrows from it) is used
+/// // afterwards, so the borrow checker rejects this.
+/// let s;
+/// {
+///     let v: Vec<u8> = vec![1, 2, 3];
+///     s = discord_ffi::LcStr::from_bytes(&v);
+/// } // `v` dropped here
+/// let _ = s.as_bytes(); // ERROR: `v` does not live long enough
+/// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct LcStr {
-    pub ptr: *const u8,
-    pub len: usize,
+pub struct LcStr<'a> {
+    ptr: *const u8,
+    len: usize,
+    _marker: PhantomData<&'a [u8]>,
 }
 
-impl LcStr {
-    /// An absent/null string view.
-    pub const NULL: LcStr = LcStr {
+impl LcStr<'static> {
+    /// An absent/null string view. Usable as an `LcStr<'a>` for any `'a`
+    /// (via the ordinary lifetime-shortening every `&'static` value gets),
+    /// since it borrows nothing.
+    pub const NULL: LcStr<'static> = LcStr {
         ptr: std::ptr::null(),
         len: 0,
+        _marker: PhantomData,
     };
 
-    /// Builds a borrowed view over a Rust byte slice, for tests and for
-    /// constructing values without going through the FFI boundary.
-    pub fn from_bytes(bytes: &[u8]) -> LcStr {
+    /// An empty (but present, non-null) string view. Equivalent to
+    /// `LcStr::from_bytes(&[])` except it never needs a real backing slice.
+    pub const fn empty() -> LcStr<'static> {
+        // A non-null dangling pointer with len 0: reading zero bytes from
+        // any non-null, well-aligned pointer is always sound, and `u8` has
+        // alignment 1 so `NonNull::dangling`-style pointers are trivially
+        // well-aligned.
+        LcStr {
+            ptr: std::ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a> LcStr<'a> {
+    /// Builds a borrowed view over a Rust byte slice. The invariant holds by
+    /// construction: `ptr`/`len` are derived directly from `bytes`, which is
+    /// guaranteed live for `'a`.
+    pub fn from_bytes(bytes: &'a [u8]) -> LcStr<'a> {
         LcStr {
             ptr: bytes.as_ptr(),
             len: bytes.len(),
+            _marker: PhantomData,
         }
+    }
+
+    /// Builds a view directly from a raw pointer and length, for use only at
+    /// the FFI boundary (see `bridge::to_lc_user`/`to_lc_message`).
+    ///
+    /// # Safety
+    /// If `ptr` is non-null, it must point to at least `len` initialized,
+    /// readable bytes that remain valid (not mutated or freed) for the
+    /// entire lifetime `'a` chosen by the caller.
+    #[cfg_attr(
+        not(feature = "discord-social-sdk"),
+        allow(
+            dead_code,
+            reason = "only called from the `bridge` module, which is compiled \
+                      out entirely without the `discord-social-sdk` feature"
+        )
+    )]
+    pub(crate) unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> LcStr<'a> {
+        LcStr {
+            ptr,
+            len,
+            _marker: PhantomData,
+        }
+    }
+
+    /// `true` for an absent view (null pointer), regardless of `len`.
+    pub const fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    /// Borrows this view's bytes as a `&'a [u8]`. A null pointer (absent) is
+    /// treated the same as an empty slice — use [`LcStr::is_null`] first if
+    /// the absent/empty distinction matters.
+    pub fn as_bytes(&self) -> &'a [u8] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: every `LcStr<'a>` upholds the invariant documented on the
+        // struct: a non-null `ptr` points to at least `len` initialized,
+        // readable bytes valid for `'a`. Note this reads `self.ptr`/
+        // `self.len` (plain `Copy` fields) to build a slice borrowed for
+        // `'a`, not for `&self`'s (shorter) lifetime — that is exactly what
+        // the struct's lifetime parameter licenses.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Interprets this view's bytes as UTF-8, replacing invalid sequences
+    /// lossily. A null pointer yields an empty (but `Borrowed`) string —
+    /// use [`LcStr::to_owned_string`] if the absent/empty distinction
+    /// matters.
+    pub fn to_str_lossy(&self) -> std::borrow::Cow<'a, str> {
+        String::from_utf8_lossy(self.as_bytes())
     }
 
     /// Copies this view into an owned `String`.
     ///
-    /// This is a *safe* function — deliberately so, since `discord-ffi` is
-    /// the one crate in the workspace allowed `unsafe` code, and every other
-    /// crate (including `discord-adapter`, whose `convert.rs` calls this
-    /// unconditionally) must be able to call it without an `unsafe` block of
-    /// its own. The `unsafe` needed to read through the raw pointer is done
-    /// here, once, under the SAFETY contract below.
-    ///
     /// # Behavior
-    /// * A null pointer (`ptr.is_null()`) is treated as "absent" and yields
+    /// * A null pointer (`is_null()`) is treated as "absent" and yields
     ///   `None`, regardless of `len`.
     /// * A non-null pointer with `len == 0` yields `Some(String::new())`.
     /// * Invalid UTF-8 is replaced lossily (`String::from_utf8_lossy`), never
     ///   an error: native string data must never crash or reject a caller.
-    ///
-    /// # Safety contract relied on internally
-    /// Every `LcStr` value that reaches this method must, if its pointer is
-    /// non-null, point to at least `len` initialized, readable bytes that
-    /// remain valid (not mutated or freed) for the duration of this call.
-    /// `LcStr` values built with [`LcStr::from_bytes`] or [`LcStr::NULL`]
-    /// always satisfy this by construction. `LcStr` values that came from the
-    /// native bridge satisfy it only before the next `lc_bridge_run_callbacks`
-    /// call on the same bridge — see `native/discord_bridge.h`'s "Ownership &
-    /// lifetime" section — which is why `Bridge`'s query methods hand out
-    /// fresh `LcUser`/`LcMessage` values rather than let callers cache them.
     pub fn to_owned_string(&self) -> Option<String> {
-        if self.ptr.is_null() {
+        if self.is_null() {
             return None;
         }
-        // SAFETY: see the safety contract documented above; every `LcStr`
-        // this crate hands out (from `Bridge`'s query methods, or built via
-        // `LcStr::from_bytes`/`NULL`) upholds it.
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
-        Some(String::from_utf8_lossy(slice).into_owned())
+        Some(self.to_str_lossy().into_owned())
     }
 }
 
-// SAFETY: `LcStr` is a plain (ptr, len) pair with no interior mutability; it
-// carries no thread affinity of its own (any affinity comes from the pointee,
-// which is documented on the methods that dereference it).
-unsafe impl Send for LcStr {}
-unsafe impl Sync for LcStr {}
+// Deliberately no `unsafe impl Send/Sync for LcStr`. `LcStr` holds a raw
+// `*const u8`, so it is `!Send`/`!Sync` by default (auto traits require
+// every field to be `Send`/`Sync`, and raw pointers are neither). That is
+// the correct, conservative default here: an `LcStr` handed out by the
+// native bridge is only valid on the bridge's pump thread until the next
+// `lc_bridge_run_callbacks` call (see `native/discord_bridge.h`'s
+// "Threading" section), so letting it cross threads would be unsound
+// regardless of the lifetime parameter, which only tracks *how long*, not
+// *from which thread*, the view may be read.
 
-/// Mirrors the C `LcUser` struct.
+/// Mirrors the C `LcUser` struct. Carries the same lifetime as the
+/// [`LcStr`] views inside it (see [`LcStr`]'s docs for what that lifetime
+/// guarantees).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct LcUser {
+pub struct LcUser<'a> {
     pub id: u64,
-    pub username: LcStr,
-    pub global_name: LcStr,
-    pub avatar_url: LcStr,
+    pub username: LcStr<'a>,
+    pub global_name: LcStr<'a>,
+    pub avatar_url: LcStr<'a>,
     pub is_provisional: u8,
 }
 
-/// Mirrors the C `LcMessage` struct.
+/// Mirrors the C `LcMessage` struct. Carries the same lifetime as the
+/// [`LcStr`] view inside it.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct LcMessage {
+pub struct LcMessage<'a> {
     pub id: u64,
     pub channel_id: u64,
     pub author_id: u64,
     pub sent_at_ms: i64,
     /// `0` means "never edited" (see `native/discord_bridge.h`).
     pub edited_at_ms: i64,
-    pub content: LcStr,
+    pub content: LcStr<'a>,
 }
 
 /// Event kinds. Mirrors the `LC_EVENT_*` C constants.
@@ -144,6 +253,8 @@ pub mod token_type {
 /// Mirrors the C `LcEvent` struct. Ids only — the adapter resolves ids into
 /// objects via the query functions, per the V1 design. See
 /// `native/discord_bridge.h` for what `id_a`/`id_b`/`status` mean per `kind`.
+/// Carries no `LcStr`, so it needs no lifetime parameter and is freely
+/// `Send`/`Sync` (all fields are plain integers).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LcEvent {
@@ -157,37 +268,159 @@ pub struct LcEvent {
 /// wrapper around them. Compiled only when the `discord-social-sdk` feature
 /// is enabled; linking additionally requires the SDK to be vendored and
 /// `LITECORD_DISCORD_SDK_DIR` set (see `build.rs`).
+///
+/// The `extern "C"` declarations here use lifetime-free `Raw*` mirror
+/// structs (exactly matching the C ABI layout) rather than the public,
+/// lifetime-carrying [`LcStr`]/[`LcUser`]/[`LcMessage`] types: an `extern
+/// "C"` out-parameter has no meaningful Rust lifetime of its own (the
+/// callee is C++, which knows nothing about Rust borrows), so the safe
+/// [`Bridge`] methods below fill a `Raw*` value, then attach whatever
+/// lifetime is actually appropriate (tied to `&self`) when converting it
+/// into the public type — see `bridge::to_lc_user`/`bridge::to_lc_message`.
 #[cfg(feature = "discord-social-sdk")]
 mod bridge {
-    use super::{LcEvent, LcMessage, LcUser};
+    use super::{LcEvent, LcMessage, LcStr, LcUser};
     use std::os::raw::{c_char, c_void};
 
     pub type LcEventCb = unsafe extern "C" fn(userdata: *mut c_void, ev: *const LcEvent);
+
+    /// Lifetime-free ABI mirror of the C `LcStr` — used only to cross the
+    /// `extern "C"` boundary itself; see the module docs.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct RawLcStr {
+        pub ptr: *const u8,
+        pub len: usize,
+    }
+
+    impl RawLcStr {
+        const NULL: RawLcStr = RawLcStr {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+    }
+
+    /// Lifetime-free ABI mirror of the C `LcUser`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct RawLcUser {
+        pub id: u64,
+        pub username: RawLcStr,
+        pub global_name: RawLcStr,
+        pub avatar_url: RawLcStr,
+        pub is_provisional: u8,
+    }
+
+    impl RawLcUser {
+        pub(crate) const fn empty() -> Self {
+            RawLcUser {
+                id: 0,
+                username: RawLcStr::NULL,
+                global_name: RawLcStr::NULL,
+                avatar_url: RawLcStr::NULL,
+                is_provisional: 0,
+            }
+        }
+    }
+
+    /// Lifetime-free ABI mirror of the C `LcMessage`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct RawLcMessage {
+        pub id: u64,
+        pub channel_id: u64,
+        pub author_id: u64,
+        pub sent_at_ms: i64,
+        pub edited_at_ms: i64,
+        pub content: RawLcStr,
+    }
+
+    impl RawLcMessage {
+        pub(crate) const fn empty() -> Self {
+            RawLcMessage {
+                id: 0,
+                channel_id: 0,
+                author_id: 0,
+                sent_at_ms: 0,
+                edited_at_ms: 0,
+                content: RawLcStr::NULL,
+            }
+        }
+    }
+
+    /// Converts a freshly-filled [`RawLcUser`] into the public, borrowing
+    /// [`LcUser<'a>`], attaching whatever lifetime `'a` the caller picks.
+    ///
+    /// # Safety
+    /// The `RawLcStr` fields of `raw`, if non-null, must point to bytes that
+    /// remain valid, readable, and unmutated for the entire lifetime `'a`
+    /// the caller chooses for the result.
+    pub(crate) unsafe fn to_lc_user<'a>(raw: RawLcUser) -> LcUser<'a> {
+        // SAFETY: forwarded from this function's own contract, per field.
+        unsafe {
+            LcUser {
+                id: raw.id,
+                username: LcStr::from_raw_parts(raw.username.ptr, raw.username.len),
+                global_name: LcStr::from_raw_parts(raw.global_name.ptr, raw.global_name.len),
+                avatar_url: LcStr::from_raw_parts(raw.avatar_url.ptr, raw.avatar_url.len),
+                is_provisional: raw.is_provisional,
+            }
+        }
+    }
+
+    /// Converts a freshly-filled [`RawLcMessage`] into the public, borrowing
+    /// [`LcMessage<'a>`]. See [`to_lc_user`]'s safety contract; identical,
+    /// applied to `raw.content`.
+    ///
+    /// # Safety
+    /// See [`to_lc_user`].
+    pub(crate) unsafe fn to_lc_message<'a>(raw: RawLcMessage) -> LcMessage<'a> {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            LcMessage {
+                id: raw.id,
+                channel_id: raw.channel_id,
+                author_id: raw.author_id,
+                sent_at_ms: raw.sent_at_ms,
+                edited_at_ms: raw.edited_at_ms,
+                content: LcStr::from_raw_parts(raw.content.ptr, raw.content.len),
+            }
+        }
+    }
 
     // No `#[link(...)]` attribute here: `cargo:rustc-link-lib` in build.rs
     // supplies the link directive once the SDK is actually vendored. This
     // keeps the declaration itself buildable even when linking is not yet
     // wired up.
+    //
+    // `pub(crate)`, not `pub`: these raw extern functions (and the `Raw*`
+    // structs above) are an implementation detail of `Bridge`; nothing
+    // outside this crate should call them directly, since doing so would
+    // bypass the lifetime tracking `Bridge`'s safe methods provide.
     extern "C" {
-        pub fn lc_bridge_create(application_id: u64) -> *mut c_void;
-        pub fn lc_bridge_destroy(bridge: *mut c_void);
-        pub fn lc_bridge_run_callbacks(bridge: *mut c_void);
-        pub fn lc_bridge_set_event_callback(
+        pub(crate) fn lc_bridge_create(application_id: u64) -> *mut c_void;
+        pub(crate) fn lc_bridge_destroy(bridge: *mut c_void);
+        pub(crate) fn lc_bridge_run_callbacks(bridge: *mut c_void);
+        pub(crate) fn lc_bridge_set_event_callback(
             bridge: *mut c_void,
             cb: Option<LcEventCb>,
             userdata: *mut c_void,
         );
-        pub fn lc_bridge_connect(bridge: *mut c_void);
-        pub fn lc_bridge_disconnect(bridge: *mut c_void);
-        pub fn lc_bridge_update_token(
+        pub(crate) fn lc_bridge_connect(bridge: *mut c_void);
+        pub(crate) fn lc_bridge_disconnect(bridge: *mut c_void);
+        pub(crate) fn lc_bridge_update_token(
             bridge: *mut c_void,
             token_type: i32,
             token: *const c_char,
             len: usize,
         );
-        pub fn lc_bridge_current_user(bridge: *mut c_void, out: *mut LcUser) -> i32;
-        pub fn lc_bridge_get_message(bridge: *mut c_void, id: u64, out: *mut LcMessage) -> i32;
-        pub fn lc_bridge_send_user_message(
+        pub(crate) fn lc_bridge_current_user(bridge: *mut c_void, out: *mut RawLcUser) -> i32;
+        pub(crate) fn lc_bridge_get_message(
+            bridge: *mut c_void,
+            id: u64,
+            out: *mut RawLcMessage,
+        ) -> i32;
+        pub(crate) fn lc_bridge_send_user_message(
             bridge: *mut c_void,
             recipient: u64,
             content: *const c_char,
@@ -196,9 +429,6 @@ mod bridge {
         );
     }
 }
-
-#[cfg(feature = "discord-social-sdk")]
-pub use bridge::*;
 
 /// A thin, safe wrapper owning one native bridge handle.
 ///
@@ -213,6 +443,17 @@ pub use bridge::*;
 /// ownership can move to whichever thread will own the pump loop, and the
 /// SDK itself accepts `Connect`/`Disconnect`/`SendUserMessage` calls from
 /// other threads by internally marshaling them.
+///
+/// # Why query methods take `&mut self`
+/// The native bridge writes every query's strings into per-bridge scratch
+/// buffers (`scratch_username`, `scratch_content`, ...), so *any* later
+/// query, not only [`Bridge::run_callbacks`], can overwrite the bytes an
+/// earlier [`LcUser`]/[`LcMessage`] points at. [`Bridge::current_user`] and
+/// [`Bridge::get_message`] therefore borrow the bridge mutably: while a
+/// result is alive, the borrow checker rejects another query, a pump
+/// (`run_callbacks` also takes `&mut self`) and dropping the bridge. Copy
+/// out what you need (`user.username.to_owned_string()`) before the next
+/// call, as `discord-adapter`'s `convert` module does.
 #[cfg(feature = "discord-social-sdk")]
 use std::os::raw::c_char;
 
@@ -320,43 +561,38 @@ impl Bridge {
         }
     }
 
-    /// Reads the current user from the bridge's local cache, if known.
-    pub fn current_user(&self) -> Option<LcUser> {
-        let mut out = LcUser {
-            id: 0,
-            username: LcStr::NULL,
-            global_name: LcStr::NULL,
-            avatar_url: LcStr::NULL,
-            is_provisional: 0,
-        };
-        // SAFETY: `self.ptr` is valid; `&mut out` is a valid, writable
-        // `LcUser` for the duration of this call, per
+    /// Reads the current user from the bridge's local cache, if known. The
+    /// returned [`LcUser`] borrows the bridge mutably; see "Why query
+    /// methods take `&mut self`" on [`Bridge`].
+    pub fn current_user(&mut self) -> Option<LcUser<'_>> {
+        let mut raw = bridge::RawLcUser::empty();
+        // SAFETY: `self.ptr` is valid; `&mut raw` is a valid, writable
+        // `RawLcUser` for the duration of this call, per
         // `lc_bridge_current_user`'s contract.
-        let rc = unsafe { bridge::lc_bridge_current_user(self.ptr, &mut out) };
-        if rc == 0 {
-            Some(out)
-        } else {
-            None
+        let rc = unsafe { bridge::lc_bridge_current_user(self.ptr, &mut raw) };
+        if rc != 0 {
+            return None;
         }
+        // SAFETY: the string views written into `raw` point into the
+        // bridge's scratch buffers, which stay unchanged until the next
+        // query, `lc_bridge_run_callbacks` or destruction. Every one of
+        // those needs `&mut self` or ownership, and the `LcUser<'_>`
+        // returned here holds the `&mut self` borrow, so none can run while
+        // it is alive.
+        Some(unsafe { bridge::to_lc_user(raw) })
     }
 
-    /// Reads a message by id from the bridge's local cache, if known.
-    pub fn get_message(&self, id: u64) -> Option<LcMessage> {
-        let mut out = LcMessage {
-            id: 0,
-            channel_id: 0,
-            author_id: 0,
-            sent_at_ms: 0,
-            edited_at_ms: 0,
-            content: LcStr::NULL,
-        };
+    /// Reads a message by id from the bridge's local cache, if known. See
+    /// [`Bridge::current_user`] for why the result borrows `&mut self`.
+    pub fn get_message(&mut self, id: u64) -> Option<LcMessage<'_>> {
+        let mut raw = bridge::RawLcMessage::empty();
         // SAFETY: as above, for `lc_bridge_get_message`.
-        let rc = unsafe { bridge::lc_bridge_get_message(self.ptr, id, &mut out) };
-        if rc == 0 {
-            Some(out)
-        } else {
-            None
+        let rc = unsafe { bridge::lc_bridge_get_message(self.ptr, id, &mut raw) };
+        if rc != 0 {
+            return None;
         }
+        // SAFETY: see `current_user`'s SAFETY comment; identical reasoning.
+        Some(unsafe { bridge::to_lc_message(raw) })
     }
 
     /// Sends a DM. Asynchronous: completion arrives as a later
@@ -411,14 +647,12 @@ mod tests {
 
     #[test]
     fn empty_non_null_is_empty_string() {
-        let buf: &[u8] = &[];
-        // Use a non-null dangling pointer with len 0, as a real empty (but
-        // present) native string would be represented. Reading zero bytes
-        // from any non-null pointer is always sound.
-        let s = LcStr {
-            ptr: buf.as_ptr().wrapping_add(1),
-            len: 0,
-        };
+        // `LcStr::empty()` is exactly this case: a non-null, dangling
+        // pointer with `len == 0`, as a real empty (but present) native
+        // string would be represented. Reading zero bytes from any non-null
+        // pointer is always sound.
+        let s = LcStr::empty();
+        assert!(!s.is_null());
         assert_eq!(s.to_owned_string(), Some(String::new()));
     }
 
@@ -429,6 +663,13 @@ mod tests {
         let owned = s.to_owned_string().unwrap();
         assert!(owned.starts_with("hi"));
         assert!(owned.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn as_bytes_borrows_the_backing_slice() {
+        let buf = b"litecord".to_vec();
+        let s = LcStr::from_bytes(&buf);
+        assert_eq!(s.as_bytes(), &buf[..]);
     }
 
     #[test]
@@ -451,5 +692,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ABI regression test: `LcStr` must stay exactly a `(ptr, len)` pair —
+    /// the `PhantomData` marker that carries its lifetime must add no size
+    /// or alignment, since native code writes into memory shaped like this
+    /// struct without knowing anything about Rust lifetimes.
+    #[test]
+    fn lc_str_layout_matches_c_abi() {
+        use std::mem::{align_of, size_of};
+        assert_eq!(size_of::<LcStr<'static>>(), 2 * size_of::<usize>());
+        assert_eq!(align_of::<LcStr<'static>>(), align_of::<usize>());
+    }
+
+    /// The `PhantomData<&'a [u8]>` marker used to give `LcStr`/`LcUser`/
+    /// `LcMessage` their lifetime parameter is zero-sized, so it never
+    /// contributes to any of those `#[repr(C)]` types' layout.
+    #[test]
+    fn phantom_lifetime_marker_is_zero_sized() {
+        assert_eq!(std::mem::size_of::<PhantomData<&'static [u8]>>(), 0);
     }
 }

@@ -24,9 +24,9 @@
 //     after destroying it is undefined behavior.
 //   * String views (`LcStr`) returned by the query functions below (via
 //     `LcUser`/`LcMessage` out-params) point into buffers owned by the bridge.
-//     They are valid ONLY until the next call to `lc_bridge_run_callbacks` on
-//     the same bridge, or until the bridge is destroyed, whichever comes
-//     first. Callers must copy any string they need to keep (discord-ffi's
+//     The buffers are reused: views are valid ONLY until the next query
+//     function or `lc_bridge_run_callbacks` call on the same bridge, or until
+//     the bridge is destroyed, whichever comes first. Callers must copy any string they need to keep (discord-ffi's
 //     `LcStr::to_owned_string` does this).
 //   * `lc_bridge_send_user_message` is asynchronous: it returns immediately,
 //     and completion is reported later as an `LcEvent` of kind
@@ -172,13 +172,13 @@ void lc_bridge_update_token(LcBridge* bridge, int32_t token_type, const char* to
 
 // Fills `out` with the currently authenticated user. Returns 0 on success,
 // nonzero if no current user is known yet (e.g. not connected). String views
-// in `out` are valid until the next lc_bridge_run_callbacks call.
+// in `out` are valid until the next query or lc_bridge_run_callbacks call.
 int32_t lc_bridge_current_user(LcBridge* bridge, LcUser* out);
 
 // Fills `out` with a message by id from the SDK's local cache. Returns 0 on
 // success, nonzero if the message is not cached (the caller should treat this
 // as "needs hydration", not as a hard error). String views in `out` are valid
-// until the next lc_bridge_run_callbacks call.
+// until the next query or lc_bridge_run_callbacks call.
 int32_t lc_bridge_get_message(LcBridge* bridge, uint64_t id, LcMessage* out);
 
 // Sends a direct message to `recipient`. `content` need not be

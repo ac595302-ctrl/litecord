@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{Axis, LayoutError, LayoutNode, LayoutResult, Placement, WeightedNode};
 
 impl LayoutNode {
@@ -79,6 +81,89 @@ impl LayoutNode {
         draft.validate()?;
         *self = draft;
         Ok(())
+    }
+
+    /// Resize a split using sizes measured on the *projected* tree, rather than the
+    /// saved tree's own children.
+    ///
+    /// The UI renders `LayoutNode::project`ed trees: hidden/unavailable panels are
+    /// dropped and a group that collapses to a single visible descendant is replaced
+    /// by that descendant. So a size the UI measured for a projected child may in
+    /// fact belong to a *descendant* of a saved child (when that saved child is a
+    /// group that collapsed), not to the saved child itself.
+    ///
+    /// `visible` is `(projected_child_id, size)` pairs, in any order; a plain
+    /// `String` key (rather than `&str`) is used so callers can hand over owned UI
+    /// measurement data without borrowing back into the tree. Each projected id must
+    /// resolve to exactly one direct child of the saved split named `split_id`
+    /// (either the child itself, or an ancestor whose subtree contains that id).
+    /// Every direct child may be claimed by at most one projected id.
+    ///
+    /// Hidden/non-participating children are left untouched (weight and visibility
+    /// unchanged). Participating children share out their combined existing weight
+    /// `T` in proportion to the measured sizes: child `i` gets `T * size_i /
+    /// sum(sizes)`. The result is applied through [`LayoutNode::resize`], so the
+    /// existing validation runs and a rejected input leaves `self` unchanged.
+    pub fn resize_projected(
+        &mut self,
+        split_id: &str,
+        visible: &[(String, f32)],
+    ) -> LayoutResult<()> {
+        if visible.is_empty() {
+            return Err(LayoutError(
+                "resize_projected requires at least one measured size".into(),
+            ));
+        }
+
+        let mut seen_ids = BTreeSet::new();
+        let mut total_size = 0.0f32;
+        for (id, size) in visible {
+            if !size.is_finite() || *size <= 0.0 {
+                return Err(LayoutError(
+                    "resize_projected sizes must be positive and finite".into(),
+                ));
+            }
+            if !seen_ids.insert(id.as_str()) {
+                return Err(LayoutError("duplicate projected ID".into()));
+            }
+            total_size += *size;
+        }
+
+        let children = match self.find(split_id) {
+            Some(Self::Split { children, .. }) => children,
+            _ => return Err(LayoutError("split not found".into())),
+        };
+
+        // Map each projected id to the index of the direct child that contains it.
+        let mut claimed = vec![false; children.len()];
+        let mut mapped_index = Vec::with_capacity(visible.len());
+        for (id, _) in visible {
+            let idx = children
+                .iter()
+                .position(|c| c.node.find(id).is_some())
+                .ok_or_else(|| LayoutError("projected ID does not map to any child".into()))?;
+            if claimed[idx] {
+                return Err(LayoutError(
+                    "two projected IDs map to the same saved child".into(),
+                ));
+            }
+            claimed[idx] = true;
+            mapped_index.push(idx);
+        }
+
+        let participating_weight: f32 = children
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| claimed[*i])
+            .map(|(_, c)| c.weight)
+            .sum();
+
+        let mut new_weights: Vec<f32> = children.iter().map(|c| c.weight).collect();
+        for ((_, size), idx) in visible.iter().zip(mapped_index) {
+            new_weights[idx] = participating_weight * size / total_size;
+        }
+
+        self.resize(split_id, &new_weights)
     }
 
     pub fn reorder(&mut self, split_id: &str, from: usize, to: usize) -> LayoutResult<()> {

@@ -25,7 +25,7 @@ use litecord_types::Timestamp;
 /// real Discord snowflake — Discord's epoch starts well after the Unix
 /// epoch) or no username, since a `User` cannot meaningfully exist without
 /// either.
-pub fn convert_user(raw: &discord_ffi::LcUser) -> Option<User> {
+pub fn convert_user(raw: &discord_ffi::LcUser<'_>) -> Option<User> {
     if raw.id == 0 {
         return None;
     }
@@ -51,7 +51,7 @@ pub fn convert_user(raw: &discord_ffi::LcUser) -> Option<User> {
 /// Returns `None` when the record has no id, no channel id, or the content
 /// pointer was null (as opposed to merely empty, which is a valid — if
 /// unusual — message body, e.g. an attachment-only message).
-pub fn convert_message(raw: &discord_ffi::LcMessage) -> Option<Message> {
+pub fn convert_message(raw: &discord_ffi::LcMessage<'_>) -> Option<Message> {
     if raw.id == 0 || raw.channel_id == 0 {
         return None;
     }
@@ -79,7 +79,12 @@ mod tests {
     use super::*;
     use discord_ffi::{LcMessage, LcStr, LcUser};
 
-    fn user_with(id: u64, username: &str, global_name: LcStr, avatar_url: LcStr) -> LcUser {
+    fn user_with<'a>(
+        id: u64,
+        username: &'a str,
+        global_name: LcStr<'a>,
+        avatar_url: LcStr<'a>,
+    ) -> LcUser<'a> {
         LcUser {
             id,
             username: LcStr::from_bytes(username.as_bytes()),
