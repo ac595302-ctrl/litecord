@@ -179,3 +179,14 @@ mod tests {
         assert_eq!(t.web_url(), "https://discord.com/channels/1/2");
     }
 }
+
+/// Next step of a sign-in flow, as returned by the backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum AuthStep {
+    /// Credentials are already valid; nothing to do.
+    AlreadySignedIn,
+    /// Open `url` in the system browser (always a user action), then pass
+    /// the redirect URL Discord sends back to `complete_sign_in`.
+    OpenBrowser { url: String, redirect_uri: String },
+}

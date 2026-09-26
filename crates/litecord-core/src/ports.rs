@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 
 use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
-use litecord_types::capability::{BackendMode, Capability, CapabilitySet, DiscordTarget};
+use litecord_types::capability::{AuthStep, BackendMode, Capability, CapabilitySet, DiscordTarget};
 use litecord_types::ids::*;
 use litecord_types::provenance::DiscordSource;
 use litecord_types::social::*;
@@ -109,6 +109,27 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     async fn disconnect(&self) -> BackendResult<()>;
 
     async fn current_user(&self) -> BackendResult<User>;
+
+    /// Start signing in. Backends that need no interactive auth (demo,
+    /// bot token) return `AlreadySignedIn`.
+    async fn begin_sign_in(&self) -> BackendResult<AuthStep> {
+        Ok(AuthStep::AlreadySignedIn)
+    }
+
+    /// Finish signing in with the OAuth redirect URL. Implementations must
+    /// verify the `state` parameter and keep tokens in a `SecretStore`;
+    /// nothing about the tokens may be returned.
+    async fn complete_sign_in(&self, _redirect_url: &str) -> BackendResult<()> {
+        Err(BackendError::Authentication(
+            "this backend has no interactive sign-in".into(),
+        ))
+    }
+
+    /// Sign out: forget credentials and disconnect. Emits
+    /// `SessionChanged{LoggedOut}`.
+    async fn sign_out(&self) -> BackendResult<()> {
+        self.disconnect().await
+    }
 
     async fn user(&self, _user_id: UserId) -> BackendResult<User> {
         unsupported(Capability::CurrentUser)

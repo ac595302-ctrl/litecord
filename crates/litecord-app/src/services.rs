@@ -910,6 +910,36 @@ impl LitecordApp {
         Ok(self.inner.backend.audio_devices().await?)
     }
 
+    /// Start signing in. With `OpenBrowser`, the UI opens the URL (a user
+    /// action), captures the redirect to `redirect_uri` and passes it to
+    /// [`LitecordApp::complete_sign_in`]. Session progress arrives as
+    /// `SessionChanged` events (Authorizing → Connecting → Ready).
+    pub async fn sign_in(&self) -> Result<litecord_types::capability::AuthStep> {
+        Ok(self.inner.backend.begin_sign_in().await?)
+    }
+
+    /// Finish signing in. Tokens stay inside the backend's secret store;
+    /// nothing credential-bearing is returned or logged.
+    pub async fn complete_sign_in(&self, redirect_url: &str) -> Result<()> {
+        Ok(self.inner.backend.complete_sign_in(redirect_url).await?)
+    }
+
+    /// Sign out of Discord. Local memory is kept (it is the user's data);
+    /// hydration pauses until the next sign-in.
+    pub async fn sign_out(&self) -> Result<()> {
+        Ok(self.inner.backend.sign_out().await?)
+    }
+
+    /// Current session state (as last reported by the backend).
+    pub fn session_state(&self) -> Result<SessionState> {
+        Ok(self
+            .inner
+            .db
+            .read(|r| repos::app_state::get(r, "session_state"))?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default())
+    }
+
     /// Explicit user refresh of some state.
     pub fn refresh(&self, key: HydrationKey) {
         self.inner

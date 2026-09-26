@@ -23,7 +23,7 @@ use litecord_core::events::{DiscordEvent, SourceEnvelope};
 use litecord_core::ports::{BackendError, BackendResult, SocialBackend, VoiceControl};
 use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
 use litecord_types::capability::{
-    BackendMode, Capability, CapabilitySet, HistoryCapability, SupportLevel,
+    AuthStep, BackendMode, Capability, CapabilitySet, HistoryCapability, SupportLevel,
 };
 use litecord_types::ids::*;
 use litecord_types::provenance::DiscordSource;
@@ -31,6 +31,9 @@ use litecord_types::social::*;
 use litecord_types::Timestamp;
 
 use crate::fixtures::{self, DemoData};
+
+const MOCK_CLIENT_ID: u64 = 1;
+const MOCK_REDIRECT_URI: &str = "http://127.0.0.1:53134/callback";
 
 /// Mutable state behind [`MockBackend`]. Kept behind a single `Mutex` since
 /// this is a test/demo backend, not a hot path.
@@ -58,6 +61,10 @@ struct MockState {
     fail_queue: VecDeque<BackendError>,
     /// Invocation counts per trait method name, for `calls()`.
     calls: HashMap<&'static str, usize>,
+    /// Interactive sign-in simulation (`with_sign_in_required`).
+    auth_required: bool,
+    signed_in: bool,
+    pending_sign_in: Option<crate::oauth::PkceSession>,
 }
 
 /// A fully working, in-memory [`SocialBackend`] over deterministic synthetic
@@ -128,6 +135,9 @@ impl MockBackend {
             offline: false,
             fail_queue: VecDeque::new(),
             calls: HashMap::new(),
+            auth_required: false,
+            signed_in: true,
+            pending_sign_in: None,
         };
 
         Self {
@@ -175,6 +185,9 @@ impl MockBackend {
         if state.offline {
             return Err(BackendError::Offline);
         }
+        if !state.signed_in {
+            return Err(BackendError::NotConnected);
+        }
         if let Some(err) = state.fail_queue.pop_front() {
             return Err(err);
         }
@@ -187,6 +200,9 @@ impl MockBackend {
         Self::record_call(state, name);
         if state.offline {
             return Err(BackendError::Offline);
+        }
+        if !state.signed_in {
+            return Err(BackendError::NotConnected);
         }
         Ok(())
     }
@@ -243,6 +259,55 @@ impl MockBackend {
         Self::demo_devices()
             .iter()
             .any(|d| d.id == id && d.kind == kind)
+    }
+
+    /// Emit Connecting → Ready and the initial presence burst.
+    async fn announce_ready(&self, sink: &IngestSender) {
+        let sink = sink.clone();
+        self.emit(
+            &sink,
+            DiscordEvent::SessionChanged {
+                state: SessionState::Connecting,
+            },
+        )
+        .await;
+        self.emit(
+            &sink,
+            DiscordEvent::SessionChanged {
+                state: SessionState::Ready,
+            },
+        )
+        .await;
+        // Like the SDK's presence callbacks after connecting, report the
+        // current presence of every known user.
+        let presences: Vec<(UserId, Presence)> = {
+            let s = self.lock();
+            let mut v: Vec<_> = s.presences.iter().map(|(u, p)| (*u, p.clone())).collect();
+            v.sort_by_key(|(u, _)| *u);
+            v
+        };
+        // These mimic callback-thread delivery, so they use the non-blocking
+        // path (drop + resync on a full queue) instead of awaiting capacity.
+        let now = self.clock.now();
+        for (user_id, presence) in presences {
+            let _ = sink.try_send(SourceEnvelope::new(
+                DiscordSource::Synthetic,
+                now,
+                DiscordEvent::PresenceChanged { user_id, presence },
+            ));
+        }
+    }
+
+    /// Require interactive sign-in (simulates a fresh install): the backend
+    /// reports `LoggedOut` and refuses reads/writes until
+    /// `begin_sign_in` / `complete_sign_in` succeed.
+    pub fn with_sign_in_required(self) -> Self {
+        {
+            let mut s = self.lock();
+            s.auth_required = true;
+            s.signed_in = false;
+        }
+        self
     }
 
     pub fn fail_next(&self, n: usize, err: BackendError) {
@@ -425,43 +490,96 @@ impl SocialBackend for MockBackend {
     }
 
     async fn connect(&self, sink: IngestSender) -> BackendResult<()> {
-        {
+        let signed_in = {
             let mut s = self.lock();
             Self::record_call(&mut s, "connect");
             s.sink = Some(sink.clone());
             s.connected = true;
-        }
-        self.emit(
-            &sink,
-            DiscordEvent::SessionChanged {
-                state: SessionState::Connecting,
-            },
-        )
-        .await;
-        self.emit(
-            &sink,
-            DiscordEvent::SessionChanged {
-                state: SessionState::Ready,
-            },
-        )
-        .await;
-        // Like the SDK's presence callbacks after connecting, report the
-        // current presence of every known user.
-        let presences: Vec<(UserId, Presence)> = {
-            let s = self.lock();
-            let mut v: Vec<_> = s.presences.iter().map(|(u, p)| (*u, p.clone())).collect();
-            v.sort_by_key(|(u, _)| *u);
-            v
+            s.signed_in
         };
-        // These mimic callback-thread delivery, so they use the non-blocking
-        // path (drop + resync on a full queue) instead of awaiting capacity.
-        let now = self.clock.now();
-        for (user_id, presence) in presences {
-            let _ = sink.try_send(SourceEnvelope::new(
-                DiscordSource::Synthetic,
-                now,
-                DiscordEvent::PresenceChanged { user_id, presence },
-            ));
+        if !signed_in {
+            self.emit(
+                &sink,
+                DiscordEvent::SessionChanged {
+                    state: SessionState::LoggedOut,
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        self.announce_ready(&sink).await;
+        Ok(())
+    }
+
+    async fn begin_sign_in(&self) -> BackendResult<AuthStep> {
+        let (step, sink) = {
+            let mut s = self.lock();
+            Self::record_call(&mut s, "begin_sign_in");
+            if s.signed_in {
+                return Ok(AuthStep::AlreadySignedIn);
+            }
+            let session = crate::oauth::PkceSession::new()
+                .map_err(|e| BackendError::Authentication(e.to_string()))?;
+            let cfg = crate::oauth::OAuthConfig::new(MOCK_CLIENT_ID, MOCK_REDIRECT_URI);
+            let url = session.authorization_url(&cfg);
+            s.pending_sign_in = Some(session);
+            (
+                AuthStep::OpenBrowser {
+                    url,
+                    redirect_uri: MOCK_REDIRECT_URI.to_owned(),
+                },
+                s.sink.clone(),
+            )
+        };
+        if let Some(sink) = &sink {
+            self.emit(
+                sink,
+                DiscordEvent::SessionChanged {
+                    state: SessionState::Authorizing,
+                },
+            )
+            .await;
+        }
+        Ok(step)
+    }
+
+    async fn complete_sign_in(&self, redirect_url: &str) -> BackendResult<()> {
+        let sink = {
+            let mut s = self.lock();
+            Self::record_call(&mut s, "complete_sign_in");
+            let session = s
+                .pending_sign_in
+                .take()
+                .ok_or_else(|| BackendError::Authentication("no sign-in in progress".into()))?;
+            // The mock has no token endpoint: a valid code is accepted as-is.
+            session
+                .parse_redirect(redirect_url)
+                .map_err(|e| BackendError::Authentication(e.to_string()))?;
+            s.signed_in = true;
+            s.sink.clone()
+        };
+        if let Some(sink) = &sink {
+            self.announce_ready(sink).await;
+        }
+        Ok(())
+    }
+
+    async fn sign_out(&self) -> BackendResult<()> {
+        let sink = {
+            let mut s = self.lock();
+            Self::record_call(&mut s, "sign_out");
+            s.signed_in = false;
+            s.pending_sign_in = None;
+            s.sink.clone()
+        };
+        if let Some(sink) = &sink {
+            self.emit(
+                sink,
+                DiscordEvent::SessionChanged {
+                    state: SessionState::LoggedOut,
+                },
+            )
+            .await;
         }
         Ok(())
     }

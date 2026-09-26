@@ -31,6 +31,7 @@ discord-adapter = { version = "0.1.0", path = "crates/discord-adapter" }
 async-trait = "0.1.89"
 blake3 = "1.8"
 getrandom = "0.4"
+sha2 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 lru = "0.18"
 rusqlite = { version = "0.40", features = ["bundled"] }

@@ -13,12 +13,15 @@ default = []
 discord-social-sdk = ["discord-ffi/discord-social-sdk"]
 
 [dependencies]
+getrandom.workspace = true
+sha2.workspace = true
 litecord-types.workspace = true
 litecord-core.workspace = true
 discord-ffi.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
