@@ -50,7 +50,7 @@ written).
 | 1 | workspace, `litecord-types` | done, tested |
 | 2 | `litecord-core` (errors, config, events, bus, ports, secrets, metrics, clock, supervisor) | done, tested |
 | 3 | `litecord-store` db core + schema + migrations + FTS helper | done, tested |
-| 4 | store repositories + reducer; discord-adapter mock; features/commands; hydrator | in progress |
+| 4 | store repositories + reducer; discord-adapter mock; features/commands; hydrator | in progress (`litecord-hydrator` done, tested; store repos/reducer and discord-adapter mock still open) |
 | 5 | memory service, retrieval, actions | todo |
 | 6 | context compiler, agent gateway, MCP server | todo |
 | 7 | app wiring + view models + desktop bin + docs + CI | todo |

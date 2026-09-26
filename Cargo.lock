@@ -209,6 +209,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "litecord-hydrator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "litecord-core",
+ "litecord-types",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "litecord-store"
 version = "0.1.0"
 dependencies = [
