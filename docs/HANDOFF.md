@@ -138,16 +138,29 @@ host initially had no Rust compiler. No system PATH changes are required.
    keychain `SecretStore`, callback thread → `IngestSender::try_send`, a
    dedicated thread pumping `lc_bridge_run_callbacks`). The mock backend's
    behaviour and tests describe the expected contract.
-3. **Summaries** — `repos::summaries` is ready; add a summarizer behind a
-   trait in `litecord-memory` (non-LLM segment stats first, LLM optional).
-4. **Hydration queue persistence** — `repos::hydration_jobs` exists; persist
-   `HydrationScheduler::pending_snapshot()` on shutdown and restore on start.
-5. **Raw-message retention** — add `messages::prune_before` (FTS triggers
-   already handle deletes) and call it from `MemoryService::apply_retention`.
-6. **Bot gateway adapter** — another `SocialBackend` with
+3. **Bot gateway adapter** — another `SocialBackend` with
    `DiscordSource::BotGateway`; proposals already record `DiscordIdentity`.
-7. Dedicated retriever tests (`crates/litecord-retrieval/tests/`), agent
-   profiles (V2 §45), themes (V1 §18).
+4. **LLM-backed extraction/summaries** (optional) — implement
+   `CandidateExtractor` / `Summarizer` with a model; store output as
+   `Origin::AgentDerived`.
+5. Agent profiles (V2 §45), themes (V1 §18), media download cache.
+
+### Backend additions for the UI — batch 10
+
+New `LitecordApp` APIs (all tested; see `crates/litecord-app/tests/`):
+
+| API | Purpose |
+|---|---|
+| `sign_in() -> AuthStep`, `complete_sign_in(redirect_url)`, `sign_out()`, `session_state()` | sign-in screen; PKCE + CSRF state in `discord-adapter::oauth`; mock supports `MockBackend::with_sign_in_required()` |
+| `audio_devices()` | voice settings device pickers (empty list when unsupported) |
+| `conversation_files_view(id, limit, before)` | Files tab (attachment metadata, paged, Discord links) |
+| `command_palette_in / command_shortcuts_in / run_command_in(.., CommandScope)` | pass `selected_message`; enables `message.bookmark`, `message.copy_id`, `message.open_in_discord` |
+| `task_detail_view(id)`, `create_task(draft)`, `set_task_priority`, `add_task_comment` | task priorities, one-level subtasks, comments (migration 0002) |
+
+Also: unfinished hydration work persists across restarts; raw-message
+retention (`retention.raw_messages_days`, bookmarks kept); weekly heuristic
+conversation summaries refreshed by the maintenance task; dedicated
+retriever test suite.
 
 ## Gotchas learned the hard way
 
