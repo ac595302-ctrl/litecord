@@ -409,9 +409,7 @@ mod tests {
         drop(db);
         // Re-opening does not re-run migrations.
         let db = Database::open(&path, &DatabaseConfig::default()).unwrap();
-        let v = db
-            .read(|r| migrations::current_version(r).map_err(StoreError::from))
-            .unwrap();
+        let v = db.read(|r| migrations::current_version(r)).unwrap();
         assert_eq!(v, migrations::latest_version());
     }
 
