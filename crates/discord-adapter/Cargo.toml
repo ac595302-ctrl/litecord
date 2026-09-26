@@ -15,6 +15,7 @@ discord-social-sdk = ["discord-ffi/discord-social-sdk"]
 [dependencies]
 getrandom.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 litecord-types.workspace = true
 litecord-core.workspace = true
 discord-ffi.workspace = true
