@@ -1,0 +1,22 @@
+[package]
+name = "discord-ffi"
+description = "C ABI boundary to the native Discord Social SDK. The only crate allowed to link SDK symbols or use unsafe code."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables the native bridge: compiles native/discord_bridge.cpp and links the
+# vendored Discord Social SDK. Requires LITECORD_DISCORD_SDK_DIR at build time
+# (see README.md); without it, cargo check/clippy still succeed (build.rs only
+# warns) but linking a real binary will fail.
+discord-social-sdk = ["dep:cc"]
+
+[dependencies]
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[lints]
+workspace = true

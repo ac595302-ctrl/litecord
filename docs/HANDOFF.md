@@ -50,10 +50,31 @@ written).
 | 1 | workspace, `litecord-types` | done, tested |
 | 2 | `litecord-core` (errors, config, events, bus, ports, secrets, metrics, clock, supervisor) | done, tested |
 | 3 | `litecord-store` db core + schema + migrations + FTS helper | done, tested |
-| 4 | store repositories + reducer; discord-adapter mock; features/commands; hydrator | in progress |
+| 4 | store repositories + reducer; discord-adapter mock; features/commands; hydrator | in progress (discord-ffi + discord-adapter done, tested — see below; store repos/reducer, features/commands, hydrator still open) |
 | 5 | memory service, retrieval, actions | todo |
 | 6 | context compiler, agent gateway, MCP server | todo |
 | 7 | app wiring + view models + desktop bin + docs + CI | todo |
+
+## `discord-ffi` / `discord-adapter` (this batch)
+
+* `crates/discord-ffi`: C ABI boundary to the native Discord Social SDK. The
+  only crate allowed `unsafe` (documented at the crate root). Default
+  features compile no native code at all; the `discord-social-sdk` feature
+  compiles `native/discord_bridge.cpp` (a sketch, **not compiled in CI, not
+  verified against a real SDK checkout**) against a vendored SDK pointed to
+  by `LITECORD_DISCORD_SDK_DIR`. With the feature on but the env var unset,
+  `build.rs` only emits a `cargo:warning` so `cargo check`/`clippy
+  --all-features` stay green without the SDK. See
+  `crates/discord-ffi/README.md`.
+* `crates/discord-adapter`: `mock::MockBackend` is a real (not stub)
+  `SocialBackend` over deterministic synthetic fixtures
+  (`fixtures::generate(seed, now)`), used for demo mode and for testing
+  everything above the adapter without Discord connectivity.
+  `social_sdk::SocialSdkBackend` (behind the same feature) is a deliberate
+  skeleton — empty `CapabilitySet`, every call fails — until the native
+  bridge above is verified; see its module doc.
+* Both crates are workspace members automatically (`crates/*` glob); no
+  changes needed elsewhere. Nothing above `discord-adapter` sees an SDK type.
 
 ## How to continue
 
