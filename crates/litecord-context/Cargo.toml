@@ -1,0 +1,18 @@
+[package]
+name = "litecord-context"
+description = "Context compiler: request -> intent/entity resolution -> retrieval -> ranking -> budgeting -> ContextPack (revision-stamped, trust-labelled)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+litecord-types.workspace = true
+litecord-core.workspace = true
+litecord-store.workspace = true
+litecord-retrieval.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

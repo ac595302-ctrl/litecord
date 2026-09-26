@@ -244,6 +244,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "litecord-context"
+version = "0.1.0"
+dependencies = [
+ "litecord-core",
+ "litecord-retrieval",
+ "litecord-store",
+ "litecord-types",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "litecord-core"
 version = "0.1.0"
 dependencies = [
