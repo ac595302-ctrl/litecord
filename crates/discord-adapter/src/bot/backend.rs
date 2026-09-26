@@ -247,7 +247,7 @@ async fn run_socket(
 async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToken) {
     let mut session = GatewaySession::new(GatewayConfig {
         token: Secret::new(shared.token.expose_secret().clone()),
-        intents: shared.cfg.intents.clone(),
+        intents: shared.cfg.intents,
         properties_os: std::env::consts::OS.to_owned(),
     });
     let mut backoff = shared.cfg.reconnect_min;
