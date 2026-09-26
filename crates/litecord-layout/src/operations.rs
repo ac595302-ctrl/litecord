@@ -1,6 +1,41 @@
 use crate::{Axis, LayoutError, LayoutNode, LayoutResult, Placement, WeightedNode};
 
 impl LayoutNode {
+    /// Add an optional panel beside an existing leaf, without touching other IDs.
+    pub fn insert_panel(
+        &mut self,
+        panel: Self,
+        target: &str,
+        placement: Placement,
+    ) -> LayoutResult<()> {
+        if !matches!(panel, Self::Panel { .. }) || placement == Placement::Center {
+            return Err(LayoutError(
+                "insert requires a panel and edge placement".into(),
+            ));
+        }
+        let mut draft = self.clone();
+        let id = unique_id(&draft, "insert", panel.id());
+        let mut panel = panel;
+        if let Self::Panel { placement: p, .. } = &mut panel {
+            *p = placement;
+        }
+        insert_relative(&mut draft, target, panel, placement, &id)?;
+        draft.validate()?;
+        *self = draft;
+        Ok(())
+    }
+
+    pub fn set_visible(&mut self, id: &str, visible: bool) -> LayoutResult<()> {
+        let mut draft = self.clone();
+        match find_mut(&mut draft, id) {
+            Some(Self::Panel { visible: v, .. }) => *v = visible,
+            _ => return Err(LayoutError("visibility requires an existing panel".into())),
+        }
+        draft.validate()?;
+        *self = draft;
+        Ok(())
+    }
+
     /// Transactional leaf move. IDs and all unrelated subtrees are preserved.
     pub fn dock(&mut self, source: &str, target: &str, placement: Placement) -> LayoutResult<()> {
         self.validate()?;
@@ -128,17 +163,26 @@ fn insert_relative(
     } else {
         Axis::Vertical
     };
+    let moved_weight = match &moved {
+        LayoutNode::Panel { panel, .. }
+            if matches!(panel.as_str(), "primary_navigation" | "user_controls") =>
+        {
+            0.08
+        }
+        LayoutNode::Panel { panel, .. } if panel == "server_list" => 0.12,
+        _ => 0.5,
+    };
     let nodes = if before {
-        vec![moved, original]
+        vec![(moved_weight, moved), (1.0 - moved_weight, original)]
     } else {
-        vec![original, moved]
+        vec![(1.0 - moved_weight, original), (moved_weight, moved)]
     };
     *target = LayoutNode::Split {
         id: id.into(),
         axis,
         children: nodes
             .into_iter()
-            .map(|node| WeightedNode { weight: 1.0, node })
+            .map(|(weight, node)| WeightedNode { weight, node })
             .collect(),
     };
     Ok(())

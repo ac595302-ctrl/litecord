@@ -1,0 +1,27 @@
+[package]
+name = "litecord-ui"
+description = "Native mock-aligned Litecord workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+screenshots = ["dep:image"]
+
+[dependencies]
+litecord-app.workspace = true
+litecord-core.workspace = true
+litecord-types.workspace = true
+litecord-features.workspace = true
+litecord-layout.workspace = true
+litecord-actions.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+eframe = { version = "=0.34.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+discord-adapter.workspace = true

@@ -12,18 +12,23 @@ approval.
 
 ## Status
 
-This repository is the **backend foundation**. It works end to end on a
-deterministic *demo backend* (synthetic data). The real Social SDK integration
-is a clearly marked skeleton (the SDK is proprietary and not vendored), and
-the GUI is intentionally left for a dedicated UI pass. See
-[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for an honest
-matrix and [`docs/HANDOFF.md`](docs/HANDOFF.md) for how to continue.
+The backend foundation works end to end on a deterministic demo backend,
+clearly labelled as synthetic. The native egui/eframe UI now has an initial
+functional checkpoint: Messages and Friends, a profile-backed workspace, and
+baseline screens for all nine primary destinations. Stage 6 GUI, screenshot,
+and dependency checks are ongoing; this checkpoint does not claim full visual
+fidelity to the mock design. The real Social SDK integration remains a clearly
+marked skeleton (the SDK is proprietary and not vendored). See
+[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) and
+[`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md) for current behavior and
+limits, and [`docs/HANDOFF.md`](docs/HANDOFF.md) for next steps.
 
 ## Quick start
 
 ```sh
-cargo test --workspace                       # ~270 tests, no credentials needed
-cargo run -p litecord-desktop -- demo --in-memory
+cargo test --workspace                       # no credentials needed
+cargo run -p litecord-desktop --features gui -- gui
+cargo run -p litecord-desktop -- demo --in-memory  # headless synthetic demo
 cargo run -p litecord-desktop -- mcp --data-dir .litecord   # MCP server on stdio
 ```
 
@@ -72,10 +77,14 @@ this is exercised through the mock backend.
 over stdio. Agents never get credentials, raw SQL or the power to send.
 Setup for Codex/OpenCode: [`docs/MCP.md`](docs/MCP.md).
 
-## Where the UI goes
+## Native UI checkpoint
 
-A UI depends only on `litecord-app` (view models + services + event stream).
-The full guide, including a screen→method map for the mock designs, is
+Messages and Friends use canonical app snapshots through a bounded background
+bridge, with event refresh and periodic cross-process polling. Workspace
+profiles drive the shell and panels. Room/channel metadata can link to Discord;
+native channel messages, generative Omni replies and transcription, device
+discovery, and rich remote-media download are not implemented. The demo backend
+is synthetic and labelled in the UI. The guide and current feature limits are in
 [`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md).
 
 ## Development

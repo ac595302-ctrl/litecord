@@ -4,14 +4,13 @@ Legend: **Done** = implemented and covered by tests · **Partial** = working
 base with named gaps · **Skeleton** = interface/boundary only, clearly marked
 in code · **Deferred** = not started (design slot exists).
 
-An interface existing is never counted as "implemented".
-
-UI stages 1 and 2 (September 26, 2026): the visual contract and native
-egui/eframe direction, screen/API inventory, framework-independent layout
-model, and typed app profile persistence are in place. The `litecord-ui`
-crate has a manifest and helper scaffolding, but no implemented workspace or
-screen widgets and no working native GUI/docking renderer. See
-`UI_INTEGRATION.md` for the Stage 3 handoff.
+An interface existing is never counted as "implemented". UI stages 1–5
+(September 26, 2026) now have an initial native egui/eframe implementation:
+canonical Messages and Friends, a profile-backed workspace renderer, and
+baseline screens for all nine primary destinations. Stage 6 GUI behavior,
+screenshot review, and dependency checks are still in progress. This is an
+implementation checkpoint, not a claim of full visual fidelity. See
+`UI_INTEGRATION.md` for current behavior and known limits.
 
 | Component | Status | Implemented | Tested | Deferred | Notes |
 |---|---|---|---|---|---|
@@ -41,7 +40,8 @@ screen widgets and no working native GUI/docking renderer. See
 | Security & trust | Done (foundation) | trust labels, visibility, credential isolation (`Secret<T>`), prompt-injection labelling, FTS query sanitization | credential-exclusion + injection tests | OS keychain store, DB encryption at rest | see SECURITY.md |
 | Feature & command system | Done | registry, 7 built-in features, fuzzy command palette backend, intents | 38 tests | themes (V1 §18), dynamic plugins (deliberately not planned) | |
 | Application layer & view models | Done | runtime wiring, supervised tasks, UI view models, services, and typed workspace profile view | app e2e test; workspace-profile integration tests listed below | agent profiles (V2 §45), Model Context Debugger view model (use `compile_context`) | |
-| Workspace layout & profiles (`litecord-layout`, `litecord-app`) | Done | validated structural trees, panel registry and minimum-size metadata, contextual projection, transactional dock/resize/reorder, bounded versioned profile CRUD/edit sessions, typed SQLite persistence | 19 layout tests + 5 app workspace-profile integration tests; includes restart, stale-token, event, and recovery coverage | native renderer, widget factories, viewport/minimum-size enforcement, edit/profile UI | reserved setting key `workspace.layout_profiles`; optimistic setting tokens and atomic transactions; corrupt/future raw data stays preserved until explicit reset-all; generic settings writes reject the key |
-| Desktop binary / native GUI | Partial | `litecord demo`, `litecord mcp`, `litecord status`; `litecord-ui` manifest and helper scaffolding | CLI smoke-tested; no native UI validation | implemented workspace/screen widgets and egui/eframe docking renderer (Stage 3) | Current scaffold is not a working GUI |
+| Workspace layout & profiles (`litecord-layout`, `litecord-app`) | Partial | validated structural trees, panel registry, contextual projection, transactional dock/resize/reorder; typed profile CRUD and persistence; native Edit/Apply/Cancel editing, drag-edge docking, splitter saves, optional sidebar/inspector, and persistent always-available menu | 23 layout tests + 5 app workspace-profile integration tests; 5 UI bridge/render/editor tests | full mock fidelity and performance profiling | reserved setting key `workspace.layout_profiles`; optimistic storage tokens and atomic transactions; corrupt/future raw data stays preserved until explicit reset-all |
+| Desktop binary / native GUI | Partial | `cargo run -p litecord-desktop --features gui -- gui` opens the eframe shell; Home, Messages, Friends, Servers, Voice, Inbox, Memory, Tasks, and Settings provide initial controls from app snapshots; bounded background bridge, event refresh plus 2-second cross-process polling; headless `demo`, `mcp`, and `status` remain | Full-workspace tests, all-target/all-feature Clippy, formatting, and cargo-deny pass on Windows; native screenshots cover all nine destinations, a narrow window, and horizontal layout | full visual fidelity; Stage 6 QA | Optional hidden screenshot QA: `--features screenshots -- gui --screenshot PATH --screen Friends --width 760`; graceful close and joined runtime shutdown observed. Demo mode is labelled `Demo · synthetic` |
+| Native room/channel and media surfaces | Partial | `rooms_view()` lists canonical lobby metadata and optional matching conversation ID; channel metadata includes Open in Discord links; room Messages navigation opens a linked conversation in the separate Messages destination | App room-view tests cover metadata association | native channel service and in-room messages/files; generative Omni replies and transcription; device discovery; downloading rich remote media | Rooms API is lobby metadata only, not channel-message support; Files requires backend history |
 | Observability | Done | tracing spans (startup, reduce, hydrate, retrieval, context, tools, actions), metrics registry with real RSS | metrics tests | exporting metrics | message content never logged |
 | CI | Done | fmt, clippy (all features), tests on Linux/macOS/Windows, cargo-deny | — | — | `.github/workflows/ci.yml` |

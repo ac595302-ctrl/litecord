@@ -5,9 +5,10 @@ work next. **Update it at every commit batch.**
 
 Source specs (not in repo): "V2 — Unified Memory and Agent Layer" (primary),
 "Rust-Based Discord Social Client Hackathon Plan" (V1), UI mock PDF (visual
-only). The build brief asked for a production-quality *foundation*. UI design
-and workspace persistence are now staged and documented; the native GUI is
-still future work described in `docs/UI_INTEGRATION.md`.
+only). The build brief asked for a production-quality *foundation*. The
+repository now has the backend foundation and an initial native UI checkpoint.
+`docs/UI_INTEGRATION.md` describes the current renderer and its limits; this
+log tracks the remaining work.
 
 ## Architecture decisions (settled — do not relitigate without reason)
 
@@ -55,44 +56,66 @@ still future work described in `docs/UI_INTEGRATION.md`.
 | 6 | context compiler, agent gateway, MCP server | done, tested |
 | 7 | app wiring, view models, `litecord` binary, docs, CI | done, tested |
 | 8 | layout model, panel registry, profile persistence APIs | done, tested |
+| 9 | native UI stages 3–5 | implemented baseline; stage 6 verification in progress |
 
-Stage 2 verification on Rust 1.98, before the pending GUI dependency work: 19
-`litecord-layout` tests and 5 app workspace-profile integration tests;
-`cargo test --workspace`, `cargo fmt --all --check`, and
-`cargo clippy --workspace --all-targets --all-features -- -D warnings` all
-passed. Clippy required two harmless baseline modernizations:
-`sort_by_key(Reverse(..))` in the hydrator and `as_chunks` in embeddings.
+Earlier Stage 2 verification on Rust 1.98 covered the layout and app profile
+tests, workspace tests, formatting, and all-feature Clippy. For this UI
+checkpoint, full-workspace tests and all-feature Clippy passed before the
+latest small usability changes; the root task is rerunning final checks. Do
+not treat the UI's visual review or Stage 6 as complete yet.
 
 ## How to continue (prioritized)
 
-Account/contact snapshots also expose canonical identity, presence and local notes.
-The two focused people tests and app test-target Clippy check pass. Two harmless
-Rust 1.98 lint updates use reverse priority keys and fixed-size embedding chunks.
-
 ### UI work — September 26, 2026
 
-Stage 1 is complete: `UI_DESIGN.md` fixes the PDF-derived visual contract and
-native egui/eframe direction; `UI_WORKSPACE.md` defines structural layouts,
-profiles and recovery; `UI_SCREEN_MATRIX.md` audits actual code against all
-nine destinations. A01 Messages remains the visual anchor. Stage 2 is also
-complete: `litecord-layout` supplies the framework-independent tree, panel
-metadata, contextual projection, transactional dock/resize/reorder operations,
-and bounded versioned profile/edit-session types. `litecord-app` persists
-profiles through typed services with optimistic per-setting tokens, atomic
-transactions, change events, and explicit recovery for corrupt or future data.
-The native GUI and docking renderer are not implemented. Stage 3 must build
-the egui/eframe interface and verify it visually and functionally.
+Stages 1 and 2 are complete: `UI_DESIGN.md` defines the visual contract,
+`UI_WORKSPACE.md` defines layout/profile invariants, and `litecord-layout` plus
+`litecord-app` provide the validated layout model and persisted profile APIs.
+Stages 3–5 now have a working egui/eframe checkpoint:
+
+* **Stage 3 — Messages and Friends:** canonical app snapshots flow through a
+  bounded background bridge. The UI consumes app events and polls every two
+  seconds for cross-process changes. Messages use variable-height virtualization
+  and 200-message windows. Sending clears the draft only after success; edit
+  and delete use confirmation dialogs, and message context actions go through
+  app intents. Friends support canonical account/contact data, local notes, and
+  per-conversation `AgentVisibility`. Privacy Mode masks presentation broadly;
+  it is separate from agent visibility.
+* **Stage 4 — workspace renderer:** the shell and workspace panels render from
+  layout profiles. Profiles support create/rename/duplicate/delete/activate,
+  with Edit/Apply/Cancel layout editing, drag-edge docking, and splitter saves.
+  Sidebar and inspector panels are optional; the server strip supports top or
+  bottom orientation. An always-available menu remains outside the editable
+  panel tree. Ctrl/Cmd+Shift+L toggles editing and Escape cancels; the header
+  exposes Apply/Cancel. `crates/litecord-ui/examples/layout_preview.rs`
+  demonstrates a horizontal shell and server strip for visual QA.
+* **Stage 5 — destination baseline:** Home, Messages, Friends, Servers, Voice,
+  Inbox, Memory, Tasks, and Settings have initial screens with controls backed
+  by current app data and supported actions. Demo mode is explicitly labelled
+  `Demo · synthetic`.
+
+This is a functional checkpoint, not a claim of full visual fidelity to the
+mock PDF. `LitecordApp::rooms_view()` supplies known lobby metadata and an
+optional matching conversation ID; it is not a native channel service. Room
+Messages opens that conversation in the separate Messages destination, while
+Files needs backend history. Native channel messages, generative Omni replies
+and transcription, device discovery, downloaded rich remote media, task
+priorities/subtasks/comments, and a verified real Social SDK integration are
+not implemented. Existing channel metadata can open in Discord.
+
+**Stage 6 is ongoing:** headless GUI behavior, screenshot/render review, and
+dependency checks remain to be completed. The screenshot path is an optional,
+hidden QA feature (`--features screenshots -- gui --screenshot PATH --screen
+Friends --width 760`); graceful close and joined runtime shutdown have been
+observed. The normal launch command is `cargo run -p litecord-desktop
+--features gui -- gui`; headless `demo`, `mcp`, and `status` commands remain.
 
 Local build preparation uses workspace-local Rust/LLVM-MinGW because this
 host initially had no Rust compiler. No system PATH changes are required.
 
-
-1. **UI Stage 3** — follow `docs/UI_INTEGRATION.md`. Complete the existing
-   `crates/litecord-ui` scaffold in the chosen native egui/eframe direction.
-   Bind to `litecord-app` for services and persistence; use `litecord-layout`
-   for tree, profile, and panel-registry types, plus `litecord-types` /
-   `litecord-features` where view models expose those domain and render types.
-   The native GUI is still unimplemented.
+1. **Finish UI Stage 6** — complete the headless GUI/screenshot review and
+   dependency checks; record visual or behavior gaps without overstating
+   coverage.
 2. **Real Social SDK backend** — vendor the SDK (`crates/discord-ffi/README.md`),
    verify/compile `native/discord_bridge.cpp`, implement
    `discord-adapter/src/social_sdk.rs` (OAuth2 PKCE, token storage via an OS

@@ -105,6 +105,29 @@ pub fn get(conn: &Connection, id: LobbyId) -> StoreResult<Option<Lobby>> {
     }))
 }
 
+/// List known lobbies in stable ID order. The requested page size is bounded
+/// to keep a corrupted or overly broad caller from loading an unbounded set.
+pub fn list(conn: &Connection, limit: u32) -> StoreResult<Vec<Lobby>> {
+    let limit = limit.clamp(1, 256);
+    let ids = {
+        let mut stmt = conn.prepare("SELECT id FROM lobbies ORDER BY id LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit], |row| Ok(LobbyId::from_sql(row.get(0)?)))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        ids
+    };
+
+    let mut lobbies = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(lobby) = get(conn, id)? {
+            lobbies.push(lobby);
+        }
+    }
+    Ok(lobbies)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +151,26 @@ mod tests {
             .unwrap();
         let got = db.read(|r| get(r, LobbyId(1))).unwrap().unwrap();
         assert_eq!(got.member_ids, vec![UserId(2), UserId(3)]);
+    }
+
+    #[test]
+    fn list_is_sorted_and_respects_a_bounded_limit() {
+        let db = Database::open_in_memory().unwrap();
+        for id in [LobbyId(9), LobbyId(2), LobbyId(5)] {
+            let lobby = Lobby {
+                id,
+                member_ids: vec![],
+                linked_channel_id: None,
+            };
+            db.write(|tx| upsert(tx, &lobby, Origin::Synthetic, Timestamp::from_millis(1)))
+                .unwrap();
+        }
+
+        let first_two = db.read(|conn| list(conn, 2)).unwrap();
+        assert_eq!(
+            first_two.iter().map(|lobby| lobby.id).collect::<Vec<_>>(),
+            vec![LobbyId(2), LobbyId(5)]
+        );
+        assert_eq!(db.read(|conn| list(conn, 0)).unwrap().len(), 1);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "litecord-desktop"
-description = "The `litecord` binary: headless shell today (demo, MCP server, status); the future GUI plugs in here."
+description = "Litecord native workspace, demo, MCP server and database status"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,7 @@ name = "litecord"
 path = "src/main.rs"
 
 [dependencies]
+litecord-ui = { workspace = true, optional = true }
 litecord-core.workspace = true
 litecord-store.workspace = true
 litecord-app.workspace = true
@@ -25,3 +26,8 @@ tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = []
+gui = ["dep:litecord-ui"]
+screenshots = ["gui", "litecord-ui/screenshots"]

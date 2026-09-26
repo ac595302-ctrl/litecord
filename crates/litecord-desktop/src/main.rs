@@ -54,6 +54,19 @@ enum BackendArg {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Open the native workspace (demo backend by default).
+    #[cfg(feature = "gui")]
+    Gui {
+        #[cfg(feature = "screenshots")]
+        #[arg(long, hide = true)]
+        screenshot: Option<PathBuf>,
+        #[cfg(feature = "screenshots")]
+        #[arg(long, hide = true, default_value = "Messages")]
+        screen: String,
+        #[cfg(feature = "screenshots")]
+        #[arg(long, hide = true, default_value_t = 1586.0)]
+        width: f32,
+    },
     /// Run the demo backend end to end and print summaries.
     Demo {
         /// Use a throwaway in-memory database.
@@ -115,6 +128,25 @@ async fn main() -> std::process::ExitCode {
     };
     init_tracing(&cfg.logging.filter);
     let result = match cli.command {
+        #[cfg(feature = "gui")]
+        Command::Gui {
+            #[cfg(feature = "screenshots")]
+            screenshot,
+            #[cfg(feature = "screenshots")]
+            screen,
+            #[cfg(feature = "screenshots")]
+            width,
+        } => {
+            #[cfg(not(feature = "screenshots"))]
+            let options = litecord_ui::WindowOptions::default();
+            #[cfg(feature = "screenshots")]
+            let options = litecord_ui::WindowOptions {
+                screenshot,
+                destination: litecord_layout_destination(&screen),
+                size: Some([width, 992.0]),
+            };
+            gui(cfg, options).await
+        }
         Command::Demo { in_memory, ask } => demo(cfg, in_memory, &ask).await,
         Command::Mcp => mcp(cfg).await,
         Command::Status => status(&cfg),
@@ -126,6 +158,26 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(feature = "gui")]
+async fn gui(
+    cfg: LitecordConfig,
+    options: litecord_ui::WindowOptions,
+) -> litecord_core::Result<()> {
+    let app = LitecordApp::builder(cfg).start().await?;
+    let result =
+        litecord_ui::run_with_options(app.clone(), tokio::runtime::Handle::current(), options);
+    let report = app.shutdown().await;
+    tracing::info!(?report, "GUI shutdown complete");
+    result.map_err(|e| litecord_core::Error::internal(format!("native window: {e}")))
+}
+
+#[cfg(feature = "screenshots")]
+fn litecord_layout_destination(name: &str) -> Option<litecord_ui::Destination> {
+    litecord_ui::Destination::ALL
+        .into_iter()
+        .find(|d| d.label().eq_ignore_ascii_case(name))
 }
 
 async fn demo(cfg: LitecordConfig, in_memory: bool, ask: &str) -> litecord_core::Result<()> {

@@ -10,21 +10,22 @@ repository = "https://github.com/Halo4God/Litecord"
 
 [workspace.dependencies]
 # Internal crates
-litecord-types = { path = "crates/litecord-types" }
-litecord-core = { path = "crates/litecord-core" }
-litecord-store = { path = "crates/litecord-store" }
-litecord-memory = { path = "crates/litecord-memory" }
-litecord-hydrator = { path = "crates/litecord-hydrator" }
-litecord-retrieval = { path = "crates/litecord-retrieval" }
-litecord-context = { path = "crates/litecord-context" }
-litecord-actions = { path = "crates/litecord-actions" }
-litecord-agent = { path = "crates/litecord-agent" }
-litecord-mcp = { path = "crates/litecord-mcp" }
-litecord-features = { path = "crates/litecord-features" }
-litecord-app = { path = "crates/litecord-app" }
-litecord-layout = { path = "crates/litecord-layout" }
-discord-ffi = { path = "crates/discord-ffi" }
-discord-adapter = { path = "crates/discord-adapter" }
+litecord-types = { version = "0.1.0", path = "crates/litecord-types" }
+litecord-core = { version = "0.1.0", path = "crates/litecord-core" }
+litecord-store = { version = "0.1.0", path = "crates/litecord-store" }
+litecord-memory = { version = "0.1.0", path = "crates/litecord-memory" }
+litecord-hydrator = { version = "0.1.0", path = "crates/litecord-hydrator" }
+litecord-retrieval = { version = "0.1.0", path = "crates/litecord-retrieval" }
+litecord-context = { version = "0.1.0", path = "crates/litecord-context" }
+litecord-actions = { version = "0.1.0", path = "crates/litecord-actions" }
+litecord-agent = { version = "0.1.0", path = "crates/litecord-agent" }
+litecord-mcp = { version = "0.1.0", path = "crates/litecord-mcp" }
+litecord-features = { version = "0.1.0", path = "crates/litecord-features" }
+litecord-app = { version = "0.1.0", path = "crates/litecord-app" }
+litecord-layout = { version = "0.1.0", path = "crates/litecord-layout" }
+litecord-ui = { version = "0.1.0", path = "crates/litecord-ui" }
+discord-ffi = { version = "0.1.0", path = "crates/discord-ffi" }
+discord-adapter = { version = "0.1.0", path = "crates/discord-adapter" }
 
 # External crates (keep this list intentional)
 async-trait = "0.1.89"

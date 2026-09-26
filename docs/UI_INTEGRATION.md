@@ -1,45 +1,50 @@
-# Building the UI on top of Litecord
+# Native UI integration checkpoint
 
-This guide is the handoff for implementing the native interface (the mock
-design PDF is the visual reference). The GUI renderer and screens are not yet
-implemented. The app exposes view models and services, and the workspace
-layout/profile model is now implemented separately. The Social SDK adapter is
-still a skeleton, so app methods do not imply live Discord transport; see
-`UI_SCREEN_MATRIX.md` for those limits.
+This guide records the current egui/eframe UI implementation and its app
+integration. Stages 1–2 established the visual contract, layout model, and
+profile persistence. Stages 3–5 now provide canonical Messages and Friends, a
+profile-backed shell/workspace renderer, and baseline screens for all nine
+primary destinations. Stage 6 headless GUI checks, screenshot/render review,
+and dependency checks remain ongoing; this checkpoint does not claim full
+visual fidelity to the reference PDF.
+
+The UI talks to `LitecordApp` through view models and a bounded asynchronous
+bridge. The real Social SDK backend is still a skeleton, so the demo backend
+provides the available end-to-end behavior and is labelled `Demo · synthetic`.
+`UI_SCREEN_MATRIX.md` remains useful for app view-model shapes and backend
+capability limits; this file records current UI behavior.
 
 ## 1. Where the UI lives
 
-Follow `UI_DESIGN.md` for the supplied mock PDF's visual language,
-`UI_WORKSPACE.md` for layout/profile invariants, and `UI_SCREEN_MATRIX.md` for
-the source-verified screen APIs and gaps. Stage 1 selected native egui/eframe.
-Stage 2 implemented the layout model and persistence services; Stage 3 still
-needs to build and verify the actual native screens and docking renderer.
-Framework persistence is not the profile store. User layouts belong behind
-typed `LitecordApp` services.
+Follow `UI_DESIGN.md` for the supplied mock PDF's visual language and
+`UI_WORKSPACE.md` for layout/profile invariants. The framework-independent
+layout model and typed persistence services are implemented. User layouts
+belong behind typed `LitecordApp` services, not egui persistence.
 
 ```text
 crates/
-  litecord-layout/     ← implemented tree, panel registry, profiles, edit session
+  litecord-layout/     ← tree, panel registry, profiles, edit session
   litecord-app/        ← view models, typed services, and profile persistence
-  litecord-ui/         ← native egui/eframe renderer and screens (Stage 3 work)
-  litecord-desktop/    ← headless binary today; wire the UI into its lifecycle
+  litecord-ui/         ← native egui/eframe shell, bridge, renderer, and screens
+  litecord-desktop/    ← GUI feature plus headless demo/MCP/status commands
 ```
 
-The UI should depend on `litecord-app` for application services and profile
+The UI depends on `litecord-app` for application services and profile
 persistence, and on `litecord-layout` for `LayoutNode`, `LayoutProfile`,
 `LayoutProfiles`, `Placement`, and panel-registry metadata. Add direct
 dependencies on `litecord-types` or `litecord-features` when the renderer uses
 their IDs/enums or message-render/action types exposed by app view models. The
 `litecord-app` crate owns SQLite access and validation; `litecord-layout` has
-no UI-framework or storage dependency. The `litecord-ui` crate has theme,
-icon, and event-bridge scaffolding, but its workspace and screen widgets are
-not implemented. It is not a working GUI: panel widget factories, docking
-interactions and visual verification remain Stage 3 work.
+no UI-framework or storage dependency. The `litecord-ui` crate contains theme
+and icon tokens, the background bridge, workspace/profile rendering, and the
+current screen implementations. Stage 6 behavior and visual verification
+remain in progress, along with the unsupported capabilities listed below.
 
 The panel registry is metadata, not a widget registry. `PanelDescriptor`
 exposes panel ID, label, minimum width/height, compatible destinations, and
-supported orientations. The renderer must map panel IDs to widget factories
-and enforce those minimum sizes in the available viewport.
+supported orientations. The renderer maps registered panel IDs to workspace
+content. Viewport minimum-size and narrow-window behavior remain part of the
+visual review.
 
 Rules that keep the architecture intact:
 
@@ -69,6 +74,12 @@ reactor, hydrator, reconciler, reminder ticker, maintenance, action watcher),
 connects the backend and kicks off initial hydration. It returns immediately;
 data streams in.
 
+Launch the native UI with `cargo run -p litecord-desktop --features gui -- gui`.
+Headless `demo`, `mcp`, and `status` commands remain available. Optional hidden
+GUI screenshot QA uses `cargo run -p litecord-desktop --features screenshots
+-- gui --screenshot PATH --screen Friends --width 760`; screenshot capture,
+graceful close, and joined runtime shutdown have been observed.
+
 ## 3. Reactivity: when to re-render
 
 `app.subscribe()` yields `litecord_core::events::ApplicationEvent`:
@@ -81,6 +92,11 @@ data streams in.
 | `ReminderDue { reminder_id }` | Show a notification (OS notification integration is a UI task). |
 | `ResyncRequired` / `RecvError::Lagged` | Drop incremental assumptions; re-fetch every visible view. |
 
+The UI runs app access through a bounded background bridge. It refreshes from
+app events and also checks for a new snapshot every two seconds to detect
+cross-process changes. The egui thread renders snapshots; commands are sent
+to the bridge rather than calling backend methods from widgets.
+
 Typed layout-profile writes publish `StateChanged` with a
 `SettingChanged { key: "workspace.layout_profiles" }` after the SQLite
 transaction commits. Refresh `layout_profiles_view()` for that key. A no-op
@@ -90,22 +106,18 @@ profile updates.
 
 ## 4. Screens → methods
 
-| Screen (PDF) | Read | Actions |
+| Screen | Read | Current controls and limits |
 |---|---|---|
-| Home | No `home_view()` exists; compose Home from the existing view services or treat it as UI-owned navigation/summary. The layout model does define `Destination::Home`. | The app intent model has no `NavTarget::Home`; screen navigation and Home content are UI work. |
-| Friends | `friends_view()` → online/offline/pending/blocked `FriendRow`s (status, activity, alias, favorite, `dm_conversation_id`) | `set_user_note`, relationship changes are Discord writes → propose via `apply_intents(vec![AppIntent::ProposeAction{..}])` or add a service |
-| DM list / sidebar | `conversations_view(limit)` → `ConversationRow` (title, preview, `awaiting_reply`, recipient presence, agent visibility) | `set_conversation_visibility(id, Some(AgentVisibility::…))` for per-conversation agent access |
-| Chat | `conversation_view(id, limit, before)` → oldest-first window, `has_more`, per-message `render` (already transformed by features: compact, highlight, privacy blur) and `actions` (context menu), `capabilities` (can_send/edit/delete, history, open-in-Discord URL), open drafts | `send_message`, `edit_message`, `delete_message`; message menu items return `AppIntent`s → `apply_intents` → `UiEffect`s |
-| Agent Inbox (V2 flagship) | `agent_inbox_view()` → `needs_attention` (pending replies, due reminders, task candidates, commitments) + `pending_actions` with **full content** of what would be sent | `approve_action(id, edited)` (the user's Send/Approve button; pass an edited `AgentAction` for "Edit"), `reject_action(id)` |
-| Tasks & reminders | `tasks_view()` | `confirm_task`, `dismiss_task`, `complete_task` |
-| Memory inspector | `memory_view(entity, include_history)` → items with origin/status/confidence/supersession, graph edges, status counts | `confirm_memory`, `reject_memory` |
-| Servers | `guilds_view()` → guilds + channels with `access` (native/linked/discord_only) and `open_in_discord_url` | open URL (UI) |
-| Voice | `voice_view()` (state, participant names, supported flags) | `voice(VoiceControl::SetMuted(..))` etc. |
-| Settings | `settings_view()` → registered feature settings and feature metadata. Workspace profiles use a separate view model; they are not part of this schema. | `set_setting(key, json)` for feature settings; `features.<id>.enabled` toggles features. `set_setting` rejects the reserved workspace layout key. |
-| Workspace layout/profile editor | `layout_profiles_view()` → `LayoutProfilesViewModel { as_of_revision, profiles, storage_token, recovery_notice }` | `create_layout_profile`, `rename_layout_profile`, `duplicate_layout_profile`, `delete_layout_profile`, `activate_layout_profile`, `save_layout_profile`, `reset_layout_profile`, `reset_all_layout_profiles`; pass the current `storage_token` as `expected_token` on every write. |
-| Command palette (Ctrl/Cmd+K) | `command_palette(query, active_conversation)` → ranked `CommandMatch` with shortcut + availability reason | `run_command(id, active)` → `Vec<UiEffect>` |
-| Diagnostics overlay | `diagnostics_view()` → revision, session, backend mode, capabilities, hydration queue, counts, `MetricsSnapshot` (RSS, queue depths, db/context timings — real measurements only) | — |
-| Model context debugger | `app.agent_gateway().call_tool("compile_context", json!({"instruction": …}), &Caller::new("ui"))` → `ContextPack` incl. `stats.included/excluded` | — |
+| Home | Account identity plus conversation, friend, task, inbox, and diagnostics snapshots | Actual-count metric cards, selected activity previews, and restrained Omni status; generative replies are unavailable. |
+| Messages | `conversations_view(limit)` and `conversation_view(id, 200, before)` | Canonical message list with variable-height virtualization and paged windows; send clears the draft only after successful execution. Edit/delete use confirmation dialogs; context actions run through app intents. |
+| Friends | `friends_view()` plus canonical account/contact snapshots | Presence, contact details, and local notes use app data. Per-conversation agent access is controlled by `set_conversation_visibility`; it is separate from presentation Privacy Mode. |
+| Servers | `guilds_view()` → guild/channel metadata, access labels, and Discord URLs | Select guilds/channels and open the selected channel in Discord. There is no native channel message service. |
+| Voice | `rooms_view()` for lobby metadata and an optional matching recent conversation; `voice_view()` for session state, participants, and support flags | Supported voice controls are sent through the app. Room Messages opens the linked conversation in the separate Messages destination. Files requires backend history; device discovery and room transcription are unavailable. |
+| Inbox | `agent_inbox_view()` → `needs_attention` rows and pending actions with full payloads | Pending replies navigate to Messages; candidates/reminders to Tasks; commitments to Memory. Pending actions show the exact content and offer approve/reject. Approval is disabled when privacy masks the payload. |
+| Tasks | `tasks_view()` | Confirm, dismiss, and complete supported tasks. Task priorities, subtasks, and comments are not implemented. |
+| Memory | `memory_view(entity, include_history)` → provenance/status/confidence, supersession, graph edges, and counts | Confirm or reject supported memory items; commitments from Inbox open Memory. |
+| Settings and profiles | `settings_view()` plus `layout_profiles_view()` | Feature settings and profile create/rename/duplicate/delete/activate/reset. Layout edit uses Edit/Apply/Cancel and typed profile saves. |
+| Palette and diagnostics | `command_palette(query, active_conversation)`, `diagnostics_view()` | Run available commands and inspect revision, session, backend mode, capabilities, queues, counts, and measured metrics. |
 
 `UiEffect` is what the backend cannot do for you: `Navigate`, `CopyToClipboard`,
 `OpenUrl` (always user-initiated), `Notice`.
@@ -128,8 +140,11 @@ the label, minimum width/height, compatible destinations, and supported
 orientations. `registry::available(id, destination)` controls the
 non-destructive `LayoutNode::project(destination)` view. Projection omits
 hidden, unavailable, and unknown panels without changing the saved tree, and
-collapses groups with one remaining child. The renderer still needs to map
-panel IDs to widgets and enforce minimum sizes in its viewport.
+collapses groups with one remaining child. The current renderer maps registered
+panels to workspace content. The shell includes an always-available menu beyond
+the editable tree; optional sidebar and inspector panels can be hidden. The
+server strip supports top or bottom orientation. Narrow-window and minimum-size
+behavior remain part of visual review.
 
 The public `LayoutNode` operations are `dock(source, target, placement)`,
 `resize(split_id, weights)`, and `reorder(split_id, from, to)`. Dock moves an
@@ -142,12 +157,19 @@ most 1,000,000); reorder moves each child together with its weight. Neither
 operation touches storage. The renderer should interpret weights as relative
 proportions; the model does not normalize their sum.
 
-For Edit Layout, construct `LayoutEditSession::new(profile)` and edit its
-`draft`. `cancel()` returns the untouched original; `apply()` validates and
-returns the edited `LayoutProfile` but does not persist it. Call
-`save_layout_profile(profile, expected_token)` to save the result. The session
-does not manage widget state or enforce apply/discard when the user switches
-profiles; the UI owns those interactions.
+The native profile editor provides create, rename, duplicate, delete, activate,
+and reset controls. Edit Layout keeps changes in a draft: Apply validates and
+saves the edited profile, while Cancel discards the draft. Dragging a panel to
+an edge docks it, and splitter changes save at interaction end. In lower-level
+code, `LayoutEditSession::cancel()` returns the untouched original and
+`apply()` validates a `LayoutProfile`; the UI then persists with
+`save_layout_profile(profile, expected_token)`.
+
+Ctrl/Cmd+Shift+L toggles layout editing; Escape cancels the active draft. The
+header exposes Apply and Cancel while editing, and entering layout editing
+closes the profile manager. `crates/litecord-ui/examples/layout_preview.rs`
+demonstrates a horizontal shell with navigation/account panels and a horizontal
+server strip for visual QA.
 
 `LitecordApp` profile persistence is separate from `settings_view()` and uses
 the reserved key `workspace.layout_profiles`. Read the current
@@ -182,23 +204,26 @@ rejects `workspace.layout_profiles` so callers cannot bypass validation.
 
 ## 6. Things the UI must get right
 
-* **Label synthetic data.** Rows carry `origin`; `synthetic` means demo data
-  (V1 §26). Show a "Demo data" badge.
+* **Label synthetic data.** Demo mode is visibly labelled `Demo · synthetic`;
+  preserve row provenance in memory surfaces.
 * **Capability-driven UI.** Disable/hide actions using `capabilities`
   (`ConversationViewModel.capabilities`, `DiagnosticsViewModel.capabilities`).
   Unsupported content shows "Open in Discord" with the provided URL, never a
   fake.
 * **Approval UX.** Show exactly `PendingActionRow.content` and target before
-  the user approves. Editing produces a new payload hash; the old approval is
-  invalid automatically.
+  the user approves. Do not approve automatically. Keep approval disabled when
+  Privacy Mode masks the exact payload. Editing produces a new payload hash;
+  the old approval is invalid automatically.
 * **Provenance in memory UI.** Show `origin` and `status` (candidate vs
   confirmed vs superseded) — derived memories are not facts.
-* **Virtualize** long conversations (V1 §21); page with `before`.
+* **Virtualize** long conversations with variable-height rows; page 200-message
+  windows with `before`.
 * **Keyboard first.** Shortcuts come from `CommandMatch.shortcut`
   (`Keybind` strings like `Ctrl+Shift+M`).
-* **Threading.** `LitecordApp` is `Clone + Send + Sync`. Read methods are
-  synchronous and fast (SQLite, WAL); call them from the UI thread or a
-  worker. Async methods (sends, approvals, commands) need the Tokio runtime.
+* **Threading.** `LitecordApp` is `Clone + Send + Sync`. The native UI uses a
+  bounded bridge worker for app access, consumes app events, and polls every
+  two seconds for cross-process changes. Keep widgets on the egui thread and
+  route writes through the app bridge and Tokio runtime.
 
 ## 7. Extending
 

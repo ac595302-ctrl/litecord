@@ -8,6 +8,7 @@
 mod app;
 pub mod freshness;
 pub mod people;
+pub mod rooms;
 mod runtime;
 pub mod services;
 pub mod view;
