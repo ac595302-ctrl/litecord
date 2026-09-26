@@ -115,6 +115,55 @@ impl Feature for CoreCommands {
             .requires(Requirement::Capability(Capability::Voice))
             .requires(Requirement::Online),
         )?;
+        // Message-scoped commands: available only when the UI passes a
+        // selected message in the command scope.
+        reg.register(
+            Command::new("message.bookmark", "Bookmark selected message", |ctx| {
+                ctx.selected_message
+                    .map(|message_id| vec![AppIntent::BookmarkMessage { message_id }])
+                    .unwrap_or_default()
+            })
+            .description("Save the selected message to your local bookmarks.")
+            .category("Message")
+            .keywords(["bookmark", "save", "pin"])
+            .requires(Requirement::SelectedMessage),
+        )?;
+        reg.register(
+            Command::new("message.copy_id", "Copy selected message ID", |ctx| {
+                ctx.selected_message
+                    .map(|id| {
+                        vec![AppIntent::CopyToClipboard {
+                            text: id.to_string(),
+                        }]
+                    })
+                    .unwrap_or_default()
+            })
+            .description("Copy the selected message's ID.")
+            .category("Message")
+            .keywords(["copy", "id"])
+            .requires(Requirement::SelectedMessage),
+        )?;
+        reg.register(
+            Command::new(
+                "message.open_in_discord",
+                "Open selected message in Discord",
+                |ctx| match (ctx.active_conversation, ctx.selected_message) {
+                    (Some(c), Some(message_id)) => vec![AppIntent::OpenExternal {
+                        target: litecord_types::capability::DiscordTarget::Message {
+                            guild_id: None,
+                            channel_id: litecord_types::ids::ChannelId(c.get()),
+                            message_id,
+                        },
+                    }],
+                    _ => Vec::new(),
+                },
+            )
+            .description("Open the selected message in the Discord client.")
+            .category("Message")
+            .keywords(["discord", "external", "link"])
+            .requires(Requirement::ActiveConversation)
+            .requires(Requirement::SelectedMessage),
+        )?;
         Ok(())
     }
 
@@ -165,7 +214,7 @@ mod tests {
         let feature = CoreCommands;
         let mut reg = CommandRegistry::new();
         feature.register_commands(&mut reg).unwrap();
-        assert_eq!(reg.len(), 9);
+        assert_eq!(reg.len(), 12);
     }
 
     #[test]

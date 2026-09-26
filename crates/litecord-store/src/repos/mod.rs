@@ -12,6 +12,7 @@
 // Canonical social state
 pub mod accounts;
 pub mod app_state;
+pub mod attachments;
 pub mod channels;
 pub mod conversations;
 pub mod guilds;

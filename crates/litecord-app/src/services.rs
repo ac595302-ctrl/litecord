@@ -285,6 +285,47 @@ impl LitecordApp {
         })
     }
 
+    /// Attachments shared in a conversation ("Files" tab), newest first.
+    /// Only metadata the backend reported; content is not downloaded.
+    pub fn conversation_files_view(
+        &self,
+        id: ConversationId,
+        limit: u32,
+        before: Option<litecord_types::Timestamp>,
+    ) -> Result<FilesViewModel> {
+        let limit = limit.clamp(1, 500);
+        self.inner.db.read(|r| -> Result<FilesViewModel> {
+            let mut records = repos::attachments::for_conversation(r, id, before, limit + 1)?;
+            let has_more = records.len() > limit as usize;
+            records.truncate(limit as usize);
+            let mut files = Vec::with_capacity(records.len());
+            for a in records {
+                files.push(FileRow {
+                    author_name: name_of(r, a.author_id)?,
+                    open_in_discord_url: DiscordTarget::Message {
+                        guild_id: None,
+                        channel_id: ChannelId(id.get()),
+                        message_id: a.message_id,
+                    }
+                    .web_url(),
+                    message_id: a.message_id,
+                    author_id: a.author_id,
+                    sent_at: a.sent_at,
+                    filename: a.filename,
+                    content_type: a.content_type,
+                    size_bytes: a.size_bytes,
+                    origin: a.origin,
+                });
+            }
+            Ok(FilesViewModel {
+                as_of_revision: r.revision(),
+                conversation_id: id,
+                files,
+                has_more,
+            })
+        })
+    }
+
     pub fn agent_inbox_view(&self) -> Result<AgentInboxViewModel> {
         let now = self.inner.db.now();
         let since = now.saturating_sub(DurationMs::from_days(7));
@@ -532,10 +573,23 @@ impl LitecordApp {
     // Command palette and intents
     // ------------------------------------------------------------------
 
-    fn command_context(
-        &self,
-        active_conversation: Option<ConversationId>,
-    ) -> Result<CommandContext> {
+    fn command_context(&self, scope: CommandScope) -> Result<CommandContext> {
+        // A selected message only counts if it exists, is not deleted and
+        // belongs to the active conversation (when one is given).
+        let selected_message = match scope.selected_message {
+            Some(id) => self
+                .inner
+                .db
+                .read(|r| repos::messages::get(r, id))?
+                .filter(|m| !m.deleted)
+                .filter(|m| {
+                    scope
+                        .active_conversation
+                        .is_none_or(|c| c == m.message.conversation_id)
+                })
+                .map(|m| m.message.id),
+            None => None,
+        };
         let settings = self
             .inner
             .db
@@ -548,8 +602,8 @@ impl LitecordApp {
                 .diagnostics_view()
                 .map(|d| d.session.is_online())
                 .unwrap_or(false),
-            active_conversation,
-            selected_message: None,
+            active_conversation: scope.active_conversation,
+            selected_message,
             settings,
         })
     }
@@ -559,7 +613,23 @@ impl LitecordApp {
         query: &str,
         active: Option<ConversationId>,
     ) -> Result<CommandPaletteViewModel> {
-        let ctx = self.command_context(active)?;
+        self.command_palette_in(
+            query,
+            CommandScope {
+                active_conversation: active,
+                selected_message: None,
+            },
+        )
+    }
+
+    /// Palette search with full focus (active conversation + selected
+    /// message), enabling message-scoped commands.
+    pub fn command_palette_in(
+        &self,
+        query: &str,
+        scope: CommandScope,
+    ) -> Result<CommandPaletteViewModel> {
+        let ctx = self.command_context(scope)?;
         let commands = self
             .inner
             .commands
@@ -576,7 +646,18 @@ impl LitecordApp {
         &self,
         active: Option<ConversationId>,
     ) -> Result<Vec<litecord_features::command::CommandMatch>> {
-        let ctx = self.command_context(active)?;
+        self.command_shortcuts_in(CommandScope {
+            active_conversation: active,
+            selected_message: None,
+        })
+    }
+
+    /// Registered shortcuts evaluated against the full focus scope.
+    pub fn command_shortcuts_in(
+        &self,
+        scope: CommandScope,
+    ) -> Result<Vec<litecord_features::command::CommandMatch>> {
+        let ctx = self.command_context(scope)?;
         let commands = self
             .inner
             .commands
@@ -594,7 +675,19 @@ impl LitecordApp {
         id: &str,
         active: Option<ConversationId>,
     ) -> Result<Vec<UiEffect>> {
-        let ctx = self.command_context(active)?;
+        self.run_command_in(
+            id,
+            CommandScope {
+                active_conversation: active,
+                selected_message: None,
+            },
+        )
+        .await
+    }
+
+    /// Run a command against the full focus scope.
+    pub async fn run_command_in(&self, id: &str, scope: CommandScope) -> Result<Vec<UiEffect>> {
+        let ctx = self.command_context(scope)?;
         let intents = {
             let commands = self
                 .inner
@@ -800,6 +893,21 @@ impl LitecordApp {
     /// Local voice controls (user-initiated).
     pub async fn voice(&self, control: VoiceControl) -> Result<VoiceState> {
         Ok(self.inner.backend.voice_control(control).await?)
+    }
+
+    /// Audio devices for the voice settings pickers. Returns an empty list
+    /// (not an error) when the backend cannot enumerate devices, so the UI
+    /// can simply hide the pickers; check `voice_view().devices_supported`.
+    pub async fn audio_devices(&self) -> Result<Vec<AudioDevice>> {
+        if !self
+            .inner
+            .backend
+            .capabilities()
+            .is_usable(Capability::VoiceDevices)
+        {
+            return Ok(Vec::new());
+        }
+        Ok(self.inner.backend.audio_devices().await?)
     }
 
     /// Explicit user refresh of some state.

@@ -158,6 +158,11 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
         unsupported(Capability::Voice)
     }
 
+    /// Available audio devices (inputs and outputs).
+    async fn audio_devices(&self) -> BackendResult<Vec<AudioDevice>> {
+        unsupported(Capability::VoiceDevices)
+    }
+
     // ---- Writes. Only the Action Engine's executor may call these. ----
 
     async fn send_message(

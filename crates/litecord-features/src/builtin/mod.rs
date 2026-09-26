@@ -42,8 +42,8 @@ mod tests {
         let registry = builtin_registry().unwrap();
         let mut commands = CommandRegistry::new();
         registry.install_commands(&mut commands).unwrap();
-        // 9 from core + 1 (compact) + 1 (privacy) = 11.
-        assert_eq!(commands.len(), 11);
+        // 12 from core + 1 (compact) + 1 (privacy) = 14.
+        assert_eq!(commands.len(), 14);
     }
 
     #[test]

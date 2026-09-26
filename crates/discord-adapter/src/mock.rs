@@ -208,6 +208,43 @@ impl MockBackend {
     // ---- Test/demo helpers -------------------------------------------------
 
     /// Failure injection: the next `n` *read* calls return `err`.
+    /// Synthetic audio devices (stable ids for tests and demos).
+    pub fn demo_devices() -> Vec<AudioDevice> {
+        let d = |id: &str, name: &str, kind, is_default| AudioDevice {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            is_default,
+        };
+        vec![
+            d(
+                "in-default",
+                "Default microphone",
+                AudioDeviceKind::Input,
+                true,
+            ),
+            d(
+                "in-usb",
+                "USB headset microphone",
+                AudioDeviceKind::Input,
+                false,
+            ),
+            d(
+                "out-default",
+                "Default speakers",
+                AudioDeviceKind::Output,
+                true,
+            ),
+            d("out-usb", "USB headset", AudioDeviceKind::Output, false),
+        ]
+    }
+
+    fn has_device(id: &str, kind: AudioDeviceKind) -> bool {
+        Self::demo_devices()
+            .iter()
+            .any(|d| d.id == id && d.kind == kind)
+    }
+
     pub fn fail_next(&self, n: usize, err: BackendError) {
         let mut s = self.lock();
         for _ in 0..n {
@@ -558,6 +595,12 @@ impl SocialBackend for MockBackend {
         Ok(s.voice.clone())
     }
 
+    async fn audio_devices(&self) -> BackendResult<Vec<AudioDevice>> {
+        let mut s = self.lock();
+        Self::check_read(&mut s, "audio_devices")?;
+        Ok(Self::demo_devices())
+    }
+
     async fn voice_control(&self, control: VoiceControl) -> BackendResult<VoiceState> {
         let (voice, sink) = {
             let mut s = self.lock();
@@ -574,8 +617,22 @@ impl SocialBackend for MockBackend {
                 }
                 VoiceControl::SetMuted(muted) => s.voice.muted = muted,
                 VoiceControl::SetDeafened(deafened) => s.voice.deafened = deafened,
-                VoiceControl::SetInputDevice(dev) => s.voice.input_device = Some(dev),
-                VoiceControl::SetOutputDevice(dev) => s.voice.output_device = Some(dev),
+                VoiceControl::SetInputDevice(dev) => {
+                    if !Self::has_device(&dev, AudioDeviceKind::Input) {
+                        return Err(BackendError::NotFound {
+                            what: format!("input device {dev}"),
+                        });
+                    }
+                    s.voice.input_device = Some(dev);
+                }
+                VoiceControl::SetOutputDevice(dev) => {
+                    if !Self::has_device(&dev, AudioDeviceKind::Output) {
+                        return Err(BackendError::NotFound {
+                            what: format!("output device {dev}"),
+                        });
+                    }
+                    s.voice.output_device = Some(dev);
+                }
                 VoiceControl::SetOutputVolume(v) => s.voice.output_volume = v,
                 VoiceControl::SetNoiseSuppression(v) => s.voice.noise_suppression = v,
                 VoiceControl::SetPushToTalk(v) => s.voice.push_to_talk = v,

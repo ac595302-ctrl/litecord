@@ -305,6 +305,23 @@ impl Default for VoiceState {
     }
 }
 
+str_enum! {
+    pub enum AudioDeviceKind {
+        Input => "input",
+        Output => "output",
+    }
+}
+
+/// An audio device as reported by the voice backend. `id` is the opaque
+/// value passed back in `VoiceControl::SetInputDevice/SetOutputDevice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+    pub kind: AudioDeviceKind,
+    pub is_default: bool,
+}
+
 /// Session/connection lifecycle (V1 §5). No UI feature may assume `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "state", rename_all = "snake_case")]

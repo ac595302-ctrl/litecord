@@ -255,3 +255,33 @@ pub enum UiEffect {
         message: String,
     },
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileRow {
+    pub message_id: MessageId,
+    pub author_id: UserId,
+    pub author_name: String,
+    pub sent_at: Timestamp,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: u64,
+    pub origin: Origin,
+    /// Downloads are not cached locally; open the message in Discord.
+    pub open_in_discord_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilesViewModel {
+    pub as_of_revision: Revision,
+    pub conversation_id: ConversationId,
+    pub files: Vec<FileRow>,
+    /// Pass the oldest `sent_at` as `before` to page further back.
+    pub has_more: bool,
+}
+
+/// Where a command runs: the UI's current focus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommandScope {
+    pub active_conversation: Option<ConversationId>,
+    pub selected_message: Option<MessageId>,
+}
