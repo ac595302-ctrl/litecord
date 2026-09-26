@@ -6,6 +6,12 @@ in code · **Deferred** = not started (design slot exists).
 
 An interface existing is never counted as "implemented".
 
+UI stage 1 (September 26, 2026): visual contract, framework direction, panel
+and profile contract, and source-based screen/API inventory are documented in
+`UI_DESIGN.md`, `UI_WORKSPACE.md`, and `UI_SCREEN_MATRIX.md`. This completes
+design/planning only; a GUI and docking renderer remain unimplemented at this
+checkpoint. Subsequent stages must update this statement as they land.
+
 | Component | Status | Implemented | Tested | Deferred | Notes |
 |---|---|---|---|---|---|
 | Domain types (`litecord-types`) | Done | strong ids, Timestamp, Revision/MemorySnapshot, provenance, trust, social models, capabilities, memory/task/action types | serde round-trips, parsing, invariants | — | snowflakes serialize as strings |

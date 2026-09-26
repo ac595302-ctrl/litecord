@@ -61,6 +61,21 @@ Verification at the last commit: `cargo fmt --all --check` clean;
 
 ## How to continue (prioritized)
 
+### UI work — September 26, 2026
+
+Stage 1 is complete: `UI_DESIGN.md` fixes the PDF-derived visual contract and
+native egui/eframe direction; `UI_WORKSPACE.md` defines structural layouts,
+transactional profiles and recovery; `UI_SCREEN_MATRIX.md` audits actual code
+against all nine destinations. A01 Messages remains the visual anchor.
+The GUI has not been implemented in this batch. No backend checks were needed
+for these documentation-only changes. Stage 2 starts with a pure
+`litecord-layout` crate and typed application profile services; stage 3 must
+verify the renderer visually and functionally before claiming completion.
+
+Local build preparation uses workspace-local Rust/LLVM-MinGW because this
+host initially had no Rust compiler. No system PATH changes are required.
+
+
 1. **UI** — follow `docs/UI_INTEGRATION.md`. Add `crates/litecord-ui`,
    depend on `litecord-app` only.
 2. **Real Social SDK backend** — vendor the SDK (`crates/discord-ffi/README.md`),

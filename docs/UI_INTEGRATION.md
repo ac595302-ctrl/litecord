@@ -7,6 +7,13 @@ any agent code**. You bind to one object: `litecord_app::LitecordApp`.
 
 ## 1. Where the UI lives
 
+Stage 1 design baseline: follow `UI_DESIGN.md` for the supplied mock PDF's
+visual language, `UI_WORKSPACE.md` for the independent layout/profile model,
+and `UI_SCREEN_MATRIX.md` for the verified API/feature gaps. The chosen
+direction is native egui/eframe; visual and runtime feasibility still require
+a runnable stage 3 implementation. Framework persistence is not the profile
+store. User layouts belong behind typed `LitecordApp` services.
+
 ```text
 crates/
   litecord-app/        ← the only crate your UI depends on (plus litecord-types
