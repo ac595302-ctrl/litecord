@@ -228,13 +228,25 @@ pub struct ActionProposal {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AuditEvent {
     Proposed,
+    /// Refused by policy at proposal time.
+    Denied {
+        reason: String,
+    },
     AutoApproved,
-    Approved { edited: bool },
+    Approved {
+        edited: bool,
+    },
     Rejected,
     ExecutionStarted,
-    Executed { summary: String },
-    Failed { error: String },
-    Invalidated { reason: String },
+    Executed {
+        summary: String,
+    },
+    Failed {
+        error: String,
+    },
+    Invalidated {
+        reason: String,
+    },
     Expired,
 }
 

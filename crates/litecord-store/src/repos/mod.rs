@@ -46,3 +46,7 @@ pub mod agent_runs;
 
 // Shared FTS helpers
 pub mod fts;
+
+/// Re-exported so dependent crates can name the connection type repository
+/// functions accept without depending on rusqlite directly.
+pub use rusqlite::Connection;
