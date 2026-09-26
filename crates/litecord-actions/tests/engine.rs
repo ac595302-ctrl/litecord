@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end Action Engine behavior against the mock Discord backend:
 //! propose → approve → payload-bound token → revalidate → execute → audit.
 
