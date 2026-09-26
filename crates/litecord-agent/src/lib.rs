@@ -7,6 +7,7 @@
 pub mod error;
 pub mod gateway;
 pub mod harness;
+pub mod prompts;
 pub mod spec;
 
 pub use error::ToolError;

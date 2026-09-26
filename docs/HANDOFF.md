@@ -172,6 +172,16 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Omni on Codex/OpenCode — design (September 26, 2026)
+
+Design in [`docs/AGENT_HARNESS.md`](AGENT_HARNESS.md): the user's own
+Codex/OpenCode (signed in with their own login) powers Omni as a lazily
+started sidecar; tools reach Litecord through the existing MCP server;
+Litecord owns heartbeats, approvals and memory. Step 1 is shipped:
+`litecord_agent::prompts` (`omni.md`, `heartbeat.md`,
+`mcp_instructions.md`, the last one returned from MCP `initialize`). Next is
+step 2 of its build plan (driver trait + fake driver + `OmniService`).
+
 ### Audit fixes — September 26, 2026
 
 - **Agent visibility leak (fixed):** commitment tasks and reminders carry
