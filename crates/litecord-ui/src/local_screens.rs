@@ -47,6 +47,7 @@ impl Workspace {
                         &snapshot.account,
                         &snapshot.diagnostics.session,
                         &snapshot.diagnostics.capabilities,
+                        &settings,
                     );
                     ui.add_space(12.0);
                 }
@@ -125,6 +126,7 @@ fn discord_session_connection(
     account: &litecord_app::people::AccountViewModel,
     state: &SessionState,
     capabilities: &litecord_types::capability::CapabilitySet,
+    settings: &SettingsViewModel,
 ) {
     let can_write = capabilities.is_usable(litecord_types::capability::Capability::DmSend);
     theme::section_label(ui, "Discord connection");
@@ -145,6 +147,16 @@ fn discord_session_connection(
                     .color(theme::MUTED),
             );
             ui.add_space(8.0);
+
+            if let Some(access) = settings.account_access {
+                let mut enabled = access == litecord_types::capability::SessionAccessMode::ReadWrite;
+                if ui.add_enabled(!workspace.busy && settings.can_enable_account_writes, egui::Checkbox::new(&mut enabled, "Allow account writes")).changed() {
+                    workspace.send(Command::AccountWrites(enabled));
+                }
+                if !settings.can_enable_account_writes {
+                    ui.label(egui::RichText::new("Read-only access is required by configuration.").size(12.0).color(theme::MUTED));
+                }
+            }
 
             ui.horizontal_wrapped(|ui| {
                 theme::chip(

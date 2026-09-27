@@ -188,6 +188,23 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     /// What this backend can actually do right now.
     fn capabilities(&self) -> CapabilitySet;
 
+    /// Account write preference, independent of authentication state.
+    fn session_access(&self) -> Option<litecord_types::capability::SessionAccessMode> {
+        None
+    }
+
+    /// Explicit read-only configuration is a ceiling the UI cannot override.
+    fn can_enable_session_writes(&self) -> bool {
+        false
+    }
+
+    async fn set_session_access(
+        &self,
+        _access: litecord_types::capability::SessionAccessMode,
+    ) -> BackendResult<()> {
+        unsupported(Capability::DmSend)
+    }
+
     /// Bind an account source to the database's previously connected account.
     fn bind_account(&self, _account: UserId) -> BackendResult<()> {
         Ok(())

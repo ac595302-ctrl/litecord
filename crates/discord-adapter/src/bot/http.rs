@@ -252,6 +252,11 @@ impl BotTransport for HttpTransport {
                     what: "Discord resource is not accessible to this account".into(),
                 });
             }
+            if self.user_session && status == 401 {
+                return Err(BackendError::Authentication(
+                    "Account credential was rejected. Sign in again in Settings.".into(),
+                ));
+            }
             if self.user_session && req.method != Method::Get && status >= 500 {
                 return Err(BackendError::DeliveryUncertain(
                     "Discord could not confirm the write; refresh before retrying".into(),

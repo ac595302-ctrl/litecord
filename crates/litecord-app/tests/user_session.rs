@@ -709,3 +709,98 @@ async fn account_presence_and_relationship_actions_round_trip_through_engine() {
     .unwrap();
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_write_switch_blocks_pending_approvals_and_survives_restart() {
+    use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
+    use litecord_types::capability::{Capability, SessionAccessMode};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = LitecordConfig::default();
+    cfg.data_dir = dir.path().to_owned();
+    let (_, transport, secrets) = setup();
+    let backend = Arc::new(UserSessionBackend::with_access(
+        Arc::new(transport.clone()),
+        secrets.clone(),
+        Arc::new(SystemClock),
+        SessionAccessMode::ReadWrite,
+    ));
+    let mut socket = transport.next_socket();
+    let app = LitecordApp::builder(cfg.clone())
+        .backend(backend.clone())
+        .start()
+        .await
+        .unwrap();
+    app.authenticate_session(Secret::new("dummy".into()))
+        .await
+        .unwrap();
+    ready(&mut socket).await;
+    state(&app, SessionState::Ready).await;
+    let out = app
+        .agent_gateway()
+        .call_tool(
+            "propose_message",
+            json!({"conversation_id":"2","content":"Needs approval"}),
+            &litecord_agent::Caller::new("test-agent"),
+        )
+        .await
+        .unwrap();
+    let id = litecord_types::ActionId(out["result"]["action_id"].as_i64().unwrap());
+    let before = transport.requests().len();
+    app.set_account_writes(false).await.unwrap();
+    assert!(!backend.capabilities().is_usable(Capability::DmSend));
+    assert!(
+        !app.conversation_view(ConversationId(2), 20, None)
+            .unwrap()
+            .capabilities
+            .can_send
+    );
+    assert!(app.approve_action(id, None).await.is_err());
+    assert!(backend
+        .send_message(
+            &MessageTarget::Conversation {
+                conversation_id: ConversationId(2)
+            },
+            "denied"
+        )
+        .await
+        .is_err());
+    assert!(backend
+        .set_presence(&PresenceDraft {
+            status: litecord_types::social::PresenceStatus::Online,
+            activity: None
+        })
+        .await
+        .is_err());
+    assert!(backend
+        .relationship_action(litecord_types::UserId(3), RelationshipAction::Block)
+        .await
+        .is_err());
+    assert!(transport.requests()[before..]
+        .iter()
+        .all(|r| r.method == discord_adapter::bot::rest::Method::Get));
+    app.shutdown().await;
+    drop(app);
+    let (_, second_transport, _) = setup();
+    let second = Arc::new(UserSessionBackend::with_access(
+        Arc::new(second_transport.clone()),
+        secrets,
+        Arc::new(SystemClock),
+        SessionAccessMode::ReadWrite,
+    ));
+    let mut socket = second_transport.next_socket();
+    let app = LitecordApp::builder(cfg)
+        .backend(second.clone())
+        .start()
+        .await
+        .unwrap();
+    ready(&mut socket).await;
+    state(&app, SessionState::Ready).await;
+    assert_eq!(
+        app.settings_view().unwrap().account_access,
+        Some(SessionAccessMode::ReadOnly)
+    );
+    assert!(!second.capabilities().is_usable(Capability::DmSend));
+    app.set_account_writes(true).await.unwrap();
+    assert!(second.capabilities().is_usable(Capability::DmSend));
+    app.shutdown().await;
+}

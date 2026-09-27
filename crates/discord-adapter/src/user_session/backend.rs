@@ -23,7 +23,7 @@ use litecord_types::social::*;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -44,10 +44,12 @@ struct GatewayWrite {
     payload: String,
     generation: u64,
     response: tokio::sync::oneshot::Sender<BackendResult<()>>,
+    expires: tokio::time::Instant,
 }
 
 struct Shared {
     access: SessionAccessMode,
+    writes_enabled: AtomicBool,
     gateway_writes: Mutex<Option<tokio::sync::mpsc::Sender<GatewayWrite>>>,
     last_presence_write: Mutex<Option<std::time::Instant>>,
     transport: Arc<dyn SessionTransport>,
@@ -69,6 +71,15 @@ impl std::fmt::Debug for Shared {
 }
 
 impl Shared {
+    fn access(&self) -> SessionAccessMode {
+        if self.access == SessionAccessMode::ReadWrite
+            && self.writes_enabled.load(Ordering::Acquire)
+        {
+            SessionAccessMode::ReadWrite
+        } else {
+            SessionAccessMode::ReadOnly
+        }
+    }
     fn token(&self) -> BackendResult<Secret<String>> {
         self.credential
             .lock()
@@ -78,6 +89,11 @@ impl Shared {
             .ok_or(BackendError::NotConnected)
     }
     async fn call(&self, req: RestRequest) -> BackendResult<Value> {
+        if !super::allows_request(self.access(), &req) {
+            return Err(BackendError::Unsupported {
+                capability: Capability::DmSend,
+            });
+        }
         let (generation, token) = {
             let credential = self.credential.lock().map_err(|_| BackendError::Offline)?;
             let token = credential
@@ -206,6 +222,7 @@ impl UserSessionBackend {
         Self {
             shared: Arc::new(Shared {
                 access,
+                writes_enabled: AtomicBool::new(access == SessionAccessMode::ReadWrite),
                 gateway_writes: Mutex::new(None),
                 last_presence_write: Mutex::new(None),
                 transport,
@@ -222,7 +239,7 @@ impl UserSessionBackend {
         }
     }
     fn require_write(&self, capability: Capability) -> BackendResult<()> {
-        if self.shared.access != SessionAccessMode::ReadWrite {
+        if self.shared.access() != SessionAccessMode::ReadWrite {
             return Err(BackendError::Unsupported { capability });
         }
         self.shared.token().map(|_| ())
@@ -476,7 +493,7 @@ async fn drive(
                 _=cancel.cancelled()=>{let _=tokio::time::timeout(Duration::from_secs(1),socket.close()).await;break 'connections;},
                 _=tokio::time::sleep_until(handshake_deadline), if session.state()!=crate::bot::gateway::State::Ready => session.on_close(None),
                 Some(command)=writes.recv()=>{
-                    let result=if command.generation != shared.generation.load(Ordering::Acquire) || session.state()!=crate::bot::gateway::State::Ready {
+                    let result=if command.response.is_closed() || command.expires <= tokio::time::Instant::now() || shared.access()!=SessionAccessMode::ReadWrite || command.generation != shared.generation.load(Ordering::Acquire) || session.state()!=crate::bot::gateway::State::Ready {
                         Err(BackendError::NotConnected)
                     } else {
                         tokio::time::timeout(Duration::from_secs(5),socket.send(command.payload)).await
@@ -646,7 +663,7 @@ impl SocialBackend for UserSessionBackend {
             .with(Capability::GuildListing, partial.clone())
             .with(Capability::GuildChannels, partial.clone())
             .with(Capability::GuildMessages, partial);
-        if self.shared.access == SessionAccessMode::ReadWrite && self.shared.token().is_ok() {
+        if self.shared.access() == SessionAccessMode::ReadWrite && self.shared.token().is_ok() {
             for cap in [
                 Capability::DmSend,
                 Capability::DmEdit,
@@ -666,6 +683,24 @@ impl SocialBackend for UserSessionBackend {
         }
         caps.dm_history = Some(HistoryCapability::Full);
         caps
+    }
+    fn session_access(&self) -> Option<SessionAccessMode> {
+        Some(self.shared.access())
+    }
+    fn can_enable_session_writes(&self) -> bool {
+        self.shared.access == SessionAccessMode::ReadWrite
+    }
+    async fn set_session_access(&self, access: SessionAccessMode) -> BackendResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if access == SessionAccessMode::ReadWrite && !self.can_enable_session_writes() {
+            return Err(BackendError::PermissionDenied {
+                what: "read-only access is required by configuration".into(),
+            });
+        }
+        self.shared
+            .writes_enabled
+            .store(access == SessionAccessMode::ReadWrite, Ordering::Release);
+        Ok(())
     }
     fn bind_account(&self, account: UserId) -> BackendResult<()> {
         *self
@@ -911,6 +946,7 @@ impl SocialBackend for UserSessionBackend {
                 payload,
                 generation: self.shared.generation.load(Ordering::Acquire),
                 response: tx,
+                expires: tokio::time::Instant::now() + Duration::from_secs(7),
             })
             .map_err(|_| BackendError::NotConnected)?;
         tokio::time::timeout(Duration::from_secs(7), rx)
@@ -1091,7 +1127,7 @@ impl SocialBackend for UserSessionBackend {
     async fn guild_channels(&self, guild_id: GuildId) -> BackendResult<Vec<Channel>> {
         let raw = self.shared.call(rest::guild_channels(guild_id)).await?;
         let mut channels = rest::parse_channels(&raw, guild_id).map_err(payload_error)?;
-        if self.shared.access == SessionAccessMode::ReadOnly {
+        if self.shared.access() == SessionAccessMode::ReadOnly {
             for c in &mut channels {
                 c.capabilities.0 &= !ChannelCapabilities::WRITABLE.0;
             }
@@ -1182,11 +1218,21 @@ impl SocialBackend for UserSessionBackend {
                 content,
             ))
             .await?;
-        let message = common::message(&raw).map_err(payload_error)?;
-        self.verify_own_message(&message, conversation)?;
+        let message = common::message(&raw).map_err(|_| {
+            BackendError::DeliveryUncertain(
+                "Discord returned an unexpected edit confirmation; refresh before retrying".into(),
+            )
+        })?;
+        self.verify_own_message(&message, conversation)
+            .map_err(|_| {
+                BackendError::DeliveryUncertain(
+                    "Discord returned a mismatched edit confirmation; refresh before retrying"
+                        .into(),
+                )
+            })?;
         if message.id != id {
-            return Err(BackendError::Sdk(
-                "unexpected edited message identity".into(),
+            return Err(BackendError::DeliveryUncertain(
+                "Discord returned a mismatched edit identity; refresh before retrying".into(),
             ));
         }
         self.confirm(DiscordEvent::MessageUpdated { message }).await

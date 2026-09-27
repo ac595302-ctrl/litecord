@@ -589,6 +589,8 @@ impl LitecordApp {
                 });
         }
         Ok(SettingsViewModel {
+            account_access: self.inner.backend.session_access(),
+            can_enable_account_writes: self.inner.backend.can_enable_session_writes(),
             outbound: self.inner.db.read(|r| repos::outbound::recent(r, 20))?,
             sections: sections.into_iter().collect(),
             features: features.metadata(),
@@ -1046,6 +1048,9 @@ impl LitecordApp {
     }
 
     pub fn set_setting(&self, key: &str, value: serde_json::Value) -> Result<()> {
+        if key == "account.writes_enabled" {
+            return Err(Error::validation("use the typed account access service"));
+        }
         if key == litecord_layout::SETTINGS_KEY {
             return Err(Error::validation("use the typed layout profile service"));
         }
@@ -1065,6 +1070,32 @@ impl LitecordApp {
         self.inner
             .db
             .write(|tx| repos::settings::set_json(tx, key, &value))?;
+        Ok(())
+    }
+
+    pub async fn set_account_writes(&self, enabled: bool) -> Result<()> {
+        use litecord_types::capability::SessionAccessMode;
+        self.inner
+            .backend
+            .set_session_access(if enabled {
+                SessionAccessMode::ReadWrite
+            } else {
+                SessionAccessMode::ReadOnly
+            })
+            .await?;
+        if let Err(error) = self
+            .inner
+            .db
+            .write(|tx| repos::settings::set(tx, "account.writes_enabled", &enabled))
+        {
+            // Failed preference storage must never leave writes enabled by accident.
+            let _ = self
+                .inner
+                .backend
+                .set_session_access(SessionAccessMode::ReadOnly)
+                .await;
+            return Err(error.into());
+        }
         Ok(())
     }
 

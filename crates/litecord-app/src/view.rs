@@ -210,6 +210,8 @@ pub struct SettingRow {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsViewModel {
+    pub account_access: Option<litecord_types::capability::SessionAccessMode>,
+    pub can_enable_account_writes: bool,
     pub outbound: Vec<litecord_store::repos::outbound::OutboundOperation>,
     pub sections: Vec<(String, Vec<SettingRow>)>,
     pub features: Vec<FeatureInfo>,

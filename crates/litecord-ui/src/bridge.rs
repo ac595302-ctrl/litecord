@@ -62,6 +62,7 @@ pub enum Command {
     Setting(String, serde_json::Value),
     Voice(VoiceControl),
     Presence(litecord_types::actions::PresenceDraft),
+    AccountWrites(bool),
     Relationship(UserId, litecord_types::actions::RelationshipAction),
     CompleteTask(TaskId),
     ConfirmTask(TaskId),
@@ -388,6 +389,7 @@ pub(crate) async fn execute(
         Command::Note(note) => app.set_user_note(note)?,
         Command::Visibility(id, v) => app.set_conversation_visibility(id, Some(v))?,
         Command::Setting(key, value) => app.set_setting(&key, value)?,
+        Command::AccountWrites(enabled) => app.set_account_writes(enabled).await?,
         Command::Voice(control) => {
             app.voice(control).await?;
         }

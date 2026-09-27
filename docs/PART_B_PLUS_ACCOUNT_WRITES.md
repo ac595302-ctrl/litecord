@@ -29,6 +29,10 @@ Desktop configuration defaults to read/write; direct backend constructors and th
 legacy transport constructor retain their read-only default. Capabilities report
 writes only while an authenticated credential is present. Settings and the
 message composer reflect those capabilities and use the account source identity.
+Settings also has an **Allow account writes** switch. It waits for an active
+mutation to finish, blocks future mutations and pending approvals immediately, and
+saves the choice across restarts. Explicit read-only configuration cannot be
+overridden by the switch.
 
 The HTTP transport accepts only the implemented numeric message routes, DM
 creation route and numeric relationship routes for mutations. Edit/delete receive the canonical conversation ID

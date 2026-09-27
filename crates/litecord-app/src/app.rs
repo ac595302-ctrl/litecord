@@ -138,6 +138,14 @@ impl AppBuilder {
         };
         db.write(litecord_store::repos::outbound::recover_interrupted)?;
         if backend.source() == litecord_types::provenance::DiscordSource::UserSession {
+            if db.read(|r| {
+                litecord_store::repos::settings::get::<bool>(r, "account.writes_enabled")
+            })? == Some(false)
+            {
+                backend
+                    .set_session_access(litecord_types::capability::SessionAccessMode::ReadOnly)
+                    .await?;
+            }
             if let Some(account) = db.read(|r| litecord_store::repos::accounts::current_user(r))? {
                 if account.origin == litecord_types::provenance::Origin::Synthetic {
                     return Err(Error::new(ErrorKind::Configuration,"use a separate data directory for a real account; this database contains demo data"));
