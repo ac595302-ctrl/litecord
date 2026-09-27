@@ -385,6 +385,38 @@ impl Workspace {
                     let more = kit::round_action(ui, ph::DOTS_THREE, "More", w, true);
                     egui::Popup::menu(&more).show(|ui| {
                         ui.set_min_width(200.0);
+                        use litecord_types::actions::RelationshipAction;
+                        use litecord_types::capability::Capability;
+                        use litecord_types::social::RelationshipKind;
+                        let enabled = !self.busy && !self.private() && s.diagnostics.session.is_online() && s.account.user_id != Some(c.user_id);
+                        let requests = enabled && s.diagnostics.capabilities.is_usable(Capability::FriendRequests);
+                        let blocking = enabled && s.diagnostics.capabilities.is_usable(Capability::Blocking);
+                        let mut relationship_actions = Vec::new();
+                        match c.relationship {
+                            RelationshipKind::Friend => relationship_actions.push(("Remove friend",RelationshipAction::RemoveFriend,requests,true)),
+                            RelationshipKind::PendingIncoming => {
+                                relationship_actions.push(("Accept request",RelationshipAction::AcceptFriendRequest,requests,false));
+                                relationship_actions.push(("Decline request",RelationshipAction::RejectFriendRequest,requests,true));
+                            }
+                            RelationshipKind::None | RelationshipKind::Implicit => relationship_actions.push(("Send friend request",RelationshipAction::SendFriendRequest,requests,false)),
+                            _ => {}
+                        }
+                        if c.relationship == RelationshipKind::Blocked {
+                            relationship_actions.push(("Unblock",RelationshipAction::Unblock,blocking,true));
+                        } else {
+                            relationship_actions.push(("Block",RelationshipAction::Block,blocking,true));
+                        }
+                        for (label,action,allowed,confirm) in relationship_actions {
+                            if ui.add_enabled(allowed,egui::Button::new(label)).clicked() {
+                                if confirm {
+                                    self.relationship_confirmation=Some((c.user_id,action,c.display_name.clone()));
+                                } else {
+                                    self.send(Command::Relationship(c.user_id,action));
+                                }
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
                         if ui.button("Edit private note").clicked() {
                             ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("contact_note")));
                         }

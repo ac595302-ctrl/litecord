@@ -186,6 +186,8 @@ async fn live_messages_edits_deletes_persist_with_user_source_and_logout() {
     .unwrap();
     app.sign_out().await.unwrap();
     state(&app, SessionState::LoggedOut).await;
+    assert_eq!(app.account_view().unwrap().user_id, None);
+    assert_eq!(app.account_view().unwrap().display_name, "Not signed in");
     assert!(secrets.get(SecretKey::DiscordUserSessionToken).is_none());
     assert!(backend.current_user().await.is_err());
     assert!(transport

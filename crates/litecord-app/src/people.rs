@@ -4,7 +4,7 @@ use litecord_core::Result;
 use litecord_store::repos;
 use litecord_types::ids::UserId;
 use litecord_types::provenance::Origin;
-use litecord_types::social::{Presence, PresenceStatus};
+use litecord_types::social::{Presence, PresenceStatus, RelationshipKind, SessionState};
 use litecord_types::Revision;
 use serde::Serialize;
 
@@ -30,6 +30,7 @@ pub struct ContactViewModel {
     pub username: Option<String>,
     pub avatar_url: Option<String>,
     pub presence: Presence,
+    pub relationship: RelationshipKind,
     pub alias: Option<String>,
     pub note: Option<String>,
     pub favorite: bool,
@@ -45,7 +46,18 @@ impl LitecordApp {
     /// fallback self identity is invented when the account is absent.
     pub fn account_view(&self) -> Result<AccountViewModel> {
         self.inner.db.read(|conn| -> Result<AccountViewModel> {
-            let account = repos::accounts::current_user(conn)?;
+            let signed_out = self.inner.backend.source()
+                == litecord_types::provenance::DiscordSource::UserSession
+                && repos::app_state::get(
+                    conn,
+                    litecord_store::reducer::session_state_key(
+                        litecord_types::provenance::DiscordIdentity::UserSession,
+                    ),
+                )?
+                .and_then(|s| serde_json::from_str::<SessionState>(&s).ok())
+                .unwrap_or_default()
+                    == SessionState::LoggedOut;
+            let account = repos::accounts::current_user(conn)?.filter(|_| !signed_out);
             let Some(account) = account else {
                 return Ok(AccountViewModel {
                     as_of_revision: conn.revision(),
@@ -104,6 +116,9 @@ impl LitecordApp {
                 Ok(Some(ContactViewModel {
                     as_of_revision: conn.revision(),
                     user_id,
+                    relationship: repos::relationships::get(conn, user_id)?
+                        .map(|r| r.discord)
+                        .unwrap_or(RelationshipKind::None),
                     display_name,
                     username,
                     avatar_url,

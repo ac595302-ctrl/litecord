@@ -79,6 +79,14 @@ impl Workspace {
                         .clicked()
                     {
                         self.selected_channel = Some(row.channel.id);
+                        if s.diagnostics
+                            .capabilities
+                            .is_usable(litecord_types::capability::Capability::GuildMessages)
+                        {
+                            self.open_conversation(litecord_types::ConversationId(
+                                row.channel.id.get(),
+                            ));
+                        }
                     }
                 }
             });
@@ -104,7 +112,16 @@ impl Workspace {
         ui.separator();
         ui.add_space(24.0);
         theme::chip(ui, row.channel.access.as_str(), theme::MUTED);
-        ui.label("Channel metadata is available in Litecord. This backend does not expose a native channel message service yet.");
+        if s.diagnostics
+            .capabilities
+            .is_usable(litecord_types::capability::Capability::GuildMessages)
+        {
+            if ui.button("Open conversation in Litecord").clicked() {
+                self.open_conversation(litecord_types::ConversationId(row.channel.id.get()));
+            }
+        } else {
+            ui.label("Messages are not available through this connection.");
+        }
         if ui.button("Open channel in Discord").clicked() {
             ui.ctx()
                 .open_url(egui::OpenUrl::new_tab(row.open_in_discord_url.clone()));
