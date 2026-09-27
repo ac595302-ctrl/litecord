@@ -62,6 +62,7 @@ struct Shared {
     metadata: Mutex<Metadata>,
     sink: Mutex<Option<IngestSender>>,
     generation: Arc<AtomicU64>,
+    session_cancel: Mutex<CancellationToken>,
     clock: SharedClock,
 }
 
@@ -106,6 +107,9 @@ impl Shared {
             (self.generation.load(Ordering::Acquire), token)
         };
         let value = self.transport.request(&token, &req).await.map_err(|e| {
+            if matches!(e, BackendError::Authentication(_)) {
+                self.suspend(generation, "Account authentication was rejected; connection stopped. Review the account in Discord before reconnecting.");
+            }
             if req.method != Method::Get
                 && matches!(e, BackendError::Offline | BackendError::Sdk(_))
             {
@@ -121,6 +125,29 @@ impl Shared {
             return Err(BackendError::NotConnected);
         }
         Ok(value)
+    }
+    /// Stop future reads and Gateway work for this epoch. An old response must
+    /// never invalidate a newer, explicitly established session.
+    fn suspend(&self, generation: u64, message: &str) {
+        let Ok(mut credential) = self.credential.lock() else {
+            return;
+        };
+        if self.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        *credential = None;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.writes_enabled.store(false, Ordering::Release);
+        if let Ok(cancel) = self.session_cancel.lock() {
+            cancel.cancel();
+        }
+        // Emit on the unguarded sink after advancing the epoch, so the error is
+        // visible while late events from the stopped session are discarded.
+        self.emit(DiscordEvent::SessionChanged {
+            state: SessionState::Error {
+                message: message.into(),
+            },
+        });
     }
     fn emit(&self, event: DiscordEvent) {
         if let Ok(sink) = self.sink.lock() {
@@ -277,6 +304,7 @@ impl UserSessionBackend {
                 metadata: Mutex::new(Metadata::default()),
                 sink: Mutex::new(None),
                 generation: Arc::new(AtomicU64::new(0)),
+                session_cancel: Mutex::new(CancellationToken::new()),
                 clock,
             }),
             driver: tokio::sync::Mutex::new(None),
@@ -449,13 +477,24 @@ impl UserSessionBackend {
         let generation = self.shared.generation.load(Ordering::Acquire);
         let sink = sink.with_session_guard(self.shared.generation.clone(), generation);
         let cancel = CancellationToken::new();
+        *self
+            .shared
+            .session_cancel
+            .lock()
+            .map_err(|_| BackendError::Offline)? = cancel.clone();
         let (writes, rx) = tokio::sync::mpsc::channel(8);
         *self
             .shared
             .gateway_writes
             .lock()
             .map_err(|_| BackendError::Offline)? = Some(writes);
-        let handle = tokio::spawn(drive(self.shared.clone(), sink, cancel.clone(), rx));
+        let handle = tokio::spawn(drive(
+            self.shared.clone(),
+            sink,
+            cancel.clone(),
+            rx,
+            generation,
+        ));
         *driver = Some(Driver { cancel, handle });
         Ok(())
     }
@@ -466,6 +505,7 @@ async fn drive(
     sink: IngestSender,
     cancel: CancellationToken,
     mut writes: tokio::sync::mpsc::Receiver<GatewayWrite>,
+    generation: u64,
 ) {
     let Ok(token) = shared.token() else {
         return;
@@ -504,10 +544,18 @@ async fn drive(
     });
     let mut url = "wss://gateway.discord.gg/?v=10&encoding=json".to_owned();
     let mut backoff = Duration::from_secs(1);
+    // One initial connection plus five automatic reconnects per explicitly
+    // started session. READY does not reset the budget: flapping must stop too.
+    let mut attempts = 0;
     'connections: loop {
         if cancel.is_cancelled() {
             break;
         }
+        if attempts >= 6 {
+            shared.suspend(generation, "Automatic reconnect limit reached; connection stopped. Reconnect in Settings when ready.");
+            break;
+        }
+        attempts += 1;
         let state = if session.session_id().is_some() {
             SessionState::Reconnecting
         } else {
@@ -521,6 +569,10 @@ async fn drive(
         let connection = tokio::select! {_=cancel.cancelled()=>break,r=tokio::time::timeout(Duration::from_secs(20),shared.transport.connect(&url))=>r.unwrap_or(Err(BackendError::Offline))};
         let mut socket = match connection {
             Ok(s) => s,
+            Err(BackendError::Authentication(_)) => {
+                shared.suspend(generation, "Account authentication was rejected; connection stopped. Review the account in Discord before reconnecting.");
+                break;
+            }
             Err(_) => {
                 tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(backoff)=>{}};
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -659,13 +711,7 @@ async fn drive(
                         continue 'connections;
                     }
                     Output::Fatal(message) => {
-                        let _ = sink.try_send(SourceEnvelope::new(
-                            DiscordSource::UserSession,
-                            shared.clock.now(),
-                            DiscordEvent::SessionChanged {
-                                state: SessionState::Error { message },
-                            },
-                        ));
+                        shared.suspend(generation, &message);
                         let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
                         break 'connections;
                     }

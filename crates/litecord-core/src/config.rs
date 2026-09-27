@@ -130,7 +130,7 @@ impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             kind: BackendKind::Demo,
-            access: litecord_types::capability::SessionAccessMode::ReadWrite,
+            access: litecord_types::capability::SessionAccessMode::ReadOnly,
             application_id: None,
             demo_seed: 42,
             demo_bot: false,
@@ -497,6 +497,21 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         LitecordConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn account_writes_require_explicit_configuration() {
+        use litecord_types::capability::SessionAccessMode;
+        let cfg = ConfigLoader::new()
+            .env([("LITECORD_BACKEND".to_owned(), "user-session".to_owned())])
+            .load()
+            .unwrap();
+        assert_eq!(cfg.backend.access, SessionAccessMode::ReadOnly);
+        let omitted: BackendConfig = serde_json::from_str(r#"{"kind":"user_session"}"#).unwrap();
+        assert_eq!(omitted.access, SessionAccessMode::ReadOnly);
+        let explicit: BackendConfig =
+            serde_json::from_str(r#"{"kind":"user_session","access":"read_write"}"#).unwrap();
+        assert_eq!(explicit.access, SessionAccessMode::ReadWrite);
     }
 
     #[test]

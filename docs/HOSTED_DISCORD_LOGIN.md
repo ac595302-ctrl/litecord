@@ -72,6 +72,30 @@ handoff is platform-approved or live-verified.
 
 ## Known issues from owner testing
 
+### Local account activity safeguards
+
+Omitting `backend.access` now selects `read_only`, including account startup
+without a configuration file. Existing explicit `read_write` configurations
+still opt into writes; updating source does not change old packaged configs.
+
+A rejected REST credential or fatal Gateway response now invalidates the active
+in-memory session, disables writes, and stops Gateway/background refresh work.
+Subsequent reads fail locally until the owner reconnects. Already dispatched
+requests cannot be recalled; their late results are excluded by the session
+generation guard. Resource-specific permission errors do not log out the account.
+
+Each started session permits one initial Gateway connection and at most five
+automatic reconnects. Reaching READY does not reset this budget, so a connection
+that repeatedly opens and drops also stops. When exhausted, the owner must
+reconnect explicitly. This is a conservative retry limit, not an anti-abuse
+threshold or a guarantee against enforcement. Saved OS credentials are not
+deleted by this stop; restarting the app still attempts saved-credential validation.
+
+These safeguards reduce accidental activity and endless retries. They do not
+make unofficial account access approved or establish a lower probability of bans.
+
+### Reported incidents
+
 The owner reported reaching server browsing and manually sending messages, then
 receiving a Discord account-disable notice for spam/platform abuse. The exact
 enforcement trigger is unknown. Manual authentication and CAPTCHA completion do

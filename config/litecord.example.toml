@@ -13,6 +13,7 @@ read_pool_size = 2
 
 [backend]
 kind = "demo"                # "demo" (synthetic data) | "social_sdk" (needs feature + SDK)
+access = "read_only"         # real account writes require explicit read_write
 # application_id = 0         # Discord application id (public)
 demo_seed = 42
 demo_bot = false            # also run a synthetic application-bot source
