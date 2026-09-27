@@ -692,12 +692,14 @@ fn with_account(
         "account.{:016x}",
         hash.finish()
     )));
-    let transport = discord_adapter::user_session::HttpTransport::user_session()?;
+    let transport =
+        discord_adapter::user_session::HttpTransport::user_session_with_access(cfg.backend.access)?;
     Ok(builder.backend(Arc::new(
-        discord_adapter::user_session::UserSessionBackend::new(
+        discord_adapter::user_session::UserSessionBackend::with_access(
             Arc::new(transport),
             secrets,
             Arc::new(litecord_core::clock::SystemClock),
+            cfg.backend.access,
         ),
     )))
 }

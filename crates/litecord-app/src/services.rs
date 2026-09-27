@@ -214,17 +214,12 @@ impl LitecordApp {
             }
             _ => {
                 let caps = self.inner.backend.capabilities();
-                let can = self.inner.backend.mode()
-                    != litecord_types::capability::BackendMode::UserSession
-                    && if is_guild_channel {
-                        caps.is_usable(Capability::GuildMessages)
-                    } else {
-                        caps.is_usable(Capability::DmSend)
-                    };
+                let can = caps.is_usable(Capability::DmSend)
+                    && (!is_guild_channel || caps.is_usable(Capability::GuildMessages));
                 (
                     &self.inner.hydrator,
                     caps,
-                    can.then_some(DiscordIdentity::UserSocialSdk),
+                    can.then_some(self.inner.backend.source().identity()),
                 )
             }
         };
@@ -321,12 +316,18 @@ impl LitecordApp {
                 has_more,
                 capabilities: ConversationCapabilities {
                     can_send: send_identity.is_some(),
-                    can_edit: if is_guild_channel {
+                    can_edit: if is_guild_channel
+                        && self.inner.backend.mode()
+                            != litecord_types::capability::BackendMode::UserSession
+                    {
                         caps.is_usable(Capability::GuildMessages)
                     } else {
                         caps.is_usable(Capability::DmEdit)
                     },
-                    can_delete: if is_guild_channel {
+                    can_delete: if is_guild_channel
+                        && self.inner.backend.mode()
+                            != litecord_types::capability::BackendMode::UserSession
+                    {
                         caps.is_usable(Capability::GuildMessages)
                     } else {
                         caps.is_usable(Capability::DmDelete)
@@ -858,7 +859,13 @@ impl LitecordApp {
         let rev = self.revision()?;
         self.inner
             .actions
-            .propose(action, Actor::User, rev, None)
+            .propose_as(
+                action,
+                Actor::User,
+                self.inner.backend.source().identity(),
+                rev,
+                None,
+            )
             .await
             .map_err(action_err)
     }

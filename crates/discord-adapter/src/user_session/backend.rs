@@ -12,12 +12,15 @@ use litecord_core::ports::{
     BackendError, BackendResult, HistoryPage, HistoryPageRequest, SocialBackend,
 };
 use litecord_core::secrets::{Secret, SecretKey, SecretStore};
+use litecord_types::actions::MessageTarget;
 use litecord_types::capability::{
-    AuthStep, BackendMode, Capability, CapabilitySet, HistoryCapability, SupportLevel,
+    AuthStep, BackendMode, Capability, CapabilitySet, HistoryCapability, SessionAccessMode,
+    SupportLevel,
 };
 use litecord_types::ids::*;
 use litecord_types::provenance::DiscordSource;
 use litecord_types::social::*;
+use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +39,7 @@ struct Metadata {
 }
 
 struct Shared {
+    access: SessionAccessMode,
     transport: Arc<dyn SessionTransport>,
     secrets: Arc<dyn SecretStore>,
     credential: Mutex<Option<Secret<String>>>,
@@ -149,7 +153,7 @@ struct Driver {
     handle: JoinHandle<()>,
 }
 
-/// Account-owner supplied experimental session, with no REST writes.
+/// Account-owner supplied experimental connection with typed access gates.
 #[derive(Debug)]
 pub struct UserSessionBackend {
     shared: Arc<Shared>,
@@ -167,8 +171,17 @@ impl UserSessionBackend {
         secrets: Arc<dyn SecretStore>,
         clock: SharedClock,
     ) -> Self {
+        Self::with_access(transport, secrets, clock, SessionAccessMode::ReadOnly)
+    }
+    pub fn with_access(
+        transport: Arc<dyn SessionTransport>,
+        secrets: Arc<dyn SecretStore>,
+        clock: SharedClock,
+        access: SessionAccessMode,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                access,
                 transport,
                 secrets,
                 credential: Mutex::new(None),
@@ -181,6 +194,121 @@ impl UserSessionBackend {
             driver: tokio::sync::Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
         }
+    }
+    fn require_write(&self, capability: Capability) -> BackendResult<()> {
+        if self.shared.access != SessionAccessMode::ReadWrite {
+            return Err(BackendError::Unsupported { capability });
+        }
+        self.shared.token().map(|_| ())
+    }
+    async fn confirm(&self, event: DiscordEvent) -> BackendResult<()> {
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        let sink = self
+            .shared
+            .sink
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            .clone()
+            .ok_or(BackendError::NotConnected)?;
+        let sink = sink.with_session_guard(self.shared.generation.clone(), generation);
+        tokio::time::timeout(Duration::from_secs(5), sink.send_committed(SourceEnvelope::new(DiscordSource::UserSession, self.shared.clock.now(), event)))
+            .await.map_err(|_| BackendError::Sdk("Discord accepted the write, but local confirmation timed out; refresh before retrying".into()))?
+            .map_err(|_| BackendError::Sdk("Discord accepted the write, but local confirmation failed; refresh before retrying".into()))?;
+        Ok(())
+    }
+    async fn target_channel(&self, target: &MessageTarget) -> BackendResult<ConversationId> {
+        match target {
+            MessageTarget::Conversation { conversation_id } => Ok(*conversation_id),
+            MessageTarget::User { user_id } => {
+                let raw = self
+                    .shared
+                    .call(RestRequest {
+                        method: Method::Post,
+                        path: "/users/@me/channels".into(),
+                        route: "POST /users/@me/channels",
+                        body: Some(json!({"recipient_id": user_id.to_string()})),
+                    })
+                    .await?;
+                let conversation = translate::conversation(&raw).map_err(payload_error)?;
+                if conversation.recipient_id != Some(*user_id) {
+                    return Err(BackendError::Sdk("unexpected DM recipient".into()));
+                }
+                let id = conversation.id;
+                self.shared.remember(&DiscordEvent::ConversationUpserted {
+                    conversation: conversation.clone(),
+                });
+                self.confirm(DiscordEvent::ConversationUpserted { conversation })
+                    .await?;
+                Ok(id)
+            }
+        }
+    }
+    async fn send(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply: Option<MessageId>,
+    ) -> BackendResult<Message> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.require_write(if reply.is_some() {
+            Capability::Replies
+        } else {
+            Capability::DmSend
+        })?;
+        let channel = self.target_channel(target).await?;
+        let mut req = match reply {
+            Some(id) => rest::create_reply(ChannelId(channel.get()), content, id),
+            None => rest::create_message(ChannelId(channel.get()), content),
+        };
+        // A single transmission: never automatically retry an ambiguous send.
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).map_err(|_| BackendError::Offline)?;
+        if let Some(body) = req.body.as_mut() {
+            body["nonce"] = json!(u64::from_le_bytes(bytes).to_string());
+            body["enforce_nonce"] = json!(true);
+        }
+        let raw = self.shared.call(req).await?;
+        let message = common::message(&raw).map_err(payload_error)?;
+        self.verify_own_message(&message, channel)?;
+        self.confirm(DiscordEvent::MessageCreated {
+            message: message.clone(),
+        })
+        .await?;
+        Ok(message)
+    }
+    fn verify_own_message(
+        &self,
+        message: &Message,
+        conversation: ConversationId,
+    ) -> BackendResult<()> {
+        let account = *self
+            .shared
+            .pinned_account
+            .lock()
+            .map_err(|_| BackendError::Offline)?;
+        if account != Some(message.author_id) || conversation != message.conversation_id {
+            return Err(BackendError::PermissionDenied {
+                what: "only this account's messages in the selected channel may be changed".into(),
+            });
+        }
+        Ok(())
+    }
+    async fn own_message(&self, conversation: ConversationId, id: MessageId) -> BackendResult<()> {
+        let raw = self
+            .shared
+            .call(RestRequest {
+                method: Method::Get,
+                path: format!("/channels/{conversation}/messages/{id}"),
+                route: "GET /channels/{channel.id}/messages/{message.id}",
+                body: None,
+            })
+            .await?;
+        let message = common::message(&raw).map_err(payload_error)?;
+        self.verify_own_message(&message, conversation)?;
+        if message.id != id {
+            return Err(BackendError::Sdk("unexpected message identity".into()));
+        }
+        Ok(())
     }
     async fn stop(&self) {
         // Reads capture the credential and epoch under this same mutex.
@@ -452,6 +580,21 @@ impl SocialBackend for UserSessionBackend {
             .with(Capability::GuildListing, partial.clone())
             .with(Capability::GuildChannels, partial.clone())
             .with(Capability::GuildMessages, partial);
+        if self.shared.access == SessionAccessMode::ReadWrite && self.shared.token().is_ok() {
+            for cap in [
+                Capability::DmSend,
+                Capability::DmEdit,
+                Capability::DmDelete,
+                Capability::Replies,
+            ] {
+                caps = caps.with(
+                    cap,
+                    SupportLevel::Partial {
+                        note: "Experimental account writes; Discord permissions still apply".into(),
+                    },
+                );
+            }
+        }
         caps.dm_history = Some(HistoryCapability::Full);
         caps
     }
@@ -689,8 +832,10 @@ impl SocialBackend for UserSessionBackend {
     async fn guild_channels(&self, guild_id: GuildId) -> BackendResult<Vec<Channel>> {
         let raw = self.shared.call(rest::guild_channels(guild_id)).await?;
         let mut channels = rest::parse_channels(&raw, guild_id).map_err(payload_error)?;
-        for c in &mut channels {
-            c.capabilities.0 &= !ChannelCapabilities::WRITABLE.0;
+        if self.shared.access == SessionAccessMode::ReadOnly {
+            for c in &mut channels {
+                c.capabilities.0 &= !ChannelCapabilities::WRITABLE.0;
+            }
         }
         for channel in &channels {
             self.shared.remember(&DiscordEvent::ChannelUpserted {
@@ -740,6 +885,60 @@ impl SocialBackend for UserSessionBackend {
             .history_page(&HistoryPageRequest::latest(conversation_id, limit))
             .await?
             .messages)
+    }
+    async fn send_message(&self, target: &MessageTarget, content: &str) -> BackendResult<Message> {
+        self.send(target, content, None).await
+    }
+    async fn send_reply(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply_to: MessageId,
+    ) -> BackendResult<Message> {
+        self.send(target, content, Some(reply_to)).await
+    }
+    async fn edit_message_in(
+        &self,
+        conversation: ConversationId,
+        id: MessageId,
+        content: &str,
+    ) -> BackendResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.require_write(Capability::DmEdit)?;
+        self.own_message(conversation, id).await?;
+        let raw = self
+            .shared
+            .call(rest::edit_message(
+                ChannelId(conversation.get()),
+                id,
+                content,
+            ))
+            .await?;
+        let message = common::message(&raw).map_err(payload_error)?;
+        self.verify_own_message(&message, conversation)?;
+        if message.id != id {
+            return Err(BackendError::Sdk(
+                "unexpected edited message identity".into(),
+            ));
+        }
+        self.confirm(DiscordEvent::MessageUpdated { message }).await
+    }
+    async fn delete_message_in(
+        &self,
+        conversation: ConversationId,
+        id: MessageId,
+    ) -> BackendResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.require_write(Capability::DmDelete)?;
+        self.own_message(conversation, id).await?;
+        self.shared
+            .call(rest::delete_message(ChannelId(conversation.get()), id))
+            .await?;
+        self.confirm(DiscordEvent::MessageDeleted {
+            message_id: id,
+            conversation_id: conversation,
+        })
+        .await
     }
     async fn history_page(&self, req: &HistoryPageRequest) -> BackendResult<HistoryPage> {
         let raw = self

@@ -1,3 +1,6 @@
+> Message-write extension: see [PART_B_PLUS_ACCOUNT_WRITES.md](PART_B_PLUS_ACCOUNT_WRITES.md).
+> The read-only descriptions below document the original Part B baseline.
+
 # Part B: experimental account data pipeline
 
 Part B adds an opt-in, read-only Discord user-session source. It uses the

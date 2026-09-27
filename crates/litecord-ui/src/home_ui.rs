@@ -962,7 +962,7 @@ impl Workspace {
         }
         let source = match s.diagnostics.backend_mode {
             litecord_types::capability::BackendMode::Demo => "Demo account · synthetic data",
-            litecord_types::capability::BackendMode::UserSession => "User session (read only)",
+            litecord_types::capability::BackendMode::UserSession => "Discord account",
             _ => "Signed in with Discord",
         };
         kit::label(ui, source, theme::regular(13.5), theme::MUTED);

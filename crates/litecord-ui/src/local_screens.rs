@@ -46,6 +46,10 @@ impl Workspace {
                         ui,
                         &snapshot.account,
                         &snapshot.diagnostics.session,
+                        snapshot
+                            .settings
+                            .capabilities
+                            .is_usable(litecord_types::capability::Capability::DmSend),
                     );
                     ui.add_space(12.0);
                 }
@@ -112,6 +116,7 @@ fn discord_session_connection(
     ui: &mut Ui,
     account: &litecord_app::people::AccountViewModel,
     state: &SessionState,
+    can_write: bool,
 ) {
     theme::section_label(ui, "Discord connection");
     egui::Frame::new()
@@ -126,7 +131,7 @@ fn discord_session_connection(
                 .color(theme::WARNING),
             );
             ui.label(
-                egui::RichText::new("This account connection is read-only.")
+                egui::RichText::new(if can_write { "Read/write · Send, reply, edit and delete your messages." } else { "Message writes are disabled until sign-in with read/write access." })
                     .size(12.0)
                     .color(theme::MUTED),
             );
@@ -169,7 +174,7 @@ fn discord_session_connection(
                 let can_connect =
                     !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
                 if ui
-                    .add_enabled(can_connect, egui::Button::new("Connect"))
+                    .add_enabled(can_connect, egui::Button::new("Sign in"))
                     .clicked()
                 {
                     let credential = std::mem::take(&mut workspace.discord_session_draft);
@@ -193,7 +198,7 @@ fn discord_session_connection(
 
 fn account_source_label(origin: Option<Origin>) -> &'static str {
     match origin {
-        Some(Origin::DiscordSocialSdk | Origin::DiscordUserSession) => "User session (read only)",
+        Some(Origin::DiscordSocialSdk | Origin::DiscordUserSession) => "Discord account",
         Some(Origin::DiscordBotGateway) => "Discord bot",
         Some(Origin::UserProvided) => "User provided",
         Some(Origin::LocalApplication) => "Local application",
@@ -487,7 +492,7 @@ fn backend_label(mode: litecord_types::capability::BackendMode) -> &'static str 
         BackendMode::PresenceOnly => "Presence only",
         BackendMode::Demo => "Demo · synthetic",
         BackendMode::BotBridge => "Bot bridge",
-        BackendMode::UserSession => "User session (read only)",
+        BackendMode::UserSession => "Discord account",
     }
 }
 
@@ -567,7 +572,7 @@ mod tests {
         assert!(
             rendered.contains("Experimental account connection; Discord forbids account automation and may terminate accounts.")
         );
-        assert!(rendered.contains("User session (read only)"));
+        assert!(rendered.contains("Discord account"));
         assert!(rendered.contains("Example account"));
 
         drop(workspace);

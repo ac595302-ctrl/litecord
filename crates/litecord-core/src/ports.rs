@@ -322,6 +322,24 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
         unsupported(Capability::Replies)
     }
 
+    /// Canonical channel context supplied by the Action Engine. Legacy backends
+    /// retain their ID-only implementation; REST account backends require this.
+    async fn edit_message_in(
+        &self,
+        _conversation_id: ConversationId,
+        message_id: MessageId,
+        content: &str,
+    ) -> BackendResult<()> {
+        self.edit_message(message_id, content).await
+    }
+    async fn delete_message_in(
+        &self,
+        _conversation_id: ConversationId,
+        message_id: MessageId,
+    ) -> BackendResult<()> {
+        self.delete_message(message_id).await
+    }
+
     async fn edit_message(&self, _message_id: MessageId, _content: &str) -> BackendResult<()> {
         unsupported(Capability::DmEdit)
     }

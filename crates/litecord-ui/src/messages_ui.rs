@@ -737,7 +737,7 @@ impl Workspace {
             let (glyph, who) = match identity {
                 Some(DiscordIdentity::ApplicationBot) => (ph::ROBOT, "Sending as your bot"),
                 Some(DiscordIdentity::UserSocialSdk) => (ph::USER, "Sending as you"),
-                Some(DiscordIdentity::UserSession) => (ph::LOCK_SIMPLE, "User session (read only)"),
+                Some(DiscordIdentity::UserSession) => (ph::USER, "Discord account"),
                 None => (ph::LOCK_SIMPLE, "Read only here · Open in Discord to reply"),
             };
             let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());

@@ -116,6 +116,7 @@ impl Default for DatabaseConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct BackendConfig {
     pub kind: BackendKind,
+    pub access: litecord_types::capability::SessionAccessMode,
     /// Discord application id (public, not a secret).
     pub application_id: Option<u64>,
     /// Seed for the demo backend's synthetic data.
@@ -129,6 +130,7 @@ impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             kind: BackendKind::Demo,
+            access: litecord_types::capability::SessionAccessMode::ReadWrite,
             application_id: None,
             demo_seed: 42,
             demo_bot: false,

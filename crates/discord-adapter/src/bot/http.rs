@@ -63,6 +63,7 @@ const USER_AGENT: &str = concat!(
 pub struct HttpTransport {
     client: reqwest::Client,
     user_session: bool,
+    access: litecord_types::capability::SessionAccessMode,
     limits: std::sync::Arc<tokio::sync::Mutex<RateLimits>>,
 }
 
@@ -75,15 +76,21 @@ impl HttpTransport {
         Ok(Self {
             client,
             user_session: false,
+            access: litecord_types::capability::SessionAccessMode::ReadOnly,
             limits: Default::default(),
         })
     }
 
-    /// Read-only account transport; unlike bot auth the credential is not
-    /// prefixed with `Bot`. No caller can use this transport for REST writes.
+    /// Account transport with a read-only default. The credential has no Bot prefix.
     pub fn user_session() -> Result<Self, BackendError> {
+        Self::user_session_with_access(litecord_types::capability::SessionAccessMode::ReadOnly)
+    }
+    pub fn user_session_with_access(
+        access: litecord_types::capability::SessionAccessMode,
+    ) -> Result<Self, BackendError> {
         let mut transport = Self::new()?;
         transport.user_session = true;
+        transport.access = access;
         transport.client = reqwest::Client::builder()
             .user_agent(concat!("Litecord/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
@@ -100,7 +107,7 @@ impl BotTransport for HttpTransport {
         token: &Secret<String>,
         req: &RestRequest,
     ) -> Result<Value, BackendError> {
-        if self.user_session && req.method != Method::Get {
+        if self.user_session && !crate::user_session::allows_request(self.access, req) {
             return Err(BackendError::Unsupported {
                 capability: litecord_types::capability::Capability::DmSend,
             });
@@ -135,7 +142,16 @@ impl BotTransport for HttpTransport {
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
-            .map_err(|_| BackendError::Offline)?;
+            .map_err(|_| {
+                if self.user_session && req.method != Method::Get {
+                    BackendError::Sdk(
+                        "Write outcome is uncertain; refresh the conversation before retrying"
+                            .into(),
+                    )
+                } else {
+                    BackendError::Offline
+                }
+            })?;
         let status = resp.status().as_u16();
         let retry_after = resp
             .headers()
@@ -164,7 +180,13 @@ impl BotTransport for HttpTransport {
             .and_then(|v| v.to_str().ok())
             == Some("true");
         let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|_| BackendError::Offline)? {
+        while let Some(chunk) = resp.chunk().await.map_err(|_| {
+            if self.user_session && req.method != Method::Get {
+                BackendError::Sdk("Write outcome is uncertain; refresh before retrying".into())
+            } else {
+                BackendError::Offline
+            }
+        })? {
             if bytes.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
                 return Err(BackendError::Sdk(
                     "Discord response exceeds the byte limit".into(),

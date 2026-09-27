@@ -90,6 +90,15 @@ impl CapabilitySet {
     }
 }
 
+/// Allowed operations for an experimental account connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAccessMode {
+    #[default]
+    ReadOnly,
+    ReadWrite,
+}
+
 /// How the app is connected to Discord (V1 §26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

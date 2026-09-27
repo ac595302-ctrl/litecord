@@ -6,6 +6,7 @@ data_dir = ".litecord-account"
 
 [backend]
 kind = "user_session"
+access = "read_write" # Set read_only to disable all account writes.
 demo_bot = false
 
 [runtime]

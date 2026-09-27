@@ -604,6 +604,14 @@ fn validate_state(
     // capabilities; Discord writes proposed there are checked again when the
     // application executes them.
     let caps = inner.executor.capabilities(identity);
+    if identity == DiscordIdentity::UserSession
+        && action.capability_class() == CapabilityClass::DiscordWrite
+        && !caps.is_usable(action.required_capability().unwrap_or(Capability::DmSend))
+    {
+        return invalid(
+            "the account connection is signed out or this write capability is disabled",
+        );
+    }
     if identity == DiscordIdentity::ApplicationBot {
         // The bot identity may only post/edit/delete in guild channels; it
         // never acts on the user's social graph, presence or local data.

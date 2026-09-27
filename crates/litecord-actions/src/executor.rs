@@ -89,9 +89,10 @@ impl DefaultExecutor {
                 .backend
                 .as_ref()
                 .filter(|backend| backend.mode() != BackendMode::UserSession),
-            // The user-session backend is a read-only source. Keep it out of
-            // proposal execution even if it is the configured backend.
-            DiscordIdentity::UserSession => None,
+            DiscordIdentity::UserSession => self
+                .backend
+                .as_ref()
+                .filter(|backend| backend.mode() == BackendMode::UserSession),
             DiscordIdentity::ApplicationBot => self.bot.as_ref(),
         }
     }
@@ -203,6 +204,15 @@ impl ActionExecutor for DefaultExecutor {
 }
 
 impl DefaultExecutor {
+    fn message_conversation(
+        &self,
+        id: litecord_types::MessageId,
+    ) -> Result<litecord_types::ConversationId, ActionError> {
+        self.db
+            .read(|r| repos::messages::get(r, id))?
+            .map(|m| m.message.conversation_id)
+            .ok_or_else(|| ActionError::Invalid("message not found".into()))
+    }
     async fn execute_inner(
         &self,
         action: &AgentAction,
@@ -238,7 +248,11 @@ impl DefaultExecutor {
                 content,
             } => {
                 backend()?
-                    .edit_message(*message_id, content)
+                    .edit_message_in(
+                        self.message_conversation(*message_id)?,
+                        *message_id,
+                        content,
+                    )
                     .await
                     .map_err(exec_err)?;
                 Ok(ExecutionOutcome {
@@ -248,7 +262,7 @@ impl DefaultExecutor {
             }
             AgentAction::DeleteMessage { message_id } => {
                 backend()?
-                    .delete_message(*message_id)
+                    .delete_message_in(self.message_conversation(*message_id)?, *message_id)
                     .await
                     .map_err(exec_err)?;
                 Ok(ExecutionOutcome {

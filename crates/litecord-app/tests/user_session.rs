@@ -350,3 +350,105 @@ async fn resumed_session_recovers_a_gap_before_a_later_live_message() {
     );
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_message_writes_use_action_engine_and_commit_back_to_canonical_store() {
+    let (_, transport, secrets) = setup();
+    let backend = Arc::new(UserSessionBackend::with_access(
+        Arc::new(transport.clone()),
+        secrets,
+        Arc::new(SystemClock),
+        litecord_types::capability::SessionAccessMode::ReadWrite,
+    ));
+    let app = LitecordApp::builder(LitecordConfig::default())
+        .backend(backend)
+        .in_memory()
+        .start()
+        .await
+        .unwrap();
+    state(&app, SessionState::LoggedOut).await;
+    let mut socket = transport.next_socket();
+    app.authenticate_session(Secret::new("test-owned-credential".into()))
+        .await
+        .unwrap();
+    ready(&mut socket).await;
+    state(&app, SessionState::Ready).await;
+    let mut own = message("800", "outgoing");
+    own["author"] = json!({"id":"1","username":"owner"});
+    transport.respond("POST /channels/2/messages", own.clone());
+    let view = app.conversation_view(ConversationId(2), 100, None).unwrap();
+    assert!(view.capabilities.can_send);
+    assert_eq!(
+        view.capabilities.send_identity,
+        Some(litecord_types::provenance::DiscordIdentity::UserSession)
+    );
+    app.send_message_as(
+        ConversationId(2),
+        "outgoing",
+        litecord_types::provenance::DiscordIdentity::UserSession,
+    )
+    .await
+    .unwrap();
+    let stored = app
+        .database()
+        .read(|r| repos::messages::get(r, MessageId(800)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.origin, Origin::DiscordUserSession);
+    assert_eq!(stored.message.content.as_ref(), "outgoing");
+    transport.respond("GET /channels/2/messages/800", own.clone());
+    own["content"] = json!("edited outgoing");
+    own["edited_timestamp"] = json!("2026-09-26T12:02:00Z");
+    transport.respond("PATCH /channels/2/messages/800", own.clone());
+    app.edit_message(MessageId(800), "edited outgoing")
+        .await
+        .unwrap();
+    assert_eq!(
+        app.database()
+            .read(|r| repos::messages::get(r, MessageId(800)))
+            .unwrap()
+            .unwrap()
+            .message
+            .content
+            .as_ref(),
+        "edited outgoing"
+    );
+    let mut reply = own.clone();
+    reply["id"] = json!("801");
+    reply["message_reference"] = json!({"message_id":"800"});
+    transport.respond("POST /channels/2/messages", reply);
+    app.send_reply_as(
+        ConversationId(2),
+        MessageId(800),
+        "reply",
+        litecord_types::provenance::DiscordIdentity::UserSession,
+    )
+    .await
+    .unwrap();
+    transport.respond("DELETE /channels/2/messages/800", Value::Null);
+    app.delete_message(MessageId(800)).await.unwrap();
+    assert!(
+        app.database()
+            .read(|r| repos::messages::get(r, MessageId(800)))
+            .unwrap()
+            .unwrap()
+            .deleted
+    );
+    let requests = transport.requests();
+    let send = requests
+        .iter()
+        .find(|r| r.method == discord_adapter::bot::rest::Method::Post)
+        .unwrap();
+    assert_eq!(send.body.as_ref().unwrap()["enforce_nonce"], true);
+    assert!(send.body.as_ref().unwrap()["nonce"].is_string());
+    app.sign_out().await.unwrap();
+    assert!(app
+        .send_message_as(
+            ConversationId(2),
+            "after logout",
+            litecord_types::provenance::DiscordIdentity::UserSession
+        )
+        .await
+        .is_err());
+    app.shutdown().await;
+}

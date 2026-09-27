@@ -409,7 +409,7 @@ impl Workspace {
                                     theme::chip(ui, "Acts as you", theme::PRIMARY)
                                 }
                                 DiscordIdentity::UserSession => {
-                                    theme::chip(ui, "User session (read only)", theme::PRIMARY)
+                                    theme::chip(ui, "Discord account", theme::PRIMARY)
                                 }
                             }
                             theme::chip(ui, &class, action_class_color(action.class));
