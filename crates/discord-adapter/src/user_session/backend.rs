@@ -95,7 +95,7 @@ impl Shared {
                 "this connection requires a user account, not a bot".into(),
             ));
         }
-        let mut pin = self
+        let pin = self
             .pinned_account
             .lock()
             .map_err(|_| BackendError::Offline)?;
@@ -105,7 +105,6 @@ impl Shared {
                     .into(),
             ));
         }
-        *pin = Some(user.id);
         Ok(())
     }
     fn remember(&self, event: &DiscordEvent) {
@@ -510,6 +509,11 @@ impl SocialBackend for UserSessionBackend {
         };
         *self
             .shared
+            .pinned_account
+            .lock()
+            .map_err(|_| BackendError::Offline)? = Some(user.id);
+        *self
+            .shared
             .credential
             .lock()
             .map_err(|_| BackendError::Offline)? = Some(token);
@@ -598,18 +602,23 @@ impl SocialBackend for UserSessionBackend {
             .metadata
             .lock()
             .map_err(|_| BackendError::Offline)? = Metadata::default();
+        let store = self.shared.secrets.clone();
+        let removed = tokio::task::spawn_blocking(move || {
+            store.try_remove(SecretKey::DiscordUserSessionToken)
+        })
+        .await;
+        if !matches!(removed, Ok(Ok(()))) {
+            let message = "Credential removal failed: the connection is stopped, but the saved credential may remain. Retry Log out before restarting.";
+            self.shared.emit(DiscordEvent::SessionChanged {
+                state: SessionState::Error {
+                    message: message.into(),
+                },
+            });
+            return Err(BackendError::Authentication(message.into()));
+        }
         self.shared.emit(DiscordEvent::SessionChanged {
             state: SessionState::LoggedOut,
         });
-        let store = self.shared.secrets.clone();
-        tokio::task::spawn_blocking(move || store.try_remove(SecretKey::DiscordUserSessionToken))
-            .await
-            .map_err(|_| BackendError::Offline)?
-            .map_err(|_| {
-                BackendError::Authentication(
-                    "could not remove the credential from OS storage".into(),
-                )
-            })?;
         Ok(())
     }
     async fn current_user(&self) -> BackendResult<User> {
