@@ -79,6 +79,29 @@ replace state authoritatively, so splitting them would need a new partial-
 snapshot protocol in the reducer. The byte budget admits an oversized
 envelope only when the queue is otherwise empty, so memory stays bounded.
 
+## Omni sign-in, driven through the real UI (September 27, 2026)
+
+Real harnesses (codex-cli 0.157.1, opencode 1.18.32) in throwaway homes,
+driven by `xdotool` clicks and typing under Xvfb against the debug build:
+
+| Flow | Result |
+|---|---|
+| Codex: open Settings → Omni | Sign-in state is checked on its own; shows "Not signed in", "Sign in with ChatGPT", API key and device code |
+| Codex: click "Sign in with ChatGPT" | Codex starts its browser sign-in; the card shows "Finish signing in" with Open page / Check / Cancel (no browser in the sandbox, so the page itself did not open) |
+| Codex: Add key → type a dummy key → Save key | Codex writes its own `auth.json`; card shows "Signed in · OpenAI API key" |
+| Codex: Sign out | `auth.json` removed |
+| OpenCode: open Settings → Omni | Lists ChatGPT Pro/Plus, headless, API keys (Anthropic, OpenAI, ...), GitHub Copilot, More providers |
+| OpenCode: Anthropic → Add key → Save | Stored in OpenCode's `auth.json`; Anthropic shows Connected |
+| OpenCode: Anthropic → Sign out | Only that credential removed |
+| Omni slide-over (`--omni`) while signed out | Shows the same setup instead of a chat |
+| Leak check | The dummy keys appear nowhere in Litecord's data folder or log |
+
+Not verified: completing a real ChatGPT/OAuth sign-in (needs a person and
+an account) and device-code flows (auth hosts are blocked in this sandbox).
+
+Screenshot hooks: `LITECORD_SCREENSHOT_SECTION=Omni` opens one Settings
+section and `LITECORD_SCREENSHOT_DELAY=<secs>` waits longer before capture.
+
 ## Remaining work
 
 Finish fidelity against the mock, accessibility/keyboard review, long-history

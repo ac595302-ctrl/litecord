@@ -43,12 +43,25 @@ capability limits; this file records current UI behavior.
 
   The inspector adds shared files from `conversation_files_view()` and
   plain-language Omni access options.
-- **Memory** (`memory_ui.rs`):
+- **Omni** (`omni_screen.rs`; the destination was called Memory, and old
+  saved layouts with the `memory` key still load):
+  - memory graph, memory cards and a source timeline; Confirm/Reject are
+    laid out from the right edge so they never clip or overlap the
+    confidence label;
   - "To review" and "Remembered" groups;
   - where each item came from ("From your messages", "From Omni", "You");
   - a confidence meter and inline confirm/reject;
   - sidebar status/kind filters and search;
   - an inspector whose source links open the conversation or the Omni chat.
+- **Omni sign-in** (`omni_signin.rs`, used by Settings → Omni and by the
+  Omni slide-over before Omni is ready):
+  - harness cards (Codex, OpenCode) with install state and "Look again";
+  - a state card (signed in / not signed in / finish signing in / error)
+    with Sign out, Check, Cancel, "Open page" and "Copy the sign-in link";
+  - "Sign in with ChatGPT" as the main button, then each provider's methods
+    grouped from `login_groups()`, with "More providers" and search;
+  - forms for API keys and provider prompts; keys go straight to the harness;
+  - OpenCode providers show Connected and a per-provider Sign out.
 - **Tasks** (`tasks_ui.rs`): quick add with priority, suggested/open/reminder
   sections, and an inspector using `task_detail_view()` (priority, subtasks,
   comments, source conversation).

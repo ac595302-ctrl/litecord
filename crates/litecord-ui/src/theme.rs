@@ -563,8 +563,3 @@ pub fn surface(ui: &Ui, rect: egui::Rect, base: Color32) {
 pub fn meta(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).font(regular(13.0)).color(MUTED)
 }
-
-/// Honest empty state: what's missing and what to do about it.
-pub fn empty_state(ui: &mut Ui, title: &str, body: &str) {
-    crate::kit::empty(ui, None, title, body);
-}

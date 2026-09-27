@@ -172,6 +172,24 @@ retriever test suite.
 * Views: `ConversationCapabilities.send_identity`, `PendingActionRow.identity`;
   services `send_message_as`; agent `propose_message.send_as`.
 
+### Every screen after the mocks + Omni sign-in UI (September 27, 2026)
+
+* All destinations were rebuilt against the mock PDF: Home (A02), Friends
+  (A03), Servers (A04, glassy server list; linked channels open as chats),
+  Voice (A05), Messages (A01), Inbox (A09), Omni (A10), Tasks (A11),
+  Settings (A12). **Memory is now called Omni** everywhere; saved layouts
+  with the old `memory` key still load (serde alias) and untouched legacy
+  split weights are upgraded.
+* The Omni panel is a 440px slide-over above the inspector instead of a
+  column that squeezed every panel.
+* Sign-in: the harness fixes from the verification branch are merged
+  (Codex login ids/cancel/native binary; OpenCode API keys for every
+  provider, dispose after credential changes, per-provider sign-out;
+  Windows env/path handling). `omni_signin.rs` is the new UI; bridge
+  commands `SignInWith(id, inputs)`, `ApiKey(id, key, inputs)`,
+  `CancelSignIn`, `SignOutProvider`, `Redetect`. Verified end to end
+  through the UI; see `docs/UI_QA.md`.
+
 ### Stages A, C, D and the mock-aligned UI (September 26, 2026)
 
 See `docs/ROADMAP.md` §2–3 and §6. User-token access was declined (see

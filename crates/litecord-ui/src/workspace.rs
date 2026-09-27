@@ -56,7 +56,15 @@ pub struct Workspace {
     /// Sign-in inputs (cleared after submit; the key is never kept longer).
     pub omni_code_draft: String,
     pub omni_key_draft: String,
+    /// Sign-in method whose form is open (API key and/or prompts).
     pub omni_key_option: Option<String>,
+    pub omni_login_inputs: litecord_app::harness::LoginInputs,
+    pub omni_more_providers: bool,
+    pub omni_provider_filter: String,
+    /// Harness whose sign-in methods were last requested.
+    pub omni_options_for: Option<litecord_app::harness::HarnessKind>,
+    /// Harness whose sign-in state was checked on first view.
+    pub omni_checked_for: Option<litecord_app::harness::HarnessKind>,
     /// In-memory input for the experimental Discord user-session connection.
     pub discord_session_draft: String,
     pub automation_form: crate::omni_ui::AutomationForm,
@@ -83,6 +91,8 @@ pub struct Workspace {
     pub screenshot_path: Option<std::path::PathBuf>,
     #[cfg(feature = "screenshots")]
     screenshot_requested: bool,
+    #[cfg(feature = "screenshots")]
+    pub screenshot_delay: std::time::Duration,
     #[cfg(feature = "screenshots")]
     started: std::time::Instant,
     /// A finished normal-mode splitter drag waits to be persisted.
@@ -148,6 +158,11 @@ impl Workspace {
             omni_code_draft: String::new(),
             omni_key_draft: String::new(),
             omni_key_option: None,
+            omni_login_inputs: Default::default(),
+            omni_more_providers: false,
+            omni_provider_filter: String::new(),
+            omni_options_for: None,
+            omni_checked_for: None,
             discord_session_draft: String::new(),
             automation_form: crate::omni_ui::AutomationForm::default(),
             task_title_draft: String::new(),
@@ -167,6 +182,8 @@ impl Workspace {
             screenshot_path: None,
             #[cfg(feature = "screenshots")]
             screenshot_requested: false,
+            #[cfg(feature = "screenshots")]
+            screenshot_delay: std::time::Duration::from_secs(3),
             #[cfg(feature = "screenshots")]
             started: std::time::Instant::now(),
             layout_save_pending: false,
@@ -827,17 +844,7 @@ impl Workspace {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::J)) {
             self.omni_open = !self.omni_open;
         }
-        if self.omni_open {
-            egui::Panel::right("omni_panel")
-                .exact_size(420.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::SIDEBAR)
-                        .stroke(Stroke::new(1.0_f32, theme::DIVIDER))
-                        .inner_margin(egui::Margin::symmetric(18, 14)),
-                )
-                .show_inside(root, |ui| self.omni_panel(ui));
-        }
+        let content = root.available_rect_before_wrap();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::DIVIDER))
             .show_inside(root, |ui| {
@@ -846,6 +853,9 @@ impl Workspace {
                     self.render_tree(ui, &t, ui.max_rect(), true);
                 }
             });
+        if self.omni_open {
+            self.omni_slideover(&ctx, content);
+        }
         self.edit_toolbar(&ctx);
         self.apply_queued_layout_changes(&ctx);
         self.drag_ghost(&ctx);
@@ -860,7 +870,7 @@ impl Workspace {
         if let Some(path) = &self.screenshot_path {
             if !self.screenshot_requested
                 && self.snapshot.is_some()
-                && self.started.elapsed() > std::time::Duration::from_secs(3)
+                && self.started.elapsed() > self.screenshot_delay
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
                 self.screenshot_requested = true;
@@ -933,5 +943,49 @@ fn hide(t: &mut LayoutNode, p: &str) {
             }
         }
         _ => {}
+    }
+}
+
+impl Workspace {
+    /// Omni slides over the right edge of the workspace (above the
+    /// inspector) instead of squeezing every panel to make room.
+    fn omni_slideover(&mut self, ctx: &egui::Context, content: egui::Rect) {
+        let width = 440.0_f32.min(content.width() * 0.6);
+        let panel = egui::Rect::from_min_max(
+            egui::pos2(content.right() - width, content.top()),
+            content.right_bottom(),
+        );
+        egui::Area::new(egui::Id::new("omni_slideover"))
+            .order(egui::Order::Middle)
+            .fixed_pos(panel.min)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.set_clip_rect(panel.expand2(egui::vec2(40.0, 0.0)));
+                // Swallow clicks so they don't reach the panels underneath.
+                ui.allocate_rect(panel, egui::Sense::click_and_drag());
+                let painter = ui.painter();
+                painter.add(
+                    egui::epaint::Shadow {
+                        offset: [-10, 0],
+                        blur: 28,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(140),
+                    }
+                    .as_shape(panel, egui::CornerRadius::ZERO),
+                );
+                painter.rect(
+                    panel,
+                    0.0,
+                    theme::SIDEBAR,
+                    Stroke::new(1.0_f32, theme::BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(panel.shrink2(egui::vec2(20.0, 16.0)))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                self.omni_panel(&mut child);
+            });
     }
 }

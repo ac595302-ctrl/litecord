@@ -9,6 +9,7 @@ mod layout_editor;
 mod local_screens;
 mod messages_ui;
 mod omni_screen;
+mod omni_signin;
 mod omni_ui;
 mod overlays;
 mod ph;
@@ -64,6 +65,17 @@ pub fn run_with_options(
             #[cfg(feature = "screenshots")]
             {
                 workspace.screenshot_path = options.screenshot;
+                // Test hooks for capturing a Settings section, or states that
+                // take longer than the default delay to appear.
+                if let Ok(section) = std::env::var("LITECORD_SCREENSHOT_SECTION") {
+                    workspace.settings_section = Some(section);
+                }
+                if let Some(secs) = std::env::var("LITECORD_SCREENSHOT_DELAY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                {
+                    workspace.screenshot_delay = std::time::Duration::from_secs(secs);
+                }
             }
             Ok(Box::new(workspace))
         }),

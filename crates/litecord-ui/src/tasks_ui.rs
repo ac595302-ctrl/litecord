@@ -481,7 +481,7 @@ impl Workspace {
         let w = rect.width() / 7.0;
         const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
         let mut pick = None;
-        for i in 0..7 {
+        for (i, name) in NAMES.iter().enumerate() {
             let day = monday + i as i64;
             let cell = Rect::from_min_size(
                 egui::pos2(rect.left() + w * i as f32, rect.top()),
@@ -530,7 +530,7 @@ impl Workspace {
             painter.text(
                 egui::pos2(cell.center().x, cell.top() + 20.0),
                 Align2::CENTER_CENTER,
-                NAMES[i],
+                *name,
                 theme::regular(13.0),
                 if is_today {
                     theme::PRIMARY_TEXT

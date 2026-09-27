@@ -6,7 +6,6 @@
 //! overlapping labels at narrow widths).
 
 // A component library: not every component is used by every screen yet.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -32,13 +31,6 @@ pub struct Tint {
 impl Tint {
     pub const fn new(fg: Color32, bg: Color32) -> Self {
         Self { fg, bg }
-    }
-    /// Derive a bubble fill by mixing `fg` into the card surface.
-    pub fn of(fg: Color32) -> Self {
-        Self {
-            fg,
-            bg: theme::lerp(CARD, fg, 0.22),
-        }
     }
 }
 
@@ -551,6 +543,59 @@ pub fn search_sized(ui: &mut Ui, text: &mut String, hint: &str, height: f32) -> 
     )
 }
 
+/// A framed single-line input matching the search field (36px, field fill,
+/// blue edge when focused). `password` hides the text.
+pub fn field(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    password: bool,
+    salt: impl std::hash::Hash,
+) -> Response {
+    let (rect, frame) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
+    let id = ui.id().with(("field", salt));
+    if frame.clicked() {
+        // The whole frame focuses the text, not just the line of glyphs.
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    let focused = ui.memory(|m| m.has_focus(id));
+    ui.painter().rect(
+        rect,
+        9.0,
+        FIELD,
+        Stroke::new(
+            1.0_f32,
+            if focused {
+                PRIMARY.gamma_multiply(0.7)
+            } else {
+                BORDER
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(egui::vec2(12.0, 0.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.add(
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .password(password)
+            .frame(egui::Frame::NONE)
+            .font(theme::regular(14.0))
+            .text_color(TEXT)
+            .hint_text(
+                egui::RichText::new(hint)
+                    .font(theme::regular(14.0))
+                    .color(MUTED),
+            )
+            .desired_width(inner.width()),
+    )
+}
+
 // ---- Selection controls ---------------------------------------------------------------------
 
 /// A pill tab (A01 "All / Unread 3 / Groups / DMs").
@@ -793,11 +838,6 @@ pub enum Kind {
     Danger,
 }
 
-/// A button in the mock's style; `glyph` is a leading icon.
-pub fn button(ui: &mut Ui, kind: Kind, glyph: Option<&str>, label: &str) -> Response {
-    button_ex(ui, kind, glyph, label, 34.0, true)
-}
-
 pub fn button_ex(
     ui: &mut Ui,
     kind: Kind,
@@ -928,11 +968,6 @@ fn paint_button(
         font,
         fg,
     );
-}
-
-/// Plain icon button (headers, row actions) with a hover plate.
-pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
-    icon_button_ex(ui, glyph, tooltip, 34.0, SECONDARY, true)
 }
 
 pub fn icon_button_ex(
@@ -1129,48 +1164,6 @@ pub fn tag(ui: &mut Ui, glyph: &str, text: &str, tint: Tint) -> Response {
     response
 }
 
-/// Metric card (A02 top row): bubble, big number, label, chevron.
-pub fn metric_card(
-    ui: &mut Ui,
-    width: f32,
-    glyph: &str,
-    tint: Tint,
-    value: &str,
-    caption: &str,
-) -> Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 70.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        paint_card(painter, rect, response.hovered());
-        let c = egui::pos2(rect.left() + 34.0, rect.center().y);
-        paint_bubble(painter, c, glyph, tint, 46.0);
-        painter.text(
-            egui::pos2(rect.left() + 70.0, rect.center().y - 1.0),
-            Align2::LEFT_BOTTOM,
-            value,
-            theme::semibold(20.0),
-            TEXT,
-        );
-        text_at(
-            painter,
-            egui::pos2(rect.left() + 70.0, rect.center().y + 3.0),
-            Align2::LEFT_TOP,
-            caption,
-            theme::regular(13.0),
-            MUTED,
-            rect.width() - 100.0,
-        );
-        chevron(
-            painter,
-            egui::pos2(rect.right() - 18.0, rect.center().y),
-            MUTED,
-        );
-    }
-    let l = format!("{value} {caption}");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &l));
-    response
-}
-
 /// Toggle switch (A12 "Show avatars"). Returns the response; flips `on`.
 pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(
@@ -1261,47 +1254,6 @@ pub fn progress(ui: &mut Ui, fraction: f32, color: Color32, height: f32) {
 /// Number of equal columns of at least `min_width` that fit in `width`.
 pub fn columns_for(width: f32, min_width: f32, gap: f32, max: usize) -> usize {
     (((width + gap) / (min_width + gap)).floor() as usize).clamp(1, max.max(1))
-}
-
-/// Lay `n` items out in rows of equal-width cells; `add` gets the cell ui
-/// and item index. Cells in a row share the row's tallest height.
-pub fn grid(
-    ui: &mut Ui,
-    n: usize,
-    min_width: f32,
-    max_cols: usize,
-    gap: f32,
-    mut add: impl FnMut(&mut Ui, usize, f32),
-) {
-    if n == 0 {
-        return;
-    }
-    let width = ui.available_width();
-    let cols = columns_for(width, min_width, gap, max_cols);
-    let cell_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).floor();
-    let mut i = 0;
-    while i < n {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for _ in 0..cols {
-                if i >= n {
-                    break;
-                }
-                ui.allocate_ui_with_layout(
-                    egui::vec2(cell_w, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(cell_w);
-                        add(ui, i, cell_w);
-                    },
-                );
-                i += 1;
-            }
-        });
-        if i < n {
-            ui.add_space(gap - ui.spacing().item_spacing.y);
-        }
-    }
 }
 
 /// A painter-driven list row: avatar area + title/subtitle + trailing text.

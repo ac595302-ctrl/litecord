@@ -4,13 +4,13 @@
 
 use eframe::egui::{self, RichText, Stroke, Ui};
 use litecord_app::automations::{AutomationDraft, AutomationOutputKind, AutomationTrigger};
-use litecord_app::harness::{Decision, HarnessKind, LoginKind, LoginState, OmniMode, RequestKind};
+use litecord_app::harness::{Decision, HarnessKind, LoginState, OmniMode, RequestKind};
 use litecord_app::omni::{OmniItem, OmniRequestRow, OmniSessionRow};
 use litecord_app::OmniViewModel;
 
 use crate::bridge::{Command, OmniCommand};
-use crate::theme;
 use crate::workspace::Workspace;
+use crate::{kit, ph, theme};
 
 impl Workspace {
     pub fn omni_panel(&mut self, ui: &mut Ui) {
@@ -20,7 +20,9 @@ impl Workspace {
         };
         let omni = &snapshot.omni;
         self.omni_header(ui, omni);
-        ui.separator();
+        ui.add_space(6.0);
+        kit::divider(ui);
+        ui.add_space(8.0);
         if !self.omni_ready(ui, omni) {
             return;
         }
@@ -60,80 +62,114 @@ impl Workspace {
     }
 
     fn omni_header(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Omni").size(18.0).color(theme::OMNI).strong());
-            let harness = omni
-                .status
-                .selected
-                .map_or("No harness", HarnessKind::label);
-            let account = match &omni.status.login {
-                LoginState::Ready { account: Some(a) } => format!("{harness} · {a}"),
-                LoginState::Ready { account: None } => harness.to_owned(),
-                LoginState::SigningIn { .. } => format!("{harness} · signing in"),
-                LoginState::SignedOut => format!("{harness} · signed out"),
-                LoginState::Stopped => format!("{harness} · idle"),
-                LoginState::NotInstalled => "No harness installed".to_owned(),
-                LoginState::Error { .. } => format!("{harness} · error"),
-            };
-            ui.label(theme::meta(account));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::kit::icon_button_ex(ui, crate::ph::X, "Close Omni (Ctrl+J)", 30.0, theme::SECONDARY, true)
+        let harness = omni
+            .status
+            .selected
+            .map_or("No harness", HarnessKind::label);
+        let (state, color) = match &omni.status.login {
+            LoginState::Ready { account: Some(a) } => (format!("{harness} · {a}"), theme::SUCCESS),
+            LoginState::Ready { account: None } => (format!("{harness} · ready"), theme::SUCCESS),
+            LoginState::SigningIn { .. } => (format!("{harness} · signing in"), theme::WARNING),
+            LoginState::SignedOut => (format!("{harness} · signed out"), theme::WARNING),
+            LoginState::Stopped => (format!("{harness} · idle"), theme::MUTED),
+            LoginState::NotInstalled => ("No harness installed".to_owned(), theme::MUTED),
+            LoginState::Error { .. } => (format!("{harness} · error"), theme::PRIORITY),
+        };
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
+        let mut right = row.right();
+        let mut button = |ui: &mut Ui, glyph: &str, tip: &str| {
+            let r = egui::Rect::from_center_size(
+                egui::pos2(right - 16.0, row.center().y),
+                egui::vec2(32.0, 32.0),
+            );
+            right -= 38.0;
+            kit::icon_button_at(
+                ui,
+                r,
+                ui.id().with(("omni_hdr", tip)),
+                glyph,
+                tip,
+                theme::SECONDARY,
+            )
+        };
+        if button(ui, ph::X, "Close Omni (Ctrl+J)").clicked() {
+            self.omni_open = false;
+        }
+        let history = button(ui, ph::CLOCK, "Chat history");
+        let new = button(ui, ph::NOTE_PENCIL, "New chat");
+        let painter = ui.painter();
+        kit::paint_bubble(
+            painter,
+            egui::pos2(row.left() + 20.0, row.center().y),
+            ph::SPARKLE,
+            kit::TEAL,
+            40.0,
+        );
+        let x = row.left() + 50.0;
+        kit::text_at(
+            painter,
+            egui::pos2(x, row.center().y - 10.0),
+            egui::Align2::LEFT_CENTER,
+            "Omni",
+            theme::semibold(18.0),
+            theme::TEXT,
+            right - x,
+        );
+        kit::dot(
+            painter,
+            egui::pos2(x + 4.0, row.center().y + 12.0),
+            3.5,
+            color,
+        );
+        kit::text_at(
+            painter,
+            egui::pos2(x + 14.0, row.center().y + 12.0),
+            egui::Align2::LEFT_CENTER,
+            &self.display(&state),
+            theme::regular(13.0),
+            theme::SECONDARY,
+            right - x - 18.0,
+        );
+        egui::Popup::menu(&history).show(|ui| {
+            ui.set_min_width(260.0);
+            let chats: Vec<&OmniSessionRow> =
+                omni.sessions.iter().filter(|s| s.kind == "chat").collect();
+            if chats.is_empty() {
+                ui.label(theme::meta("No chats yet"));
+            }
+            for s in chats.into_iter().take(20) {
+                let label = format!(
+                    "{}{}",
+                    if s.running { "• " } else { "" },
+                    self.display(&s.title)
+                );
+                if ui
+                    .selectable_label(omni.active.as_ref().map(|a| a.id) == Some(s.id), label)
                     .clicked()
                 {
-                    self.omni_open = false;
+                    self.selection.omni_session = Some(s.id);
+                    self.request();
+                    ui.close();
                 }
-                ui.menu_button("History", |ui| {
-                    ui.set_min_width(260.0);
-                    let chats: Vec<&OmniSessionRow> =
-                        omni.sessions.iter().filter(|s| s.kind == "chat").collect();
-                    if chats.is_empty() {
-                        ui.label(theme::meta("No chats yet"));
-                    }
-                    for s in chats.into_iter().take(20) {
-                        let label = format!(
-                            "{}{}",
-                            if s.running { "• " } else { "" },
-                            self.display(&s.title)
-                        );
-                        if ui
-                            .selectable_label(omni.active.as_ref().map(|a| a.id) == Some(s.id), label)
-                            .clicked()
-                        {
-                            self.selection.omni_session = Some(s.id);
-                            self.request();
-                            ui.close();
-                        }
-                    }
-                });
-                ui.menu_button("New", |ui| {
-                    if ui
-                        .button("Assistant chat")
-                        .on_hover_text("Litecord tools only")
-                        .clicked()
-                    {
-                        self.send(Command::Omni(OmniCommand::New(OmniMode::Assistant)));
-                        ui.close();
-                    }
-                    if ui
-                        .button("Workspace chat")
-                        .on_hover_text("Adds sandboxed shell and file tools; each command asks you first")
-                        .clicked()
-                    {
-                        self.send(Command::Omni(OmniCommand::New(OmniMode::Workspace)));
-                        ui.close();
-                    }
-                    if ui
-                        .button("Computer-use chat")
-                        .on_hover_text("Uses the computer-use tools configured in your harness; you can stop it at any time")
-                        .clicked()
-                    {
-                        self.send(Command::Omni(OmniCommand::New(OmniMode::ComputerUse)));
-                        ui.close();
-                    }
-                });
-            });
+            }
+        });
+        egui::Popup::menu(&new).show(|ui| {
+            ui.set_min_width(240.0);
+            let modes = [
+                (OmniMode::Assistant, "Assistant chat", "Litecord tools only"),
+                (OmniMode::Workspace, "Workspace chat", "Adds sandboxed shell and file tools; each command asks you first"),
+                (OmniMode::ComputerUse, "Computer-use chat", "Uses the computer-use tools configured in your harness; you can stop it at any time"),
+            ];
+            for (mode, label, tip) in modes {
+                if ui.button(label).on_hover_text(tip).clicked() {
+                    self.send(Command::Omni(OmniCommand::New(mode)));
+                    ui.close();
+                }
+            }
         });
         if let Some(active) = &omni.active {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let (color, mode) = match active.mode {
                     OmniMode::Assistant => (theme::OMNI, "Assistant · Litecord tools only"),
@@ -144,7 +180,7 @@ impl Workspace {
                         (theme::PRIORITY, "Computer use · watch and stop anytime")
                     }
                 };
-                theme::chip(ui, mode, color);
+                kit::status_pill(ui, None, mode, color);
                 if active.tokens_in + active.tokens_out > 0 {
                     ui.label(theme::meta(format!(
                         "{} turn{} · {}k tokens",
@@ -161,84 +197,39 @@ impl Workspace {
     fn omni_ready(&mut self, ui: &mut Ui, omni: &OmniViewModel) -> bool {
         let status = &omni.status;
         if let Some(why) = &status.unavailable {
-            theme::empty_state(ui, "Omni is unavailable", why);
+            kit::empty(ui, Some(ph::WARNING_CIRCLE), "Omni is unavailable", why);
             return false;
         }
-        match &status.login {
-            LoginState::Ready { .. } | LoginState::Stopped => true,
-            LoginState::NotInstalled => {
-                theme::empty_state(
-                    ui,
-                    "Connect an agent harness",
-                    "Omni runs on your own Codex or OpenCode, signed in with its own account. \
-                     Install one of them, then reopen this panel. Litecord never sees your \
-                     provider credentials.",
-                );
-                false
-            }
-            LoginState::SignedOut => {
-                theme::empty_state(
-                    ui,
-                    "Sign in to use Omni",
-                    "You sign in with the harness's own login (for Codex: your ChatGPT account). \
-                     A browser window opens; Litecord only learns that you are signed in.",
-                );
-                ui.horizontal(|ui| self.sign_in_menu(ui, omni));
-                ui.label(theme::meta(
-                    "API keys and other methods are also in Settings, Omni section.",
-                ));
-                false
-            }
-            LoginState::SigningIn {
-                url,
-                instructions,
-                needs_code,
-            } => {
-                theme::empty_state(
-                    ui,
-                    "Finish signing in in your browser",
-                    instructions
-                        .as_deref()
-                        .unwrap_or("This panel updates when the harness reports success."),
-                );
-                if *needs_code {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.omni_code_draft)
-                                .hint_text("Paste the code")
-                                .desired_width(200.0),
-                        );
-                        let code = self.omni_code_draft.trim().to_owned();
-                        if ui
-                            .add_enabled(
-                                !code.is_empty() && !self.busy,
-                                egui::Button::new("Submit"),
-                            )
-                            .clicked()
-                        {
-                            self.send(Command::Omni(OmniCommand::SubmitCode(code)));
-                            self.omni_code_draft.clear();
-                        }
-                    });
-                }
-                if let Some(url) = url {
-                    if ui.button("Open sign-in page again").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                    }
-                }
-                if ui.button("Check again").clicked() {
-                    self.send(Command::Omni(OmniCommand::Refresh));
-                }
-                false
-            }
-            LoginState::Error { message } => {
-                theme::empty_state(ui, "The harness reported an error", message);
-                if ui.button("Retry").clicked() {
-                    self.send(Command::Omni(OmniCommand::Refresh));
-                }
-                false
+        // Not started yet: check once whether the harness is signed in, so
+        // the panel shows setup instead of a chat that would fail.
+        if let (LoginState::Stopped, Some(kind)) = (&status.login, status.selected) {
+            if kind != HarnessKind::Fake && self.omni_checked_for != Some(kind) && !self.busy {
+                self.omni_checked_for = Some(kind);
+                self.send(Command::Omni(OmniCommand::Refresh));
             }
         }
+        if matches!(status.login, LoginState::Ready { .. } | LoginState::Stopped) {
+            return true;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("omni_setup")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(10.0);
+                kit::bubble(ui, ph::SPARKLE, kit::TEAL, 48.0);
+                ui.add_space(6.0);
+                kit::label(ui, "Set up Omni", theme::semibold(20.0), theme::TEXT);
+                kit::para(
+                    ui,
+                    "Omni runs on your own Codex or OpenCode, signed in with that account. \
+                     Litecord never sees your provider credentials.",
+                    theme::regular(14.0),
+                    theme::SECONDARY,
+                );
+                ui.add_space(14.0);
+                self.omni_setup(ui, omni);
+            });
+        false
     }
 
     fn omni_request(&mut self, ui: &mut Ui, req: &OmniRequestRow) {
@@ -411,218 +402,38 @@ impl Workspace {
 impl Workspace {
     /// Settings → Omni: harness, every sign-in method, model, check-ins.
     pub(crate) fn omni_settings(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
-        theme::section_label(ui, "Omni");
-        egui::Frame::new()
-            .fill(theme::SIDEBAR)
-            .inner_margin(12)
-            .corner_radius(8)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(theme::meta(
-                    "Omni runs on your own agent harness, signed in with that harness's account. \
-                     Litecord starts it only while you use Omni and never stores its credentials.",
-                ));
-                ui.add_space(6.0);
-                self.harness_picker(ui, omni);
-                ui.add_space(4.0);
-                self.account_row(ui, omni);
-                if omni.status.selected.is_some() {
-                    ui.add_space(4.0);
-                    self.model_row(ui, omni);
-                }
-                if let Some(why) = &omni.status.unavailable {
-                    ui.label(RichText::new(why).color(theme::WARNING));
-                }
-                ui.add_space(6.0);
+        if let Some(why) = &omni.status.unavailable {
+            kit::para(ui, why, theme::regular(14.0), theme::WARNING);
+            ui.add_space(6.0);
+        }
+        self.omni_setup(ui, omni);
+        if omni.status.selected.is_some() {
+            ui.add_space(14.0);
+            self.model_row(ui, omni);
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - 70.0).max(120.0));
+                kit::label(ui, "Scheduled check-ins", theme::medium(15.0), theme::TEXT);
+                kit::para(
+                    ui,
+                    "Omni looks at what changed and adds anything important to your Inbox. \
+                     It never sends messages on its own. At most twice an hour, never in quiet hours.",
+                    theme::regular(13.5),
+                    theme::SECONDARY,
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut on = omni.heartbeat_enabled;
-                if ui
-                    .checkbox(&mut on, "Scheduled check-ins")
-                    .on_hover_text("Omni looks at what changed and adds anything important to your Inbox. It never sends messages on its own.")
-                    .changed()
-                {
+                kit::toggle(ui, &mut on, !self.busy);
+                if on != omni.heartbeat_enabled {
                     self.send(Command::Omni(OmniCommand::Heartbeats(on)));
                 }
-                ui.label(theme::meta(
-                    "Check-ins run only when something changed, at most twice an hour, and not during quiet hours.",
-                ));
             });
-        ui.add_space(8.0);
+        });
+        ui.add_space(12.0);
         self.automations_settings(ui, omni);
-    }
-
-    fn harness_picker(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
-        ui.horizontal(|ui| {
-            ui.label("Harness");
-            let selected = omni.status.selected;
-            for h in &omni.status.harnesses {
-                let label = if h.installed {
-                    h.label.to_owned()
-                } else {
-                    format!("{} (not installed)", h.label)
-                };
-                let r = ui.add_enabled(
-                    h.installed && !self.busy,
-                    egui::Button::selectable(selected == Some(h.kind), label),
-                );
-                if r.clicked() && selected != Some(h.kind) {
-                    self.send(Command::Omni(OmniCommand::Select(h.kind)));
-                }
-            }
-        });
-        if omni
-            .status
-            .harnesses
-            .iter()
-            .all(|h| !h.installed || h.kind == HarnessKind::Fake)
-        {
-            ui.label(theme::meta(
-                "Install Codex (npm i -g @openai/codex) or OpenCode (opencode.ai), then restart Litecord.",
-            ));
-        }
-    }
-
-    fn account_row(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
-        let login = &omni.status.login;
-        ui.horizontal(|ui| {
-            ui.label("Account");
-            let (text, color) = match login {
-                LoginState::Ready { account } => (
-                    format!(
-                        "Signed in{}",
-                        account
-                            .as_deref()
-                            .map(|a| format!(" · {a}"))
-                            .unwrap_or_default()
-                    ),
-                    theme::SUCCESS,
-                ),
-                LoginState::Stopped => (
-                    "Not running (starts when you use Omni)".to_owned(),
-                    theme::MUTED,
-                ),
-                LoginState::SignedOut => ("Signed out".to_owned(), theme::WARNING),
-                LoginState::SigningIn { .. } => ("Signing in…".to_owned(), theme::WARNING),
-                LoginState::NotInstalled => ("No harness".to_owned(), theme::MUTED),
-                LoginState::Error { message } => (format!("Error: {message}"), theme::PRIORITY),
-            };
-            ui.label(RichText::new(text).color(color));
-            if omni.status.selected.is_none() {
-                return;
-            }
-            match login {
-                LoginState::Ready { .. } => {
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Sign out"))
-                        .clicked()
-                    {
-                        self.send(Command::Omni(OmniCommand::SignOut));
-                    }
-                }
-                LoginState::Stopped => {
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Check"))
-                        .clicked()
-                    {
-                        self.send(Command::Omni(OmniCommand::Refresh));
-                    }
-                }
-                _ => self.sign_in_menu(ui, omni),
-            }
-        });
-        if let LoginState::SigningIn {
-            needs_code: true,
-            instructions,
-            ..
-        } = login
-        {
-            ui.label(theme::meta(
-                instructions
-                    .as_deref()
-                    .unwrap_or("Paste the code shown in your browser."),
-            ));
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.omni_code_draft)
-                        .hint_text("Sign-in code")
-                        .desired_width(220.0),
-                );
-                let code = self.omni_code_draft.trim().to_owned();
-                if ui
-                    .add_enabled(
-                        !code.is_empty() && !self.busy,
-                        egui::Button::new("Submit code"),
-                    )
-                    .clicked()
-                {
-                    self.send(Command::Omni(OmniCommand::SubmitCode(code)));
-                    self.omni_code_draft.clear();
-                }
-            });
-        }
-        if let Some(option) = self.omni_key_option.clone() {
-            let label = omni
-                .status
-                .login_options
-                .iter()
-                .find(|o| o.id == option)
-                .map_or("API key", |o| o.label.as_str())
-                .to_owned();
-            ui.label(theme::meta(format!(
-                "{label}: the key goes straight to the harness, which stores it. Litecord keeps no copy."
-            )));
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.omni_key_draft)
-                        .password(true)
-                        .hint_text("Paste API key")
-                        .desired_width(280.0),
-                );
-                let ok = self.omni_key_draft.trim().len() >= 8 && !self.busy;
-                if ui.add_enabled(ok, egui::Button::new("Sign in")).clicked() {
-                    let key = std::mem::take(&mut self.omni_key_draft);
-                    self.send(Command::Omni(OmniCommand::ApiKey(
-                        option.clone(),
-                        litecord_core::secrets::Secret::new(key),
-                    )));
-                    self.omni_key_option = None;
-                }
-                if ui.button("Cancel").clicked() {
-                    self.omni_key_draft.clear();
-                    self.omni_key_option = None;
-                }
-            });
-        }
-    }
-
-    fn sign_in_menu(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
-        let options = omni.status.login_options.clone();
-        let r = ui.menu_button("Sign in…", |ui| {
-            ui.set_min_width(260.0);
-            if options.is_empty() {
-                ui.label(theme::meta("Loading sign-in methods…"));
-            }
-            for o in &options {
-                let text = match o.kind {
-                    LoginKind::Browser => format!("{} (browser)", o.label),
-                    LoginKind::ApiKey => format!("{} (API key)", o.label),
-                };
-                if ui.button(text).clicked() {
-                    match o.kind {
-                        LoginKind::Browser => {
-                            self.send(Command::Omni(OmniCommand::SignInWith(o.id.clone())))
-                        }
-                        LoginKind::ApiKey => {
-                            self.omni_key_option = Some(o.id.clone());
-                            self.omni_key_draft.clear();
-                        }
-                    }
-                    ui.close();
-                }
-            }
-        });
-        if r.response.clicked() && options.is_empty() && !self.busy {
-            self.send(Command::Omni(OmniCommand::LoadLoginOptions));
-        }
     }
 
     fn model_row(&mut self, ui: &mut Ui, omni: &OmniViewModel) {

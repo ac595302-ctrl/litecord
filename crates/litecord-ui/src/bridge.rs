@@ -120,10 +120,22 @@ pub enum OmniCommand {
     CheckNow,
     DismissCheckins,
     LoadLoginOptions,
-    SignInWith(String),
+    /// Option id + values for its prompts.
+    SignInWith(String, litecord_app::harness::LoginInputs),
     SubmitCode(String),
-    /// Option id + key. `Secret` keeps the key out of Debug output.
-    ApiKey(String, litecord_core::secrets::Secret<String>),
+    /// Option id + key + prompt values. `Secret` keeps the key out of Debug
+    /// output.
+    ApiKey(
+        String,
+        litecord_core::secrets::Secret<String>,
+        litecord_app::harness::LoginInputs,
+    ),
+    /// Abandon a browser sign-in in progress.
+    CancelSignIn,
+    /// Sign one provider out (OpenCode keeps one credential per provider).
+    SignOutProvider(String),
+    /// Look for Codex/OpenCode again after the user installed one.
+    Redetect,
     LoadModels,
     SetModel(Option<String>),
     CreateAutomation(litecord_app::automations::AutomationDraft),
@@ -516,14 +528,33 @@ async fn omni(
         OmniCommand::LoadLoginOptions => {
             omni.login_options().await?;
         }
-        OmniCommand::SignInWith(id) => {
-            if let LoginState::SigningIn { url: Some(url), .. } = omni.sign_in_with(&id).await? {
+        OmniCommand::SignInWith(id, inputs) => {
+            if let LoginState::SigningIn { url: Some(url), .. } =
+                omni.sign_in_with_inputs(&id, &inputs).await?
+            {
                 c.effects.push(UiEffect::OpenUrl { url });
             }
         }
+        OmniCommand::CancelSignIn => omni.cancel_sign_in().await?,
+        OmniCommand::SignOutProvider(provider) => omni.sign_out_provider(&provider).await?,
+        OmniCommand::Redetect => {
+            let found = omni.refresh_installed();
+            let names: Vec<&str> = found
+                .iter()
+                .filter(|h| h.installed && h.kind != litecord_app::harness::HarnessKind::Fake)
+                .map(|h| h.label)
+                .collect();
+            c.effects.push(UiEffect::Notice {
+                message: if names.is_empty() {
+                    "Neither Codex nor OpenCode was found yet.".into()
+                } else {
+                    format!("Found {}.", names.join(" and "))
+                },
+            });
+        }
         OmniCommand::SubmitCode(code) => omni.submit_login_code(&code).await?,
-        OmniCommand::ApiKey(id, key) => {
-            omni.sign_in_api_key(&id, &key).await?;
+        OmniCommand::ApiKey(id, key, inputs) => {
+            omni.sign_in_api_key_with(&id, &key, &inputs).await?;
             c.effects.push(UiEffect::Notice {
                 message: "Key handed to the harness. Litecord did not store it.".into(),
             });
