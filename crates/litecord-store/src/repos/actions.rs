@@ -219,7 +219,9 @@ pub fn set_status(
             ActionStatus::Approved => Some(UnifiedEvent::ActionApproved { action_id: id }),
             ActionStatus::Rejected => Some(UnifiedEvent::ActionRejected { action_id: id }),
             ActionStatus::Executed => Some(UnifiedEvent::ActionExecuted { action_id: id }),
-            ActionStatus::Failed => Some(UnifiedEvent::ActionFailed { action_id: id }),
+            ActionStatus::Failed | ActionStatus::Uncertain => {
+                Some(UnifiedEvent::ActionFailed { action_id: id })
+            }
             ActionStatus::Invalidated | ActionStatus::Expired => {
                 Some(UnifiedEvent::ActionInvalidated { action_id: id })
             }

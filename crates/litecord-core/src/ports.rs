@@ -39,6 +39,8 @@ pub enum BackendError {
     Authentication(String),
     #[error("permission denied: {what}")]
     PermissionDenied { what: String },
+    #[error("Delivery uncertain: {0}")]
+    DeliveryUncertain(String),
     #[error("sdk error: {0}")]
     Sdk(String),
 }
@@ -64,7 +66,9 @@ impl From<BackendError> for Error {
             BackendError::NotFound { .. } => ErrorKind::NotFound,
             BackendError::Authentication(_) => ErrorKind::Authentication,
             BackendError::PermissionDenied { .. } => ErrorKind::Discord,
-            BackendError::RateLimited { .. } | BackendError::Sdk(_) => ErrorKind::Discord,
+            BackendError::RateLimited { .. }
+            | BackendError::Sdk(_)
+            | BackendError::DeliveryUncertain(_) => ErrorKind::Discord,
         };
         Error::with_source(kind, e.to_string(), e)
     }
@@ -324,6 +328,19 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
 
     /// Canonical channel context supplied by the Action Engine. Legacy backends
     /// retain their ID-only implementation; REST account backends require this.
+    /// Stable nonce saved with an outbound intent before any network call.
+    async fn send_message_operation(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply_to: Option<MessageId>,
+        _nonce: &str,
+    ) -> BackendResult<Message> {
+        match reply_to {
+            Some(id) => self.send_reply(target, content, id).await,
+            None => self.send_message(target, content).await,
+        }
+    }
     async fn edit_message_in(
         &self,
         _conversation_id: ConversationId,

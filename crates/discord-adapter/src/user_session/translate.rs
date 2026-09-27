@@ -198,6 +198,21 @@ pub fn dispatch(event: &str, raw: &Value) -> Result<Vec<DiscordEvent>, Translate
         }]),
         // A partial patch is not a full replacement. The backend fetches this
         // exact message asynchronously while socket control remains responsive.
+        "MESSAGE_CREATE" => {
+            let mut events = common::dispatch(event, raw)?;
+            if let Some(nonce) = message_nonce(raw) {
+                for event in &mut events {
+                    if let DiscordEvent::MessageCreated { message } = event {
+                        *event = DiscordEvent::MessageWriteObserved {
+                            message: message.clone(),
+                            nonce: nonce.clone(),
+                            imported: false,
+                        };
+                    }
+                }
+            }
+            Ok(events)
+        }
         "MESSAGE_UPDATE" => Ok(vec![DiscordEvent::Invalidated {
             key: HydrationKey::DmConversation {
                 conversation_id: id(raw, "channel_id")?,
@@ -244,4 +259,14 @@ mod tests {
             DiscordEvent::Invalidated { .. }
         ));
     }
+}
+
+/// Bounded protocol nonce; it is an operation ID, never a credential.
+pub fn message_nonce(raw: &Value) -> Option<String> {
+    let nonce = match raw.get("nonce")? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!nonce.is_empty() && nonce.len() <= 25).then_some(nonce)
 }

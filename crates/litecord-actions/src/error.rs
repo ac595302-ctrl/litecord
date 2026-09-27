@@ -31,6 +31,8 @@ pub enum ActionError {
     RevalidationFailed(String),
     #[error("execution failed: {0}")]
     Execution(String),
+    #[error("Delivery uncertain: {0}")]
+    Uncertain(String),
     #[error("storage: {0}")]
     Store(#[from] StoreError),
     #[error("internal: {0}")]
@@ -43,7 +45,7 @@ impl From<ActionError> for Error {
             ActionError::NotFound(_) => ErrorKind::NotFound,
             ActionError::Invalid(_) => ErrorKind::Validation,
             ActionError::Store(_) => ErrorKind::Storage,
-            ActionError::Execution(_) => ErrorKind::Discord,
+            ActionError::Execution(_) | ActionError::Uncertain(_) => ErrorKind::Discord,
             ActionError::Internal(_) => ErrorKind::Internal,
             _ => ErrorKind::ActionPolicy,
         };

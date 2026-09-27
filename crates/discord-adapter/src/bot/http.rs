@@ -144,7 +144,7 @@ impl BotTransport for HttpTransport {
             .await
             .map_err(|_| {
                 if self.user_session && req.method != Method::Get {
-                    BackendError::Sdk(
+                    BackendError::DeliveryUncertain(
                         "Write outcome is uncertain; refresh the conversation before retrying"
                             .into(),
                     )
@@ -182,7 +182,9 @@ impl BotTransport for HttpTransport {
         let mut bytes = Vec::new();
         while let Some(chunk) = resp.chunk().await.map_err(|_| {
             if self.user_session && req.method != Method::Get {
-                BackendError::Sdk("Write outcome is uncertain; refresh before retrying".into())
+                BackendError::DeliveryUncertain(
+                    "Write outcome is uncertain; refresh before retrying".into(),
+                )
             } else {
                 BackendError::Offline
             }
@@ -248,6 +250,11 @@ impl BotTransport for HttpTransport {
                 return Err(BackendError::PermissionDenied {
                     what: "Discord resource is not accessible to this account".into(),
                 });
+            }
+            if self.user_session && req.method != Method::Get && status >= 500 {
+                return Err(BackendError::DeliveryUncertain(
+                    "Discord could not confirm the write; refresh before retrying".into(),
+                ));
             }
             Err(rest::error_for_status(status, body.as_ref(), retry_after))
         }

@@ -129,6 +129,12 @@ pub enum DiscordEvent {
     MessageUpdated {
         message: Message,
     },
+    /// Exact account send receipt, reduced with the canonical message in one transaction.
+    MessageWriteObserved {
+        message: Message,
+        nonce: String,
+        imported: bool,
+    },
     MessageDeleted {
         message_id: MessageId,
         conversation_id: ConversationId,
@@ -200,6 +206,7 @@ impl DiscordEvent {
             DiscordEvent::ConversationUpserted { .. } => "conversation_upserted",
             DiscordEvent::MessageCreated { .. } => "message_created",
             DiscordEvent::MessageUpdated { .. } => "message_updated",
+            DiscordEvent::MessageWriteObserved { .. } => "message_write_observed",
             DiscordEvent::MessageDeleted { .. } => "message_deleted",
             DiscordEvent::LobbyUpserted { .. } => "lobby_upserted",
             DiscordEvent::VoiceStateChanged { .. } => "voice_state_changed",
@@ -318,6 +325,9 @@ impl DiscordEvent {
             DiscordEvent::ConversationUpserted { conversation } => conversation_bytes(conversation),
             DiscordEvent::MessageCreated { message } | DiscordEvent::MessageUpdated { message } => {
                 message_approx_bytes(message)
+            }
+            DiscordEvent::MessageWriteObserved { message, nonce, .. } => {
+                message_approx_bytes(message) + nonce.len()
             }
             DiscordEvent::LobbyUpserted { lobby } => {
                 ITEM_OVERHEAD + lobby.member_ids.len() * std::mem::size_of::<UserId>()

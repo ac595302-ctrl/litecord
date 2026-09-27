@@ -589,6 +589,7 @@ impl LitecordApp {
                 });
         }
         Ok(SettingsViewModel {
+            outbound: self.inner.db.read(|r| repos::outbound::recent(r, 20))?,
             sections: sections.into_iter().collect(),
             features: features.metadata(),
         })
@@ -623,9 +624,12 @@ impl LitecordApp {
 
     pub fn diagnostics_view(&self) -> Result<DiagnosticsViewModel> {
         let (revision, session, counts) = self.inner.db.read(|r| -> Result<_> {
-            let session = repos::app_state::get(r, "session_state")?
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
+            let session = repos::app_state::get(
+                r,
+                litecord_store::reducer::session_state_key(self.inner.backend.source().identity()),
+            )?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
             let counts = StoreCounts {
                 users: repos::users::count(r)?,
                 messages: repos::messages::count(r, None)?,

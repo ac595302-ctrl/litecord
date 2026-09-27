@@ -55,7 +55,7 @@ pub mod fake {
 
     #[derive(Debug, Default)]
     struct Inner {
-        responses: HashMap<String, Value>,
+        responses: HashMap<String, Result<Value, BackendError>>,
         requests: Vec<RestRequest>,
         /// Frames to feed each newly opened socket; the test keeps the sender.
         pending_socket: Option<(mpsc::Receiver<SocketEvent>, mpsc::UnboundedSender<String>)>,
@@ -91,9 +91,12 @@ pub mod fake {
         pub fn respond(&self, method_and_path: &str, body: Value) {
             self.lock()
                 .responses
-                .insert(method_and_path.to_owned(), body);
+                .insert(method_and_path.to_owned(), Ok(body));
         }
 
+        pub fn respond_error(&self, route: &str, error: BackendError) {
+            self.lock().responses.insert(route.to_owned(), Err(error));
+        }
         /// Prepare the next socket `connect` will return.
         pub fn next_socket(&self) -> SocketHandle {
             let (to_client, rx) = mpsc::channel(64);
@@ -137,7 +140,7 @@ pub mod fake {
             g.responses
                 .get(&key(req))
                 .cloned()
-                .ok_or_else(|| BackendError::NotFound { what: key(req) })
+                .unwrap_or_else(|| Err(BackendError::NotFound { what: key(req) }))
         }
 
         async fn connect(&self, _url: &str) -> Result<Box<dyn GatewaySocket>, BackendError> {

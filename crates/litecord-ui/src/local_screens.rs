@@ -106,6 +106,17 @@ impl Workspace {
                     ui.add_space(12.0);
                 }
 
+                if !settings.outbound.is_empty() {
+                    theme::section_label(ui,"Recent Discord operations");
+                    for operation in &settings.outbound {
+                        let uncertain=operation.state==litecord_types::actions::OutboundState::Uncertain;
+                        ui.horizontal_wrapped(|ui| {
+                            theme::chip(ui,&format!("{} · {}",operation.kind.replace('_'," "),operation.state.as_str()),if uncertain {theme::WARNING} else {theme::MUTED});
+                            if uncertain { ui.label("Delivery unknown. Refresh the conversation; this operation will not be resent automatically."); }
+                        });
+                    }
+                    ui.add_space(12.0);
+                }
                 backend_diagnostics(ui, &settings, &snapshot.diagnostics);
             });
     }

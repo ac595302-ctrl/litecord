@@ -9,7 +9,7 @@ and deduplication path.
 ## Run and sign in
 
 Build the desktop with `--features gui,discord-user-session`, then launch using
-`--config config/litecord.account.example.toml --backend user-session`.
+`--config config/litecord.account.example.toml --backend user-session gui`.
 Use a dedicated account database. In Settings, paste an account-owner supplied
 session credential into the masked field and select **Sign in**. The adapter
 validates `/users/@me`, rejects bot accounts and account changes, saves the credential
@@ -37,8 +37,9 @@ LoggedOut. Failed first-time credential storage never pins an account.
 Sends use a random nonce and `enforce_nonce` and transmit once. No automatic write
 retry occurs. Network failures or local confirmation failures must be reconciled
 by refreshing history before a manual resend. Existing proposals/audit records
-retain the requested action; a dedicated durable outbound-operation ledger and
-nonce-based reconciliation have **not** been implemented in this pass.
+retain the requested action; the durable outbound-operation ledger records submitted, confirmed, uncertain and failed
+operations. Exact account/channel/nonce observations from Gateway or REST reconcile
+uncertain sends. Interrupted submissions become uncertain on the next launch.
 
 Presence writes, relationship writes, reactions, typing, voice, moderation,
 attachments and additional account operations remain unsupported. They are not

@@ -452,3 +452,101 @@ async fn account_message_writes_use_action_engine_and_commit_back_to_canonical_s
         .is_err());
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncertain_send_is_not_retried_and_exact_gateway_nonce_reconciles_it() {
+    use litecord_types::actions::OutboundState;
+    use litecord_types::provenance::DiscordIdentity;
+    let (_, transport, secrets) = setup();
+    let backend = Arc::new(UserSessionBackend::with_access(
+        Arc::new(transport.clone()),
+        secrets,
+        Arc::new(SystemClock),
+        litecord_types::capability::SessionAccessMode::ReadWrite,
+    ));
+    let app = LitecordApp::builder(LitecordConfig::default())
+        .backend(backend)
+        .in_memory()
+        .start()
+        .await
+        .unwrap();
+    let mut socket = transport.next_socket();
+    app.authenticate_session(Secret::new("dummy".into()))
+        .await
+        .unwrap();
+    ready(&mut socket).await;
+    state(&app, SessionState::Ready).await;
+    assert_eq!(app.diagnostics_view().unwrap().session, SessionState::Ready);
+    transport.respond_error(
+        "POST /channels/2/messages",
+        litecord_core::ports::BackendError::DeliveryUncertain("response lost".into()),
+    );
+    assert!(app
+        .send_message_as(
+            ConversationId(2),
+            "one transmission",
+            DiscordIdentity::UserSession
+        )
+        .await
+        .is_err());
+    let operations = app
+        .database()
+        .read(|r| repos::outbound::recent(r, 10))
+        .unwrap();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].state, OutboundState::Uncertain);
+    let sends: Vec<_> = transport
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == discord_adapter::bot::rest::Method::Post)
+        .collect();
+    assert_eq!(sends.len(), 1);
+    let nonce = sends[0].body.as_ref().unwrap()["nonce"].clone();
+    let mut receipt = message("850", "one transmission");
+    receipt["author"] = json!({"id":"1","username":"owner"});
+    receipt["nonce"] = json!("wrong nonce");
+    frame(&socket, 2, "MESSAGE_CREATE", receipt.clone()).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        app.database()
+            .read(|r| repos::outbound::recent(r, 10))
+            .unwrap()[0]
+            .state,
+        OutboundState::Uncertain
+    );
+    receipt["nonce"] = nonce;
+    frame(&socket, 3, "MESSAGE_CREATE", receipt).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if app
+                .database()
+                .read(|r| repos::outbound::recent(r, 10))
+                .unwrap()[0]
+                .state
+                == OutboundState::Confirmed
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.database()
+            .read(|r| repos::actions::get(r, operations[0].action_id))
+            .unwrap()
+            .unwrap()
+            .status,
+        litecord_types::actions::ActionStatus::Executed
+    );
+    assert_eq!(
+        transport
+            .requests()
+            .iter()
+            .filter(|r| r.method == discord_adapter::bot::rest::Method::Post)
+            .count(),
+        1
+    );
+    app.shutdown().await;
+}

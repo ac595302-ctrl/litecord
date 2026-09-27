@@ -210,6 +210,7 @@ pub struct SettingRow {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsViewModel {
+    pub outbound: Vec<litecord_store::repos::outbound::OutboundOperation>,
     pub sections: Vec<(String, Vec<SettingRow>)>,
     pub features: Vec<FeatureInfo>,
 }

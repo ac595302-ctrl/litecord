@@ -184,6 +184,27 @@ pub fn reduce(
             conversations::upsert(tx, conversation, origin, observed_at)?;
         }
 
+        DiscordEvent::MessageWriteObserved {
+            message,
+            nonce,
+            imported,
+        } => {
+            if env.source != litecord_types::provenance::DiscordSource::UserSession {
+                return Err(crate::error::StoreError::Invariant(
+                    "account receipt requires account source".into(),
+                ));
+            }
+            apply_message(
+                tx,
+                message,
+                origin,
+                observed_at,
+                *imported,
+                true,
+                &mut followups,
+            )?;
+            crate::repos::outbound::observe_send(tx, nonce, message)?;
+        }
         DiscordEvent::MessageCreated { message } | DiscordEvent::MessageUpdated { message } => {
             let created_conversation_stub = apply_message(
                 tx,
@@ -194,6 +215,9 @@ pub fn reduce(
                 true,
                 &mut followups,
             )?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::outbound::observe_edit(tx, message)?;
+            }
             if created_conversation_stub {
                 followups.push(Followup::Hydrate(HydrationKey::DmSummaries));
             }
@@ -203,6 +227,9 @@ pub fn reduce(
             message_id,
             conversation_id,
         } => {
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::outbound::observe_delete(tx, *message_id, *conversation_id)?;
+            }
             messages::mark_deleted(
                 tx,
                 *message_id,
@@ -261,6 +288,9 @@ pub fn reduce(
         } => {
             let mut conversation_stub_created = false;
             for m in list {
+                if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                    crate::repos::outbound::observe_edit(tx, m)?;
+                }
                 conversation_stub_created |=
                     apply_message(tx, m, origin, observed_at, true, true, &mut followups)?;
             }
@@ -288,6 +318,7 @@ pub fn reduce(
             }
             let extract_since = observed_at.saturating_sub(HISTORY_EXTRACTION_WINDOW);
             for message in list {
+                crate::repos::outbound::observe_edit(tx, message)?;
                 if message.conversation_id != *conversation_id {
                     return Err(crate::error::StoreError::Invariant(
                         "catch-up channel mismatch".into(),
@@ -321,6 +352,9 @@ pub fn reduce(
             let mut conversation_stub_created = false;
             for m in list {
                 let extract = m.sent_at >= extract_since;
+                if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                    crate::repos::outbound::observe_edit(tx, m)?;
+                }
                 conversation_stub_created |=
                     apply_message(tx, m, origin, observed_at, true, extract, &mut followups)?;
             }

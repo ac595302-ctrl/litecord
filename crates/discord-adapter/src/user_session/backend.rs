@@ -76,7 +76,18 @@ impl Shared {
                 .ok_or(BackendError::NotConnected)?;
             (self.generation.load(Ordering::Acquire), token)
         };
-        let value = self.transport.request(&token, &req).await?;
+        let value = self.transport.request(&token, &req).await.map_err(|e| {
+            if req.method != Method::Get
+                && matches!(e, BackendError::Offline | BackendError::Sdk(_))
+            {
+                BackendError::DeliveryUncertain(
+                    "Discord write outcome is unknown; wait for reconciliation before resending"
+                        .into(),
+                )
+            } else {
+                e
+            }
+        })?;
         if generation != self.generation.load(Ordering::Acquire) {
             return Err(BackendError::NotConnected);
         }
@@ -202,7 +213,10 @@ impl UserSessionBackend {
         self.shared.token().map(|_| ())
     }
     async fn confirm(&self, event: DiscordEvent) -> BackendResult<()> {
-        let generation = self.shared.generation.load(Ordering::Acquire);
+        self.confirm_at(event, self.shared.generation.load(Ordering::Acquire))
+            .await
+    }
+    async fn confirm_at(&self, event: DiscordEvent, generation: u64) -> BackendResult<()> {
         let sink = self
             .shared
             .sink
@@ -212,8 +226,8 @@ impl UserSessionBackend {
             .ok_or(BackendError::NotConnected)?;
         let sink = sink.with_session_guard(self.shared.generation.clone(), generation);
         tokio::time::timeout(Duration::from_secs(5), sink.send_committed(SourceEnvelope::new(DiscordSource::UserSession, self.shared.clock.now(), event)))
-            .await.map_err(|_| BackendError::Sdk("Discord accepted the write, but local confirmation timed out; refresh before retrying".into()))?
-            .map_err(|_| BackendError::Sdk("Discord accepted the write, but local confirmation failed; refresh before retrying".into()))?;
+            .await.map_err(|_| BackendError::DeliveryUncertain("Discord accepted the write, but local confirmation timed out; refresh before retrying".into()))?
+            .map_err(|_| BackendError::DeliveryUncertain("Discord accepted the write, but local confirmation failed; refresh before retrying".into()))?;
         Ok(())
     }
     async fn target_channel(&self, target: &MessageTarget) -> BackendResult<ConversationId> {
@@ -248,6 +262,7 @@ impl UserSessionBackend {
         target: &MessageTarget,
         content: &str,
         reply: Option<MessageId>,
+        operation_nonce: Option<&str>,
     ) -> BackendResult<Message> {
         let _lifecycle = self.lifecycle.lock().await;
         self.require_write(if reply.is_some() {
@@ -263,15 +278,27 @@ impl UserSessionBackend {
         // A single transmission: never automatically retry an ambiguous send.
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).map_err(|_| BackendError::Offline)?;
+        let generated = u64::from_le_bytes(bytes).to_string();
+        let nonce = operation_nonce.unwrap_or(&generated);
         if let Some(body) = req.body.as_mut() {
-            body["nonce"] = json!(u64::from_le_bytes(bytes).to_string());
+            body["nonce"] = json!(nonce);
             body["enforce_nonce"] = json!(true);
         }
         let raw = self.shared.call(req).await?;
-        let message = common::message(&raw).map_err(payload_error)?;
-        self.verify_own_message(&message, channel)?;
-        self.confirm(DiscordEvent::MessageCreated {
+        let message = common::message(&raw).map_err(|_| {
+            BackendError::DeliveryUncertain(
+                "Discord returned an unexpected write confirmation; refresh before retrying".into(),
+            )
+        })?;
+        self.verify_own_message(&message, channel).map_err(|_| {
+            BackendError::DeliveryUncertain(
+                "Discord returned a mismatched write confirmation; refresh before retrying".into(),
+            )
+        })?;
+        self.confirm(DiscordEvent::MessageWriteObserved {
             message: message.clone(),
+            nonce: nonce.to_owned(),
+            imported: false,
         })
         .await?;
         Ok(message)
@@ -465,6 +492,7 @@ async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToke
                                 let reliable = matches!(
                                     event,
                                     DiscordEvent::MessageCreated { .. }
+                                        | DiscordEvent::MessageWriteObserved { .. }
                                         | DiscordEvent::MessageUpdated { .. }
                                         | DiscordEvent::MessageDeleted { .. }
                                         | DiscordEvent::CurrentUser { .. }
@@ -887,7 +915,7 @@ impl SocialBackend for UserSessionBackend {
             .messages)
     }
     async fn send_message(&self, target: &MessageTarget, content: &str) -> BackendResult<Message> {
-        self.send(target, content, None).await
+        self.send(target, content, None, None).await
     }
     async fn send_reply(
         &self,
@@ -895,7 +923,16 @@ impl SocialBackend for UserSessionBackend {
         content: &str,
         reply_to: MessageId,
     ) -> BackendResult<Message> {
-        self.send(target, content, Some(reply_to)).await
+        self.send(target, content, Some(reply_to), None).await
+    }
+    async fn send_message_operation(
+        &self,
+        target: &MessageTarget,
+        content: &str,
+        reply: Option<MessageId>,
+        nonce: &str,
+    ) -> BackendResult<Message> {
+        self.send(target, content, reply, Some(nonce)).await
     }
     async fn edit_message_in(
         &self,
@@ -941,6 +978,7 @@ impl SocialBackend for UserSessionBackend {
         .await
     }
     async fn history_page(&self, req: &HistoryPageRequest) -> BackendResult<HistoryPage> {
+        let generation = self.shared.generation.load(Ordering::Acquire);
         let raw = self
             .shared
             .call(rest::channel_messages_page(
@@ -951,6 +989,25 @@ impl SocialBackend for UserSessionBackend {
             ))
             .await?;
         let mut messages = rest::parse_messages(&raw).map_err(payload_error)?;
+        if let Some(rows) = raw.as_array() {
+            for row in rows {
+                if let Some(nonce) = translate::message_nonce(row) {
+                    let message = common::message(row).map_err(payload_error)?;
+                    if message.conversation_id != req.conversation_id {
+                        return Err(BackendError::Sdk("history receipt channel mismatch".into()));
+                    }
+                    self.confirm_at(
+                        DiscordEvent::MessageWriteObserved {
+                            message,
+                            nonce,
+                            imported: true,
+                        },
+                        generation,
+                    )
+                    .await?;
+                }
+            }
+        }
         let full = messages.len() == req.effective_limit() as usize;
         let n = messages.len();
         if messages

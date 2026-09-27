@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "account_recovery",
         sql: include_str!("../../../migrations/0008_account_recovery.sql"),
     },
+    Migration {
+        version: 9,
+        name: "outbound_operations",
+        sql: include_str!("../../../migrations/0009_outbound_operations.sql"),
+    },
 ];
 
 pub fn latest_version() -> u32 {
@@ -137,7 +142,7 @@ mod tests {
         .unwrap();
 
         let applied = run(&mut conn).unwrap();
-        assert_eq!(applied, vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(applied, vec![2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(current_version(&conn).unwrap(), latest_version());
 
         let priority: String = conn
@@ -206,7 +211,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(run(&mut conn).unwrap(), vec![5, 6, 7, 8]);
+        assert_eq!(run(&mut conn).unwrap(), vec![5, 6, 7, 8, 9]);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM history_sync", [], |r| r.get(0))
             .unwrap();

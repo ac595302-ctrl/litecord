@@ -47,6 +47,7 @@ pub mod tasks;
 pub mod actions;
 pub mod agent_runs;
 pub mod omni;
+pub mod outbound;
 
 // Shared FTS helpers
 pub mod fts;

@@ -197,9 +197,66 @@ impl ActionExecutor for DefaultExecutor {
             kind = action.kind(),
             identity = identity.as_str()
         );
-        self.execute_inner(action, actor, identity)
+        let nonce = if identity == DiscordIdentity::UserSession
+            && action.capability_class() == litecord_types::actions::CapabilityClass::DiscordWrite
+        {
+            let mut bytes = [0u8; 8];
+            getrandom::fill(&mut bytes)
+                .map_err(|_| ActionError::Internal("could not create operation ID".into()))?;
+            let nonce = u64::from_le_bytes(bytes).to_string();
+            self.db.write(|tx| -> Result<(),ActionError> {
+                let account=repos::accounts::current(tx,identity)?.ok_or_else(||ActionError::Invalid("account not signed in".into()))?;
+                let conversation=match action {
+                    AgentAction::SendMessage {target: litecord_types::actions::MessageTarget::Conversation {conversation_id}, ..}=>Some(*conversation_id),
+                    AgentAction::SendMessage {target: litecord_types::actions::MessageTarget::User {user_id}, ..}=>repos::conversations::find_dm_by_recipient(tx,*user_id)?.map(|c|c.conversation.id),
+                    AgentAction::EditMessage {message_id,..} | AgentAction::DeleteMessage {message_id}=>repos::messages::get(tx,*message_id)?.map(|m|m.message.conversation_id),
+                    _=>None,
+                };
+                let remote=match action {AgentAction::EditMessage {message_id,..}|AgentAction::DeleteMessage {message_id}=>Some(*message_id),_=>None};
+                repos::outbound::start(tx,id,account.user_id,conversation,action.kind(),&nonce,remote)?;
+                Ok(())
+            })?;
+            Some(nonce)
+        } else {
+            None
+        };
+        let mut result = self
+            .execute_inner(action, actor, identity, nonce.as_deref())
             .instrument(span)
-            .await
+            .await;
+        if nonce.is_some() {
+            if result.is_err() {
+                if let Some(message) = self
+                    .db
+                    .read(|r| repos::outbound::confirmed_message(r, id))?
+                {
+                    result = Ok(ExecutionOutcome {
+                        summary: "message confirmed by Discord observation".into(),
+                        entity: Some(EntityId::Message(message)),
+                    });
+                }
+            }
+            self.db.write(|tx| -> Result<(), ActionError> {
+                use litecord_types::actions::OutboundState;
+                let (state, remote, error) = match &result {
+                    Ok(o) => (
+                        OutboundState::Confirmed,
+                        match o.entity {
+                            Some(EntityId::Message(id)) => Some(id),
+                            _ => None,
+                        },
+                        None,
+                    ),
+                    Err(ActionError::Uncertain(e)) => {
+                        (OutboundState::Uncertain, None, Some(e.as_str()))
+                    }
+                    Err(_) => (OutboundState::Failed, None, Some("Discord write failed")),
+                };
+                repos::outbound::finish(tx, id, state, remote, error)?;
+                Ok(())
+            })?;
+        }
+        result
     }
 }
 
@@ -218,14 +275,19 @@ impl DefaultExecutor {
         action: &AgentAction,
         actor: &Actor,
         identity: DiscordIdentity,
+        nonce: Option<&str>,
     ) -> Result<ExecutionOutcome, ActionError> {
         let backend = || {
             self.backend_for(identity).ok_or_else(|| {
                 ActionError::Execution(format!("no {} backend in this process", identity.as_str()))
             })
         };
-        let exec_err =
-            |e: litecord_core::ports::BackendError| ActionError::Execution(e.to_string());
+        let exec_err = |e: litecord_core::ports::BackendError| match e {
+            litecord_core::ports::BackendError::DeliveryUncertain(message) => {
+                ActionError::Uncertain(message)
+            }
+            other => ActionError::Execution(other.to_string()),
+        };
         match action {
             AgentAction::SendMessage {
                 target,
@@ -233,9 +295,15 @@ impl DefaultExecutor {
                 reply_to,
             } => {
                 let backend = backend()?;
-                let msg = match reply_to {
-                    Some(reply_to) => backend.send_reply(target, content, *reply_to).await,
-                    None => backend.send_message(target, content).await,
+                let msg = if let Some(nonce) = nonce {
+                    backend
+                        .send_message_operation(target, content, *reply_to, nonce)
+                        .await
+                } else {
+                    match reply_to {
+                        Some(reply_to) => backend.send_reply(target, content, *reply_to).await,
+                        None => backend.send_message(target, content).await,
+                    }
                 }
                 .map_err(exec_err)?;
                 Ok(ExecutionOutcome {

@@ -518,7 +518,16 @@ async fn run_executor(
                 )
             }
             Err(e) => {
-                repos::actions::set_status(tx, id, ActionStatus::Failed, origin_for(actor))?;
+                repos::actions::set_status(
+                    tx,
+                    id,
+                    if matches!(e, ActionError::Uncertain(_)) {
+                        ActionStatus::Uncertain
+                    } else {
+                        ActionStatus::Failed
+                    },
+                    origin_for(actor),
+                )?;
                 audit(
                     tx,
                     id,

@@ -182,6 +182,16 @@ impl Actor {
 }
 
 str_enum! {
+    pub enum OutboundState {
+        Pending => "pending",
+        Submitted => "submitted",
+        Confirmed => "confirmed",
+        Uncertain => "uncertain",
+        Failed => "failed",
+    }
+}
+
+str_enum! {
     pub enum ActionStatus {
         PendingApproval => "pending_approval",
         Approved => "approved",
@@ -189,6 +199,7 @@ str_enum! {
         Executing => "executing",
         Executed => "executed",
         Failed => "failed",
+        Uncertain => "uncertain",
         Expired => "expired",
         /// Approval invalidated by revalidation (state changed underneath).
         Invalidated => "invalidated",
@@ -202,6 +213,7 @@ impl ActionStatus {
             ActionStatus::Rejected
                 | ActionStatus::Executed
                 | ActionStatus::Failed
+                | ActionStatus::Uncertain
                 | ActionStatus::Expired
                 | ActionStatus::Invalidated
         )
