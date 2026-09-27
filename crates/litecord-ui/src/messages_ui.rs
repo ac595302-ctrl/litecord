@@ -190,11 +190,15 @@ impl Workspace {
             Some(litecord_types::social::ConversationKind::GuildChannel) => {
                 kit::paint_group(ui.painter(), avatar_c, 48.0, ph::HASH, theme::SECONDARY)
             }
-            _ => theme::paint_avatar(
+            _ => theme::paint_avatar_url(
                 ui.painter(),
                 avatar_c,
                 48.0,
                 &title,
+                s.contact
+                    .as_ref()
+                    .and_then(|c| c.avatar_url.as_deref())
+                    .filter(|_| !private),
                 presence,
                 theme::WORKSPACE,
             ),
@@ -389,7 +393,7 @@ impl Workspace {
         let mut y = body.top() + if layout.continuation { 2.0 } else { 12.0 };
         let painter = ui.painter();
         if !layout.continuation {
-            theme::paint_avatar(
+            theme::paint_avatar_url(
                 painter,
                 egui::pos2(left + AVATAR * 0.5, y + AVATAR * 0.5),
                 AVATAR,
@@ -398,6 +402,7 @@ impl Workspace {
                 } else {
                     &name
                 },
+                row.author_avatar_url.as_deref().filter(|_| !private),
                 theme::Presence::None,
                 theme::WORKSPACE,
             );
@@ -818,7 +823,8 @@ fn measure(ui: &Ui, chat: &ConversationViewModel, width: f32, private: bool) -> 
         let text = if private {
             "Hidden in privacy mode".to_owned()
         } else {
-            row.render.content.clone()
+            // Readable mentions and custom emoji; editing keeps the raw text.
+            row.display_content.clone()
         };
         let mut job = egui::text::LayoutJob::single_section(
             text,

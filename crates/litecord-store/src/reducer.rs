@@ -188,6 +188,9 @@ pub fn reduce(
 
         DiscordEvent::ConversationUpserted { conversation } => {
             conversations::upsert(tx, conversation, origin, observed_at)?;
+            if let Some(user_id) = conversation.recipient_id {
+                want_profile(tx, user_id, origin, observed_at, &mut followups)?;
+            }
         }
 
         DiscordEvent::MessageWriteObserved {
@@ -255,6 +258,13 @@ pub fn reduce(
 
         DiscordEvent::RelationshipsSnapshot { entries } => {
             relationships::replace_all(tx, entries, origin, observed_at)?;
+            for (rel, _) in entries
+                .iter()
+                .filter(|(_, user)| user.is_none())
+                .take(PROFILE_FETCH_CAP)
+            {
+                want_profile(tx, rel.user_id, origin, observed_at, &mut followups)?;
+            }
             if env.source == litecord_types::provenance::DiscordSource::UserSession {
                 crate::repos::outbound::observe_relationships(tx)?;
             }
@@ -288,6 +298,13 @@ pub fn reduce(
         } => {
             for c in list {
                 conversations::upsert(tx, c, origin, observed_at)?;
+            }
+            for user_id in list
+                .iter()
+                .filter_map(|c| c.recipient_id)
+                .take(PROFILE_FETCH_CAP)
+            {
+                want_profile(tx, user_id, origin, observed_at, &mut followups)?;
             }
         }
 
@@ -444,6 +461,27 @@ fn account_channel_conversation(
             origin,
             observed_at,
         )?;
+    }
+    Ok(())
+}
+
+/// Most profile fetches one snapshot may queue; the rest follow on later
+/// snapshots or when the user is next seen.
+const PROFILE_FETCH_CAP: usize = 100;
+
+/// A conversation or relationship refers to `user_id`. Without a profile the
+/// UI can only say "Unknown user", so keep a placeholder row and ask for the
+/// profile (again, for a placeholder left by an earlier failed fetch).
+fn want_profile(
+    tx: &WriteTx<'_>,
+    user_id: litecord_types::UserId,
+    origin: litecord_types::provenance::Origin,
+    observed_at: litecord_types::Timestamp,
+    followups: &mut Vec<Followup>,
+) -> StoreResult<()> {
+    let created = users::ensure_stub(tx, user_id, origin, observed_at)?;
+    if created || users::get(tx, user_id)?.is_some_and(|u| u.is_stub) {
+        followups.push(Followup::Hydrate(HydrationKey::User { user_id }));
     }
     Ok(())
 }

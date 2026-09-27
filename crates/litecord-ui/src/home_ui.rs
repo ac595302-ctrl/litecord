@@ -198,7 +198,7 @@ impl Workspace {
             };
             let painter = ui.painter();
             let c = egui::pos2(rect.left() + 38.0, rect.top() + 38.0);
-            paint_conversation_avatar(painter, c, 46.0, r, &title, theme::CARD);
+            paint_conversation_avatar(painter, c, 46.0, r, &title, theme::CARD, !self.private());
             let x = rect.left() + 74.0;
             let time = r
                 .last_activity_at
@@ -460,11 +460,12 @@ impl Workspace {
             let resp = kit::card_at(ui, rect, ui.id().with(("online", i)), None);
             let name = self.display(f.alias.as_deref().unwrap_or(&f.display_name));
             let painter = ui.painter();
-            theme::paint_avatar(
+            theme::paint_avatar_url(
                 painter,
                 egui::pos2(rect.left() + 30.0, rect.center().y),
                 38.0,
                 &name,
+                f.avatar_url.as_deref().filter(|_| !self.private()),
                 theme::Presence::from_status(f.status.as_str()),
                 theme::CARD,
             );
@@ -705,9 +706,15 @@ impl Workspace {
                     }
                     let c = egui::pos2(rect.left() + 42.0, rect.center().y);
                     match &l.row {
-                        Some(r) => {
-                            paint_conversation_avatar(painter, c, 34.0, r, &l.who, theme::CARD)
-                        }
+                        Some(r) => paint_conversation_avatar(
+                            painter,
+                            c,
+                            34.0,
+                            r,
+                            &l.who,
+                            theme::CARD,
+                            !self.private(),
+                        ),
                         None => kit::paint_bubble(painter, c, ph::SPARKLE, kit::TEAL, 34.0),
                     }
                     let x = rect.left() + 70.0;
@@ -849,6 +856,7 @@ impl Workspace {
             } else {
                 theme::SIDEBAR
             },
+            !self.private(),
         );
         let x = rect.left() + 64.0;
         let time = r
@@ -937,11 +945,12 @@ impl Workspace {
         let name = self.display(&s.account.display_name);
         let (r, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 88.0), egui::Sense::hover());
-        theme::paint_avatar(
+        theme::paint_avatar_url(
             ui.painter(),
             egui::pos2(r.left() + 42.0, r.top() + 42.0),
             84.0,
             &name,
+            s.account.avatar_url.as_deref().filter(|_| !self.private()),
             if s.diagnostics.session.is_online() {
                 theme::Presence::Online
             } else {
@@ -1175,11 +1184,12 @@ impl Workspace {
                 let name = self.display(f.alias.as_deref().unwrap_or(&f.display_name));
                 let presence = theme::Presence::from_status(f.status.as_str());
                 let painter = ui.painter();
-                theme::paint_avatar(
+                theme::paint_avatar_url(
                     painter,
                     egui::pos2(rect.left() + 18.0, rect.center().y),
                     34.0,
                     &name,
+                    f.avatar_url.as_deref().filter(|_| !self.private()),
                     presence,
                     theme::CARD,
                 );
@@ -1295,7 +1305,9 @@ pub(crate) fn paint_conversation_avatar(
     r: &ConversationRow,
     title: &str,
     ring: egui::Color32,
+    show_avatar: bool,
 ) {
+    let avatar_url = r.recipient_avatar_url.as_deref().filter(|_| show_avatar);
     match r.kind {
         ConversationKind::GroupDm => {
             kit::paint_group(painter, center, size, ph::USERS, theme::SECONDARY)
@@ -1303,11 +1315,12 @@ pub(crate) fn paint_conversation_avatar(
         ConversationKind::GuildChannel => {
             kit::paint_group(painter, center, size, ph::HASH, theme::SECONDARY)
         }
-        _ => theme::paint_avatar(
+        _ => theme::paint_avatar_url(
             painter,
             center,
             size,
             title,
+            avatar_url,
             r.recipient_status.map_or(theme::Presence::None, |p| {
                 theme::Presence::from_status(p.as_str())
             }),

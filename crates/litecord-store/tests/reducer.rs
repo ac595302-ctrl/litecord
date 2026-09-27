@@ -8,7 +8,7 @@ use litecord_core::events::{DiscordEvent, HydrationKey, SourceEnvelope, UnifiedE
 use litecord_types::provenance::{DiscordSource, Origin};
 use litecord_types::social::{
     Channel, ChannelAccess, ChannelCapabilities, ChannelKind, Conversation, ConversationKind,
-    Guild, Message, Presence, PresenceStatus, Relationship, RelationshipKind,
+    Guild, Message, Presence, PresenceStatus, Relationship, RelationshipKind, User,
 };
 use litecord_types::trust::AgentVisibility;
 use litecord_types::{ConversationId, MessageId, Revision, Timestamp, UserId};
@@ -1037,4 +1037,120 @@ fn messages_page_extracts_memory_only_for_recent_messages() {
         .value
         .followups
         .contains(&Followup::Hydrate(HydrationKey::DmSummaries)));
+}
+
+/// A DM whose recipient has no profile yet keeps a placeholder and asks for
+/// the profile, so the conversation can show a name instead of an ID. A known
+/// recipient asks for nothing.
+#[test]
+fn dm_with_unknown_recipient_asks_for_the_profile_once_known_stops() {
+    let db = Database::open_in_memory().unwrap();
+    let dm = |id: u64, recipient: u64| Conversation {
+        id: ConversationId(id),
+        kind: ConversationKind::DirectMessage,
+        recipient_id: Some(UserId(recipient)),
+        guild_id: None,
+        lobby_id: None,
+        title: None,
+        last_message_id: None,
+        last_activity_at: None,
+    };
+    let wants = |f: &[Followup], user: u64| {
+        f.contains(&Followup::Hydrate(HydrationKey::User {
+            user_id: UserId(user),
+        }))
+    };
+    let apply = |event: DiscordEvent, at: i64| {
+        reducer::apply(
+            &db,
+            &envelope(DiscordSource::Synthetic, at, event),
+            &ReducerConfig::default(),
+        )
+        .unwrap()
+        .value
+        .followups
+    };
+
+    let f = apply(
+        DiscordEvent::ConversationUpserted {
+            conversation: dm(1, 7),
+        },
+        1_000,
+    );
+    assert!(wants(&f, 7));
+    assert!(
+        db.read(|r| users::get(r, UserId(7)))
+            .unwrap()
+            .unwrap()
+            .is_stub
+    );
+
+    // A snapshot that still lacks the profile asks again (e.g. after a
+    // failed fetch), capped per snapshot.
+    let f = apply(
+        DiscordEvent::ConversationsSnapshot {
+            conversations: vec![dm(1, 7)],
+        },
+        2_000,
+    );
+    assert!(wants(&f, 7));
+
+    apply(
+        DiscordEvent::UserUpserted {
+            user: User {
+                id: UserId(7),
+                username: "grace".into(),
+                global_name: Some("Grace".into()),
+                avatar_url: None,
+                is_bot: false,
+                is_provisional: false,
+            },
+        },
+        3_000,
+    );
+    let f = apply(
+        DiscordEvent::ConversationUpserted {
+            conversation: dm(1, 7),
+        },
+        4_000,
+    );
+    assert!(!wants(&f, 7));
+    let f = apply(
+        DiscordEvent::ConversationsSnapshot {
+            conversations: vec![dm(1, 7)],
+        },
+        5_000,
+    );
+    assert!(!wants(&f, 7));
+}
+
+#[test]
+fn relationship_snapshot_without_profiles_asks_for_them() {
+    let db = Database::open_in_memory().unwrap();
+    let committed = reducer::apply(
+        &db,
+        &envelope(
+            DiscordSource::Synthetic,
+            1_000,
+            DiscordEvent::RelationshipsSnapshot {
+                entries: vec![(
+                    Relationship {
+                        user_id: UserId(8),
+                        discord: RelationshipKind::Friend,
+                        game: RelationshipKind::None,
+                        since: None,
+                    },
+                    None,
+                )],
+            },
+        ),
+        &ReducerConfig::default(),
+    )
+    .unwrap();
+    assert!(committed
+        .value
+        .followups
+        .contains(&Followup::Hydrate(HydrationKey::User {
+            user_id: UserId(8)
+        })));
 }

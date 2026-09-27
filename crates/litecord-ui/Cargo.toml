@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-screenshots = ["dep:image"]
+screenshots = []
 browser-login = ["dep:wry", "dep:url", "dep:tempfile", "dep:getrandom", "dep:zeroize"]
 
 [dependencies]
@@ -19,7 +19,10 @@ litecord-actions.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 eframe = { version = "=0.34.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# PNG for screenshots; PNG/JPEG/WebP/GIF for Discord CDN avatars.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Discord CDN avatars: egui's HTTP and image loaders.
+egui_extras = { version = "=0.34.3", default-features = false, features = ["http", "image"] }
 # Local wall-clock time for timestamps (the store keeps UTC).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 

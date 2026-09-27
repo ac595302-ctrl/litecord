@@ -96,7 +96,7 @@ impl LitecordApp {
             for rec in repos::history_sync::list(r)? {
                 let title = repos::conversations::get(r, rec.conversation_id)?
                     .and_then(|c| c.conversation.title.map(|t| t.to_string()))
-                    .unwrap_or_else(|| format!("Conversation {}", rec.conversation_id));
+                    .unwrap_or_else(|| "Conversation".to_owned());
                 rows.push(HistorySyncRow {
                     conversation_id: rec.conversation_id,
                     title,

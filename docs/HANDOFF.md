@@ -72,6 +72,33 @@ target; see `UI_QA.md` for the sampling limits and reproducible checks.
 
 ## How to continue (prioritized)
 
+### Names, avatars, emoji, friend requests — September 27, 2026 (new-main-temp)
+
+Traced end to end (adapter → reducer → store → views → UI); every fix is in
+the shared layers, none in the account adapter or its write gate.
+
+* **Names showing IDs.** `services::name_of` printed `user {id}` for missing
+  or placeholder users, and nothing ever fetched a DM recipient's profile:
+  `ConversationUpserted`/`ConversationsSnapshot` (the `conversations()` port
+  returns no user objects) and `RelationshipsSnapshot` created placeholders
+  without a fetch. The reducer now queues `HydrationKey::User` for referenced
+  users without a profile (capped at 100 per snapshot); views say "Unknown
+  user" while it is pending.
+* **Avatars.** URLs reached the view models but the UI never loaded images.
+  `egui_extras` loaders are installed; `theme::paint_avatar_url` draws the CDN
+  image (`?size=64|128`) clipped to a circle, initials while loading or on
+  failure, and nothing in privacy mode. Rows gained `recipient_avatar_url` /
+  `author_avatar_url`.
+* **Emoji.** The fonts lacked U+FE0F (in most emoji copied from Discord),
+  skin tones and Unicode 13+ emoji, so they drew as boxes. Bundled Noto Emoji
+  (OFL, monochrome; modifiers made zero-width; egui cannot draw colour emoji
+  or join ZWJ sequences). `markup::display` renders `<@id>`, `<:name:id>`,
+  `<#id>`, `<@&id>`, `<t:…>` for reading via `MessageRow::display_content`;
+  stored text and editing stay raw.
+* **Friend requests.** Accept/Decline already exist in Litecord; they are
+  disabled while account writes are off (the read-only default from
+  508d8d8). The requests list now says why and links to Settings.
+
 ### UI work — September 26, 2026
 
 Stages 1 and 2 are complete: `UI_DESIGN.md` defines the visual contract,

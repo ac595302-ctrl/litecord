@@ -46,11 +46,37 @@ fn me(conn: &Connection) -> Result<Option<UserId>> {
     Ok(repos::accounts::current_user(conn)?.map(|a| a.user_id))
 }
 
+/// A known user's display name. Placeholder rows (a reference whose profile
+/// is still being fetched) read "Unknown user", never the raw ID.
 fn name_of(conn: &Connection, id: UserId) -> Result<String> {
+    Ok(known_name(conn, id)?.unwrap_or_else(|| "Unknown user".to_owned()))
+}
+
+fn known_name(conn: &Connection, id: UserId) -> Result<Option<String>> {
     Ok(repos::users::get(conn, id)?
         .filter(|u| !u.is_stub)
         .map(|u| u.user.display_name().to_owned())
-        .unwrap_or_else(|| format!("user {id}")))
+        .filter(|n| !n.trim().is_empty()))
+}
+
+fn avatar_of(conn: &Connection, id: UserId) -> Result<Option<String>> {
+    Ok(repos::users::get(conn, id)?
+        .filter(|u| !u.is_stub)
+        .and_then(|u| u.user.avatar_url.map(|a| a.to_string())))
+}
+
+/// Discord markup (`<@id>`, `<:emoji:id>`, ...) rendered for reading, with
+/// mentioned users' names looked up. The stored text is unchanged.
+fn display_text(conn: &Connection, content: &str) -> Result<String> {
+    let mut names = std::collections::HashMap::new();
+    for id in crate::markup::mentioned_users(content).into_iter().take(20) {
+        if let Some(n) = known_name(conn, id)? {
+            names.insert(id, n);
+        }
+    }
+    Ok(crate::markup::display(content, &mut |id| {
+        names.get(&id).cloned()
+    }))
 }
 
 fn title_of(conn: &Connection, c: &Conversation) -> Result<String> {
@@ -59,7 +85,10 @@ fn title_of(conn: &Connection, c: &Conversation) -> Result<String> {
     }
     match c.recipient_id {
         Some(r) => name_of(conn, r),
-        None => Ok(format!("Conversation {}", c.id)),
+        None => Ok(match c.kind {
+            ConversationKind::GroupDm => "Group chat".to_owned(),
+            _ => "Conversation".to_owned(),
+        }),
     }
 }
 
@@ -97,15 +126,16 @@ impl LitecordApp {
                 let note = repos::notes::get_note(r, rel.user_id)?;
                 let dm = repos::conversations::find_dm_by_recipient(r, rel.user_id)?;
                 let (display_name, username, avatar, presence, origin) = match &rec.user {
-                    Some(u) => (
+                    Some(u) if !u.is_stub => (
                         u.user.display_name().to_owned(),
                         u.user.username.to_string(),
                         u.user.avatar_url.as_ref().map(|a| a.to_string()),
                         u.presence.clone(),
                         u.origin,
                     ),
-                    None => (
-                        rel.user_id.to_string(),
+                    // Profile not fetched yet: never show the raw ID.
+                    _ => (
+                        "Unknown user".to_owned(),
                         String::new(),
                         None,
                         Presence::default(),
@@ -171,14 +201,21 @@ impl LitecordApp {
                         Some(u) => repos::users::get(r, u)?.map(|u| u.presence.status),
                         None => None,
                     };
+                    let recipient_avatar_url = match conv.recipient_id {
+                        Some(u) => avatar_of(r, u)?,
+                        None => None,
+                    };
                     rows.push(ConversationRow {
                         conversation_id: conv.id,
                         kind: conv.kind,
                         title: title_of(r, conv)?,
                         recipient_id: conv.recipient_id,
                         recipient_status,
+                        recipient_avatar_url,
                         last_activity_at: conv.last_activity_at,
-                        last_message_preview: last.map(|m| preview(&m.message.content)),
+                        last_message_preview: last
+                            .map(|m| display_text(r, &m.message.content).map(|t| preview(&t)))
+                            .transpose()?,
                         awaiting_reply: pending.contains(&conv.id),
                         agent_visibility: c.visibility.unwrap_or(default_vis),
                         origin: c.origin,
@@ -295,9 +332,12 @@ impl LitecordApp {
                     },
                     &ctx,
                 );
+                let display_content = display_text(r, &render.content)?;
                 messages.push(MessageRow {
                     message_id: msg.id,
                     author_id: msg.author_id,
+                    author_avatar_url: avatar_of(r, msg.author_id)?,
+                    display_content,
                     is_mine: Some(msg.author_id) == me,
                     sent_at: msg.sent_at,
                     edited: msg.edited_at.is_some(),
@@ -311,7 +351,9 @@ impl LitecordApp {
             let open_drafts = repos::drafts::list(r, Some(id), Some(&[DraftStatus::Open]), 10)?;
             let history_error = repos::sync_state::get(
                 r,
-                &HydrationKey::DmConversation { conversation_id: id },
+                &HydrationKey::DmConversation {
+                    conversation_id: id,
+                },
             )?
             .and_then(|state| state.last_error);
             Ok(ConversationViewModel {

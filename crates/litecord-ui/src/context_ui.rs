@@ -320,11 +320,12 @@ impl Workspace {
                 let name = self.display(c.alias.as_deref().unwrap_or(&c.display_name));
                 let presence = theme::Presence::from_status(c.presence.status.as_str());
                 let (r, _) = ui.allocate_exact_size(egui::vec2(width, 90.0), egui::Sense::hover());
-                theme::paint_avatar(
+                theme::paint_avatar_url(
                     ui.painter(),
                     egui::pos2(r.left() + 43.0, r.top() + 44.0),
                     86.0,
                     &name,
+                    c.avatar_url.as_deref().filter(|_| !self.private()),
                     presence,
                     theme::INSPECTOR,
                 );

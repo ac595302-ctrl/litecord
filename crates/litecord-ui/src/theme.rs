@@ -66,6 +66,9 @@ const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold-sub
 const PHOSPHOR_FILL: &[u8] = include_bytes!("../assets/fonts/Phosphor-Fill-subset.ttf");
 const PHOSPHOR_REGULAR: &[u8] = include_bytes!("../assets/fonts/Phosphor-Regular-subset.ttf");
 const PHOSPHOR_BOLD: &[u8] = include_bytes!("../assets/fonts/Phosphor-Bold-subset.ttf");
+/// Noto Emoji (OFL): current Unicode emoji, with the invisible variation
+/// selectors and skin-tone modifiers Discord text carries made zero-width.
+const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
 
 /// Inter (OFL) for text, with egui's defaults as fallback for other scripts
 /// and emoji; Phosphor (MIT) for icons.
@@ -82,11 +85,16 @@ pub fn install_fonts(ctx: &egui::Context) {
     add(&mut fonts, "ph-fill", PHOSPHOR_FILL, 0.0);
     add(&mut fonts, "ph-line", PHOSPHOR_REGULAR, 0.0);
     add(&mut fonts, "ph-bold", PHOSPHOR_BOLD, 0.0);
-    let fallbacks = fonts
-        .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
+    add(&mut fonts, "noto-emoji", NOTO_EMOJI, 0.0);
+    // Emoji right after the text face, ahead of egui's older emoji font.
+    let mut fallbacks = vec!["noto-emoji".to_owned()];
+    fallbacks.extend(
+        fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default(),
+    );
     let family = |first: &str| {
         let mut v = vec![first.to_owned()];
         v.extend(fallbacks.iter().cloned());
@@ -112,6 +120,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(ICON_BOLD.into()), family("ph-bold"));
+    if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+        mono.insert(1.min(mono.len()), "noto-emoji".to_owned());
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -433,6 +444,59 @@ pub fn paint_avatar(
     paint_presence(painter, center, size, presence, ring);
 }
 
+/// Like [`paint_avatar`], but draws the user's Discord avatar image when
+/// `url` is known and loaded; the initials disc shows while it loads, when
+/// it fails, or when there is no avatar.
+pub fn paint_avatar_url(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    name: &str,
+    url: Option<&str>,
+    presence: Presence,
+    ring: Color32,
+) {
+    if !url.is_some_and(|url| paint_avatar_image(painter, center, size, url)) {
+        paint_avatar(painter, center, size, name, Presence::None, ring);
+    }
+    paint_presence(painter, center, size, presence, ring);
+}
+
+/// Draws the image at `url` clipped to a circle; false until it is loaded.
+fn paint_avatar_image(painter: &egui::Painter, center: egui::Pos2, size: f32, url: &str) -> bool {
+    let px = size * painter.ctx().pixels_per_point();
+    // Discord's CDN serves the size asked for; small avatars stay small in
+    // memory. Other URLs are loaded as they are.
+    let edge: u32 = if px <= 64.0 { 64 } else { 128 };
+    let uri = if url.starts_with("https://cdn.discordapp.com/") && !url.contains('?') {
+        format!("{url}?size={edge}")
+    } else {
+        url.to_owned()
+    };
+    let hint = egui::SizeHint::Size {
+        width: edge,
+        height: edge,
+        maintain_aspect_ratio: true,
+    };
+    match painter
+        .ctx()
+        .try_load_texture(&uri, egui::TextureOptions::LINEAR, hint)
+    {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            let rect = egui::Rect::from_center_size(center, egui::vec2(size, size));
+            let radius = egui::CornerRadius::same((size * 0.5).min(255.0) as u8);
+            painter.add(
+                egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(
+                    texture.id,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                ),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Presence marker at the bottom-right of an avatar of `size` at `center`.
 pub fn paint_presence(
     painter: &egui::Painter,
@@ -660,4 +724,41 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str) {
 /// A selectable sidebar/filter row with an optional trailing count.
 pub fn nav_row(ui: &mut Ui, label: &str, count: Option<usize>, selected: bool) -> egui::Response {
     crate::kit::side_item(ui, None, label, count, selected)
+}
+
+#[cfg(test)]
+mod emoji_font_tests {
+    use super::*;
+
+    /// Emoji pasted from Discord carry variation selectors and skin tones;
+    /// newer emoji need the bundled font. None of them may fall back to the
+    /// replacement box.
+    #[test]
+    fn discord_emoji_have_glyphs_and_modifiers_take_no_space() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let font = FontId::proportional(16.0);
+        for c in [
+            '😂',
+            '❤',
+            '\u{FE0F}',
+            '🫠',
+            '🥹',
+            '🫡',
+            '\u{1F3FD}',
+            '\u{200D}',
+            '🇺',
+        ] {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&font, c)),
+                "missing glyph U+{:04X}",
+                c as u32
+            );
+        }
+        for c in ['\u{FE0F}', '\u{1F3FD}'] {
+            let w = ctx.fonts_mut(|f| f.glyph_width(&font, c));
+            assert!(w < 0.5, "U+{:04X} should be zero-width, was {w}", c as u32);
+        }
+    }
 }

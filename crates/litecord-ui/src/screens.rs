@@ -178,11 +178,12 @@ impl Workspace {
         };
         let r = Rect::from_center_size(c, egui::vec2(size, size));
         let response = ui.interact(r, ui.id().with("account_avatar"), Sense::click());
-        theme::paint_avatar(
+        theme::paint_avatar_url(
             ui.painter(),
             c,
             size,
             &name,
+            s.account.avatar_url.as_deref().filter(|_| !self.private()),
             if s.diagnostics.session.is_online() {
                 theme::Presence::Online
             } else {
@@ -284,11 +285,14 @@ impl Workspace {
                         ConversationKind::GuildChannel => {
                             kit::paint_group(painter, c, 48.0, ph::HASH, theme::SECONDARY)
                         }
-                        _ => theme::paint_avatar(
+                        _ => theme::paint_avatar_url(
                             painter,
                             c,
                             48.0,
                             &title,
+                            r.recipient_avatar_url
+                                .as_deref()
+                                .filter(|_| !self.private()),
                             r.recipient_status.map_or(theme::Presence::None, |p| {
                                 theme::Presence::from_status(p.as_str())
                             }),

@@ -178,11 +178,12 @@ impl Workspace {
             theme::Presence::None
         };
         let painter = ui.painter();
-        theme::paint_avatar(
+        theme::paint_avatar_url(
             painter,
             egui::pos2(rect.left() + 32.0, rect.center().y),
             44.0,
             &name,
+            r.avatar_url.as_deref().filter(|_| !self.private()),
             presence,
             if selected {
                 theme::SELECTED
@@ -398,11 +399,12 @@ impl Workspace {
             let resp = kit::card_at(ui, rect, ui.id().with(("top", i)), None);
             let name = self.display(f.alias.as_deref().unwrap_or(&f.display_name));
             let painter = ui.painter();
-            theme::paint_avatar(
+            theme::paint_avatar_url(
                 painter,
                 egui::pos2(rect.left() + 42.0, rect.top() + 42.0),
                 56.0,
                 &name,
+                f.avatar_url.as_deref().filter(|_| !self.private()),
                 theme::Presence::from_status(f.status.as_str()),
                 theme::CARD,
             );
@@ -556,11 +558,12 @@ impl Workspace {
                 let resp = kit::card_at(ui, rect, ui.id().with(("ogrid", i)), None);
                 let name = self.display(f.alias.as_deref().unwrap_or(&f.display_name));
                 let painter = ui.painter();
-                theme::paint_avatar(
+                theme::paint_avatar_url(
                     painter,
                     egui::pos2(rect.left() + 28.0, rect.center().y),
                     38.0,
                     &name,
+                    f.avatar_url.as_deref().filter(|_| !self.private()),
                     theme::Presence::from_status(f.status.as_str()),
                     theme::CARD,
                 );
@@ -780,17 +783,25 @@ impl Workspace {
                 .capabilities
                 .is_usable(Capability::FriendRequests);
         let blocking = enabled && s.diagnostics.capabilities.is_usable(Capability::Blocking);
+        let incoming = rows
+            .iter()
+            .any(|r| r.relationship == RelationshipKind::PendingIncoming);
+        if incoming && !requests && !self.busy {
+            self.requests_disabled_note(ui, s);
+            ui.add_space(8.0);
+        }
         let mut act: Option<(usize, RelationshipAction, bool)> = None;
         kit::card_grid(ui, rows.len(), 76.0, 10.0, 300.0, 2, |ui, i, rect| {
             let r = &rows[i];
             let resp = kit::card_at(ui, rect, ui.id().with(("req", i)), None);
             let name = self.display(r.alias.as_deref().unwrap_or(&r.display_name));
             let painter = ui.painter();
-            theme::paint_avatar(
+            theme::paint_avatar_url(
                 painter,
                 egui::pos2(rect.left() + 34.0, rect.center().y),
                 44.0,
                 &name,
+                r.avatar_url.as_deref().filter(|_| !self.private()),
                 theme::Presence::None,
                 theme::CARD,
             );
@@ -882,6 +893,62 @@ impl Workspace {
                 self.send(Command::Relationship(r.user_id, action));
             }
         }
+    }
+}
+
+impl Workspace {
+    /// Why Accept/Decline are unavailable, so answering a request never
+    /// looks like it has to happen in Discord.
+    fn requests_disabled_note(&mut self, ui: &mut Ui, s: &Snapshot) {
+        let account =
+            s.diagnostics.backend_mode == litecord_types::capability::BackendMode::UserSession;
+        let (text, settings) = if self.private() {
+            (
+                "Privacy mode is on. Turn it off to answer friend requests.",
+                false,
+            )
+        } else if !s.diagnostics.session.is_online() {
+            (
+                "Litecord is offline. Requests can be answered once it reconnects.",
+                false,
+            )
+        } else if account {
+            (
+                "Answering friend requests from Litecord needs account writes, which are off. \
+                 You can allow them in Settings (read the warning there first).",
+                true,
+            )
+        } else {
+            (
+                "This Discord connection cannot answer friend requests.",
+                false,
+            )
+        };
+        kit::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                kit::bubble(ui, ph::INFO, kit::BLUE, 32.0);
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - 130.0).max(120.0));
+                    kit::para(ui, text, theme::regular(14.0), theme::BODY);
+                });
+                if settings {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::button_ex(
+                            ui,
+                            kit::Kind::Secondary,
+                            Some(ph::GEAR_SIX),
+                            "Settings",
+                            32.0,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.navigate(Destination::Settings);
+                        }
+                    });
+                }
+            });
+        });
     }
 }
 

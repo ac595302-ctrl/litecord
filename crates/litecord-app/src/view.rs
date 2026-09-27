@@ -55,6 +55,8 @@ pub struct ConversationRow {
     pub title: String,
     pub recipient_id: Option<UserId>,
     pub recipient_status: Option<PresenceStatus>,
+    /// The DM partner's Discord CDN avatar, when their profile is known.
+    pub recipient_avatar_url: Option<String>,
     pub last_activity_at: Option<Timestamp>,
     pub last_message_preview: Option<String>,
     pub awaiting_reply: bool,
@@ -72,6 +74,11 @@ pub struct ConversationListViewModel {
 pub struct MessageRow {
     pub message_id: MessageId,
     pub author_id: UserId,
+    /// The author's Discord CDN avatar, when their profile is known.
+    pub author_avatar_url: Option<String>,
+    /// `render.content` with Discord markup made readable (mentions, custom
+    /// emoji). Display only: editing and replies use `render.content`.
+    pub display_content: String,
     pub is_mine: bool,
     pub sent_at: Timestamp,
     pub edited: bool,

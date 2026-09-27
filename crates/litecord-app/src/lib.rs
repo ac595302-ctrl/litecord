@@ -10,6 +10,7 @@ mod app;
 pub mod automations;
 pub mod freshness;
 pub mod history;
+pub mod markup;
 pub mod omni;
 pub mod people;
 mod recovery;

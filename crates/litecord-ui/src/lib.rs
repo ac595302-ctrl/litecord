@@ -58,6 +58,8 @@ pub fn run_with_options(
         },
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
+            // Loads Discord CDN avatars (fetched once, then cached in memory).
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             let mut workspace = workspace::Workspace::new(app, runtime, cc.egui_ctx.clone());
             if let Some(destination) = options.destination {
                 workspace.navigate(destination);
