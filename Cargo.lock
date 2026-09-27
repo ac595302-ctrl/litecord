@@ -2872,6 +2872,7 @@ dependencies = [
 name = "litecord-ui"
 version = "0.1.0"
 dependencies = [
+ "accesskit_consumer 0.35.0",
  "chrono",
  "discord-adapter",
  "eframe",

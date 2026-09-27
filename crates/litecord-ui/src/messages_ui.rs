@@ -537,11 +537,14 @@ impl Workspace {
         response.context_menu(|ui| {
             let reply = ui
                 .add_enabled(
-                    chat.capabilities.can_reply && !self.busy,
+                    chat.capabilities.can_reply
+                        && chat.capabilities.can_send
+                        && chat.capabilities.send_identity.is_some()
+                        && !self.busy,
                     egui::Button::new("Reply"),
                 )
                 .on_disabled_hover_text(
-                    "Replies need the bot identity; the Social SDK sends plain messages only",
+                    "Replies are unavailable for this conversation or connection",
                 );
             if reply.clicked() {
                 self.replying = Some((
@@ -549,9 +552,8 @@ impl Workspace {
                     row.message_id,
                     row.render.author_display.clone(),
                 ));
-                ui.memory_mut(|m| {
-                    m.request_focus(egui::Id::new(("composer", chat.conversation_id)))
-                });
+                self.pending_composer_focus = Some(chat.conversation_id);
+                ui.ctx().request_repaint();
                 ui.close();
             }
             if ui.button("Open in Discord").clicked() {
@@ -615,6 +617,10 @@ impl Workspace {
             (false, true) => format!("Message {title}…"),
         };
         let busy = self.busy;
+        // id_salt is scoped by the UI: a separately constructed Id is not the
+        // TextEdit's ID. Focus only the response of an enabled, rendered widget.
+        let focus_composer =
+            self.pending_composer_focus.take() == Some(id) && !busy && can_send_here;
         let reply_to = self
             .replying
             .as_ref()
@@ -706,6 +712,9 @@ impl Workspace {
                                 .desired_rows(1)
                                 .desired_width(w),
                         );
+                        if focus_composer {
+                            response.request_focus();
+                        }
                         // Enter sends; Shift+Enter inserts a newline.
                         submit = response.has_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);

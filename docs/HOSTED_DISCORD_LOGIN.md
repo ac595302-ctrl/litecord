@@ -79,10 +79,12 @@ not make the subsequent unofficial account transport supported. Do not treat
 this prototype as evidence of account safety or use it to avoid enforcement.
 
 The owner also reported a crash when selecting Reply from a server context menu.
-The saved local log shows an `accesskit_consumer` panic because the focused node
-ID was absent from the node list. This is an unresolved accessibility/focus
-issue; the precise reproduction and root cause need offline investigation.
-There is no evidence linking that UI panic to the account suspension.
+A synthetic menu interaction reproduced the same `accesskit_consumer` panic:
+the handler requested an unscoped ID instead of the UI-scoped composer ID.
+The fix defers focus to the actual TextEdit response on the next frame. Pointer
+and keyboard regression tests validate each accessibility tree using the
+Windows consumer. See `WINDOWS_PRESENTATION.md`. There is no evidence linking
+that UI panic to the account suspension.
 
 Next work should reproduce the Reply transition with synthetic messages, audit
 duplicate workers/reconnects/history queues/ambiguous writes with fake transports,

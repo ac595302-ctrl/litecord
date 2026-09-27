@@ -137,7 +137,7 @@ fn discord_session_connection(
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Experimental account sign-in uses Discord's unsupported password endpoint. Discord forbids account automation and may terminate accounts.",
+                    "Experimental account access is unofficial, including after browser sign-in. Discord forbids account automation and may terminate accounts.",
                 )
                 .color(theme::WARNING),
             );
@@ -651,6 +651,9 @@ mod tests {
         };
         let mut snapshot = bridge::snapshot(&app, selection.clone(), None).unwrap();
         snapshot.diagnostics.backend_mode = BackendMode::UserSession;
+        // This checks the signed-out form, regardless of how quickly the mock
+        // backend reaches Ready on a busy build machine.
+        snapshot.diagnostics.session = SessionState::LoggedOut;
         snapshot.account.origin = Some(Origin::DiscordUserSession);
         snapshot.account.display_name = "Example account".into();
 
@@ -674,9 +677,11 @@ mod tests {
 
         assert!(!rendered.contains(CREDENTIAL));
         assert!(
-            rendered.contains("Experimental account sign-in uses Discord's unsupported password endpoint. Discord forbids account automation and may terminate accounts.")
+            rendered.contains("Experimental account access is unofficial, including after browser sign-in. Discord forbids account automation and may terminate accounts.")
         );
         assert!(rendered.contains("Email or verified phone"));
+        #[cfg(all(feature = "browser-login", target_os = "windows"))]
+        assert!(rendered.contains("Open Discord sign-in"));
         assert!(rendered.contains("Discord account"));
         assert!(rendered.contains("Example account"));
 

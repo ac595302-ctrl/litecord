@@ -26,8 +26,11 @@ pub struct Workspace {
     pub editing_message: Option<(MessageId, String)>,
     /// Composer reply target: conversation, message, author name.
     pub replying: Option<(ConversationId, MessageId, String)>,
+    /// Applied by the actual composer response after the reply menu closes.
+    pub pending_composer_focus: Option<ConversationId>,
     pub deleting_message: Option<MessageId>,
     pub note_draft: Option<(UserId, String)>,
+    pub pending_note_focus: Option<UserId>,
     pub profile: LayoutProfile,
     pub edit_original: Option<LayoutProfile>,
     pub layout_token: String,
@@ -123,8 +126,10 @@ impl Workspace {
             busy: false,
             editing_message: None,
             replying: None,
+            pending_composer_focus: None,
             deleting_message: None,
             note_draft: None,
+            pending_note_focus: None,
             profile: LayoutProfile::new("profile_default".into(), "Default".into()),
             edit_original: None,
             layout_token: String::new(),
@@ -187,6 +192,8 @@ impl Workspace {
         self.bridge.selection.send_replace(self.selection.clone());
     }
     pub fn navigate(&mut self, d: Destination) {
+        self.pending_composer_focus = None;
+        self.pending_note_focus = None;
         self.selection.destination = d;
         self.filter.clear();
         self.request();
@@ -215,6 +222,8 @@ impl Workspace {
         self.saving_layout = self.busy;
     }
     pub fn open_conversation(&mut self, id: ConversationId) {
+        self.pending_composer_focus = None;
+        self.pending_note_focus = None;
         self.selection.destination = Destination::Messages;
         self.selection.conversation = Some(id);
         self.selection.contact = None;

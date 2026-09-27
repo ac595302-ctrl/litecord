@@ -417,8 +417,9 @@ impl Workspace {
                             }
                         }
                         ui.separator();
-                        if ui.button("Edit private note").clicked() {
-                            ui.ctx().memory_mut(|m| m.request_focus(egui::Id::new("contact_note")));
+                        if ui.add_enabled(!self.private(), egui::Button::new("Edit private note")).clicked() {
+                            self.pending_note_focus = Some(c.user_id);
+                            ui.close();
                         }
                         if ui.button("Open profile in Discord").clicked() {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
@@ -452,9 +453,9 @@ impl Workspace {
                         self.note_draft = Some((c.user_id, c.note.clone().unwrap_or_default()));
                     }
                     if let Some((_, text)) = self.note_draft.as_mut() {
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::multiline(text)
-                                .id(egui::Id::new("contact_note"))
+                                .id(egui::Id::new(("contact_note", c.user_id)))
                                 .font(theme::regular(15.0))
                                 .text_color(theme::lerp(theme::TEXT, theme::SECONDARY, 0.4))
                                 .frame(egui::Frame::NONE)
@@ -466,6 +467,10 @@ impl Workspace {
                                         .color(theme::MUTED),
                                 ),
                         );
+                        if self.pending_note_focus == Some(c.user_id) {
+                            self.pending_note_focus = None;
+                            response.request_focus();
+                        }
                     }
                     let changed = self.note_draft.as_ref().map(|n| n.1.as_str())
                         != Some(c.note.as_deref().unwrap_or(""));
