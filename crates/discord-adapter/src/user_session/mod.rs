@@ -30,6 +30,7 @@ pub fn allows_request(
             id(channel) && id(message)
         }
         (Method::Post, ["", "users", "@me", "channels"]) => true,
+        (Method::Put | Method::Delete, ["", "users", "@me", "relationships", user]) => id(user),
         _ => false,
     }
 }

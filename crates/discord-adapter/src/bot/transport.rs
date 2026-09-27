@@ -57,6 +57,7 @@ pub mod fake {
     struct Inner {
         responses: HashMap<String, Result<Value, BackendError>>,
         requests: Vec<RestRequest>,
+        followups: HashMap<String, (String, Value)>,
         /// Frames to feed each newly opened socket; the test keeps the sender.
         pending_socket: Option<(mpsc::Receiver<SocketEvent>, mpsc::UnboundedSender<String>)>,
         connects: usize,
@@ -94,6 +95,12 @@ pub mod fake {
                 .insert(method_and_path.to_owned(), Ok(body));
         }
 
+        pub fn respond_then(&self, route: &str, body: Value, next_route: &str, next_body: Value) {
+            self.respond(route, body);
+            self.lock()
+                .followups
+                .insert(route.to_owned(), (next_route.to_owned(), next_body));
+        }
         pub fn respond_error(&self, route: &str, error: BackendError) {
             self.lock().responses.insert(route.to_owned(), Err(error));
         }
@@ -121,6 +128,7 @@ pub mod fake {
         let m = match req.method {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Put => "PUT",
             Method::Patch => "PATCH",
             Method::Delete => "DELETE",
         };
@@ -137,6 +145,9 @@ pub mod fake {
         ) -> Result<Value, BackendError> {
             let mut g = self.lock();
             g.requests.push(req.clone());
+            if let Some((route, body)) = g.followups.remove(&key(req)) {
+                g.responses.insert(route, Ok(body));
+            }
             g.responses
                 .get(&key(req))
                 .cloned()

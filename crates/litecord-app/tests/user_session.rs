@@ -550,3 +550,118 @@ async fn uncertain_send_is_not_retried_and_exact_gateway_nonce_reconciles_it() {
     );
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_presence_and_relationship_actions_round_trip_through_engine() {
+    use litecord_types::actions::{PresenceDraft, RelationshipAction};
+    use litecord_types::social::{PresenceStatus, RelationshipKind};
+    let (_, transport, secrets) = setup();
+    let backend = Arc::new(UserSessionBackend::with_access(
+        Arc::new(transport.clone()),
+        secrets,
+        Arc::new(SystemClock),
+        litecord_types::capability::SessionAccessMode::ReadWrite,
+    ));
+    let app = LitecordApp::builder(LitecordConfig::default())
+        .backend(backend)
+        .in_memory()
+        .start()
+        .await
+        .unwrap();
+    let mut socket = transport.next_socket();
+    app.authenticate_session(Secret::new("dummy".into()))
+        .await
+        .unwrap();
+    ready(&mut socket).await;
+    state(&app, SessionState::Ready).await;
+    app.change_presence(PresenceDraft {
+        status: PresenceStatus::DoNotDisturb,
+        activity: None,
+    })
+    .await
+    .unwrap();
+    let presence: Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), socket.from_client.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(presence["op"], 3);
+    assert_eq!(presence["d"]["status"], "dnd");
+    assert!(
+        app.change_presence(PresenceDraft {
+            status: PresenceStatus::Online,
+            activity: None
+        })
+        .await
+        .is_err(),
+        "presence changes respect the cooldown"
+    );
+    let relation = |kind| json!([{"type":kind,"user":{"id":"3","username":"friend"}}]);
+    transport.respond("GET /users/@me/relationships", relation(3));
+    for (action, method, next, expected) in [
+        (
+            RelationshipAction::AcceptFriendRequest,
+            "PUT",
+            relation(1),
+            RelationshipKind::Friend,
+        ),
+        (
+            RelationshipAction::RemoveFriend,
+            "DELETE",
+            json!([]),
+            RelationshipKind::None,
+        ),
+        (
+            RelationshipAction::SendFriendRequest,
+            "PUT",
+            relation(4),
+            RelationshipKind::PendingOutgoing,
+        ),
+        (
+            RelationshipAction::Block,
+            "PUT",
+            relation(2),
+            RelationshipKind::Blocked,
+        ),
+        (
+            RelationshipAction::Unblock,
+            "DELETE",
+            json!([]),
+            RelationshipKind::None,
+        ),
+    ] {
+        transport.respond_then(
+            &format!("{method} /users/@me/relationships/3"),
+            Value::Null,
+            "GET /users/@me/relationships",
+            next,
+        );
+        app.change_relationship(litecord_types::UserId(3), action)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.database()
+                .read(|r| repos::relationships::get(r, litecord_types::UserId(3)))
+                .unwrap()
+                .map(|r| r.discord)
+                .unwrap_or(RelationshipKind::None),
+            expected
+        );
+    }
+    transport.respond("GET /users/@me/relationships", relation(3));
+    transport.respond_then(
+        "DELETE /users/@me/relationships/3",
+        Value::Null,
+        "GET /users/@me/relationships",
+        json!([]),
+    );
+    app.change_relationship(
+        litecord_types::UserId(3),
+        RelationshipAction::RejectFriendRequest,
+    )
+    .await
+    .unwrap();
+    app.shutdown().await;
+}

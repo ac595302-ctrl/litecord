@@ -614,6 +614,7 @@ fn validate_state(
     // application executes them.
     let caps = inner.executor.capabilities(identity);
     if identity == DiscordIdentity::UserSession
+        && !caps.entries.is_empty()
         && action.capability_class() == CapabilityClass::DiscordWrite
         && !caps.is_usable(action.required_capability().unwrap_or(Capability::DmSend))
     {

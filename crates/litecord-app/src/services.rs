@@ -957,6 +957,10 @@ impl LitecordApp {
             .await
     }
 
+    pub async fn change_presence(&self, presence: PresenceDraft) -> Result<ProposeOutcome> {
+        self.user_action(AgentAction::ChangePresence { presence })
+            .await
+    }
     /// Perform a user initiated relationship change through the Action Engine.
     pub async fn change_relationship(
         &self,

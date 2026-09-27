@@ -189,11 +189,22 @@ impl AgentGateway {
             return r;
         }
         let identity = match arg_str(&args, "send_as") {
-            None | Some("user") => DiscordIdentity::UserSocialSdk,
+            None | Some("user") => {
+                if self
+                    .db
+                    .read(|r| repos::accounts::current(r, DiscordIdentity::UserSession))?
+                    .is_some()
+                {
+                    DiscordIdentity::UserSession
+                } else {
+                    DiscordIdentity::UserSocialSdk
+                }
+            }
+            Some("account" | "user_session") => DiscordIdentity::UserSession,
             Some("bot") if name == "propose_message" => DiscordIdentity::ApplicationBot,
             Some(other) => {
                 return Err(ToolError::InvalidArguments(format!(
-                    "`send_as` must be \"user\" or \"bot\" (got {other:?})"
+                    "`send_as` must be \"user\", \"account\" or \"bot\" (got {other:?})"
                 )))
             }
         };

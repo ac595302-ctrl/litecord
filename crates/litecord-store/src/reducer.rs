@@ -159,10 +159,16 @@ pub fn reduce(
                 }
             }
             relationships::upsert(tx, relationship, origin, observed_at)?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::outbound::observe_relationships(tx)?;
+            }
         }
 
         DiscordEvent::RelationshipRemoved { user_id } => {
             relationships::remove(tx, *user_id, origin)?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::outbound::observe_relationships(tx)?;
+            }
         }
 
         DiscordEvent::GuildUpserted { guild } => {
@@ -249,6 +255,9 @@ pub fn reduce(
 
         DiscordEvent::RelationshipsSnapshot { entries } => {
             relationships::replace_all(tx, entries, origin, observed_at)?;
+            if env.source == litecord_types::provenance::DiscordSource::UserSession {
+                crate::repos::outbound::observe_relationships(tx)?;
+            }
         }
 
         DiscordEvent::GuildsSnapshot { guilds: list } => {

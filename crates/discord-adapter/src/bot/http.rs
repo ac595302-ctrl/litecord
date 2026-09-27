@@ -120,6 +120,7 @@ impl BotTransport for HttpTransport {
         let builder = match req.method {
             Method::Get => self.client.get(&url),
             Method::Post => self.client.post(&url),
+            Method::Put => self.client.put(&url),
             Method::Patch => self.client.patch(&url),
             Method::Delete => self.client.delete(&url),
         };

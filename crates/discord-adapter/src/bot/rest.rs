@@ -23,6 +23,7 @@ pub const API_BASE: &str = "https://discord.com/api/v10";
 pub enum Method {
     Get,
     Post,
+    Put,
     Patch,
     Delete,
 }

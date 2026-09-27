@@ -12,7 +12,7 @@ use litecord_core::ports::{
     BackendError, BackendResult, HistoryPage, HistoryPageRequest, SocialBackend,
 };
 use litecord_core::secrets::{Secret, SecretKey, SecretStore};
-use litecord_types::actions::MessageTarget;
+use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
 use litecord_types::capability::{
     AuthStep, BackendMode, Capability, CapabilitySet, HistoryCapability, SessionAccessMode,
     SupportLevel,
@@ -36,10 +36,20 @@ struct Metadata {
     channels: BTreeMap<ChannelId, Channel>,
     conversations: BTreeMap<ConversationId, Conversation>,
     relationships: BTreeMap<UserId, (Relationship, Option<User>)>,
+    presences: BTreeMap<UserId, Presence>,
+}
+
+#[derive(Debug)]
+struct GatewayWrite {
+    payload: String,
+    generation: u64,
+    response: tokio::sync::oneshot::Sender<BackendResult<()>>,
 }
 
 struct Shared {
     access: SessionAccessMode,
+    gateway_writes: Mutex<Option<tokio::sync::mpsc::Sender<GatewayWrite>>>,
+    last_presence_write: Mutex<Option<std::time::Instant>>,
     transport: Arc<dyn SessionTransport>,
     secrets: Arc<dyn SecretStore>,
     credential: Mutex<Option<Secret<String>>>,
@@ -126,6 +136,9 @@ impl Shared {
         if let Ok(mut state) = self.metadata.lock() {
             match event {
                 DiscordEvent::CurrentUser { user } => state.user = Some(user.clone()),
+                DiscordEvent::PresenceChanged { user_id, presence } => {
+                    state.presences.insert(*user_id, presence.clone());
+                }
                 DiscordEvent::GuildUpserted { guild } => {
                     state.guilds.insert(guild.id, guild.clone());
                 }
@@ -193,6 +206,8 @@ impl UserSessionBackend {
         Self {
             shared: Arc::new(Shared {
                 access,
+                gateway_writes: Mutex::new(None),
+                last_presence_write: Mutex::new(None),
                 transport,
                 secrets,
                 credential: Mutex::new(None),
@@ -372,13 +387,24 @@ impl UserSessionBackend {
         let generation = self.shared.generation.load(Ordering::Acquire);
         let sink = sink.with_session_guard(self.shared.generation.clone(), generation);
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(drive(self.shared.clone(), sink, cancel.clone()));
+        let (writes, rx) = tokio::sync::mpsc::channel(8);
+        *self
+            .shared
+            .gateway_writes
+            .lock()
+            .map_err(|_| BackendError::Offline)? = Some(writes);
+        let handle = tokio::spawn(drive(self.shared.clone(), sink, cancel.clone(), rx));
         *driver = Some(Driver { cancel, handle });
         Ok(())
     }
 }
 
-async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToken) {
+async fn drive(
+    shared: Arc<Shared>,
+    sink: IngestSender,
+    cancel: CancellationToken,
+    mut writes: tokio::sync::mpsc::Receiver<GatewayWrite>,
+) {
     let Ok(token) = shared.token() else {
         return;
     };
@@ -449,6 +475,17 @@ async fn drive(shared: Arc<Shared>, sink: IngestSender, cancel: CancellationToke
             let outputs = tokio::select! {
                 _=cancel.cancelled()=>{let _=tokio::time::timeout(Duration::from_secs(1),socket.close()).await;break 'connections;},
                 _=tokio::time::sleep_until(handshake_deadline), if session.state()!=crate::bot::gateway::State::Ready => session.on_close(None),
+                Some(command)=writes.recv()=>{
+                    let result=if command.generation != shared.generation.load(Ordering::Acquire) || session.state()!=crate::bot::gateway::State::Ready {
+                        Err(BackendError::NotConnected)
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(5),socket.send(command.payload)).await
+                            .map_err(|_|BackendError::DeliveryUncertain("Gateway submission timed out".into()))
+                            .and_then(|r|r.map_err(|_|BackendError::DeliveryUncertain("Gateway submission outcome unknown".into())))
+                    };
+                    let _=command.response.send(result);
+                    Vec::new()
+                },
                 frame=socket.recv()=>match frame {SocketEvent::Text(t)=>session.on_frame(&t,shared.clock.now(),0.5),SocketEvent::Closed(code)=>session.on_close(code)},
                 _=tokio::time::sleep(delay)=>session.on_tick(shared.clock.now()),
             };
@@ -599,10 +636,11 @@ impl SocialBackend for UserSessionBackend {
         ))
     }
     fn capabilities(&self) -> CapabilitySet {
-        let partial=SupportLevel::Partial{note:"Read-only experimental account access; visibility depends on the account and current protocol".into()};
+        let partial=SupportLevel::Partial{note:"Experimental account access; visibility depends on the account and current protocol".into()};
         let mut caps = CapabilitySet::default()
             .with(Capability::CurrentUser, partial.clone())
             .with(Capability::Friends, partial.clone())
+            .with(Capability::Presence, partial.clone())
             .with(Capability::DmList, partial.clone())
             .with(Capability::DmHistory, partial.clone())
             .with(Capability::GuildListing, partial.clone())
@@ -614,6 +652,9 @@ impl SocialBackend for UserSessionBackend {
                 Capability::DmEdit,
                 Capability::DmDelete,
                 Capability::Replies,
+                Capability::FriendRequests,
+                Capability::Blocking,
+                Capability::RichPresence,
             ] {
                 caps = caps.with(
                     cap,
@@ -809,6 +850,196 @@ impl SocialBackend for UserSessionBackend {
             })
             .await?;
         common::user(&raw).map_err(payload_error)
+    }
+    async fn presence(&self, user_id: UserId) -> BackendResult<Presence> {
+        self.shared.token()?;
+        self.shared
+            .metadata
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            .presences
+            .get(&user_id)
+            .cloned()
+            .ok_or(BackendError::NotFound {
+                what: "cached presence".into(),
+            })
+    }
+    async fn set_presence(&self, presence: &PresenceDraft) -> BackendResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.require_write(Capability::RichPresence)?;
+        let now = std::time::Instant::now();
+        if let Some(last) = *self
+            .shared
+            .last_presence_write
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+        {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < Duration::from_secs(5) {
+                return Err(BackendError::RateLimited {
+                    retry_after: litecord_types::DurationMs::from_millis(
+                        (Duration::from_secs(5) - elapsed).as_millis() as u64,
+                    ),
+                });
+            }
+        }
+        let status = match presence.status {
+            PresenceStatus::Offline | PresenceStatus::Invisible => "invisible",
+            PresenceStatus::Unknown => {
+                return Err(BackendError::PermissionDenied {
+                    what: "choose Online, Idle, Do not disturb or Invisible".into(),
+                })
+            }
+            other => other.as_str(),
+        };
+        let activities = presence
+            .activity
+            .as_ref()
+            .map(|a| vec![json!({"name":a.name,"type":0,"details":a.details,"state":a.state})])
+            .unwrap_or_default();
+        let payload=json!({"op":3,"d":{"since":null,"activities":activities,"status":status,"afk":presence.status==PresenceStatus::Idle}}).to_string();
+        let sender = self
+            .shared
+            .gateway_writes
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            .clone()
+            .ok_or(BackendError::NotConnected)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sender
+            .try_send(GatewayWrite {
+                payload,
+                generation: self.shared.generation.load(Ordering::Acquire),
+                response: tx,
+            })
+            .map_err(|_| BackendError::NotConnected)?;
+        tokio::time::timeout(Duration::from_secs(7), rx)
+            .await
+            .map_err(|_| BackendError::DeliveryUncertain("Presence submission timed out".into()))?
+            .map_err(|_| {
+                BackendError::DeliveryUncertain("Presence submission interrupted".into())
+            })??;
+        *self
+            .shared
+            .last_presence_write
+            .lock()
+            .map_err(|_| BackendError::Offline)? = Some(now);
+        // Gateway supplies no separate acknowledgement for opcode 3. This
+        // records the submitted state; a subsequent presence event may refine it.
+        let user_id = self
+            .shared
+            .pinned_account
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            .ok_or(BackendError::NotConnected)?;
+        let event = DiscordEvent::PresenceChanged {
+            user_id,
+            presence: Presence {
+                status: presence.status,
+                activity: presence.activity.clone(),
+            },
+        };
+        self.shared.remember(&event);
+        self.confirm(event).await
+    }
+    async fn relationship_action(
+        &self,
+        user_id: UserId,
+        action: RelationshipAction,
+    ) -> BackendResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let capability = if matches!(
+            action,
+            RelationshipAction::Block | RelationshipAction::Unblock
+        ) {
+            Capability::Blocking
+        } else {
+            Capability::FriendRequests
+        };
+        self.require_write(capability)?;
+        if *self
+            .shared
+            .pinned_account
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            == Some(user_id)
+        {
+            return Err(BackendError::PermissionDenied {
+                what: "cannot change your own relationship".into(),
+            });
+        }
+        let before = self.relationships().await?;
+        let kind = before
+            .iter()
+            .find(|(r, _)| r.user_id == user_id)
+            .map(|(r, _)| r.discord)
+            .unwrap_or(RelationshipKind::None);
+        let allowed = match action {
+            RelationshipAction::AcceptFriendRequest | RelationshipAction::RejectFriendRequest => {
+                kind == RelationshipKind::PendingIncoming
+            }
+            RelationshipAction::RemoveFriend => kind == RelationshipKind::Friend,
+            RelationshipAction::Unblock => kind == RelationshipKind::Blocked,
+            RelationshipAction::SendFriendRequest => {
+                matches!(kind, RelationshipKind::None | RelationshipKind::Implicit)
+            }
+            RelationshipAction::Block => kind != RelationshipKind::Blocked,
+        };
+        if !allowed {
+            return Err(BackendError::PermissionDenied {
+                what: "relationship changed; refresh before acting".into(),
+            });
+        }
+        let remove = matches!(
+            action,
+            RelationshipAction::RejectFriendRequest
+                | RelationshipAction::RemoveFriend
+                | RelationshipAction::Unblock
+        );
+        self.shared
+            .call(RestRequest {
+                method: if remove { Method::Delete } else { Method::Put },
+                path: format!("/users/@me/relationships/{user_id}"),
+                route: if remove {
+                    "DELETE /users/@me/relationships/{user.id}"
+                } else {
+                    "PUT /users/@me/relationships/{user.id}"
+                },
+                body: if remove {
+                    None
+                } else {
+                    Some(json!({"type":if action==RelationshipAction::Block {2} else {1}}))
+                },
+            })
+            .await?;
+        let entries = self.relationships().await.map_err(|_| {
+            BackendError::DeliveryUncertain("Relationship write accepted but refresh failed".into())
+        })?;
+        let observed = entries
+            .iter()
+            .find(|(r, _)| r.user_id == user_id)
+            .map(|(r, _)| r.discord)
+            .unwrap_or(RelationshipKind::None);
+        let confirmed = match action {
+            RelationshipAction::Block => observed == RelationshipKind::Blocked,
+            RelationshipAction::AcceptFriendRequest => observed == RelationshipKind::Friend,
+            RelationshipAction::SendFriendRequest => matches!(
+                observed,
+                RelationshipKind::Friend | RelationshipKind::PendingOutgoing
+            ),
+            _ => matches!(
+                observed,
+                RelationshipKind::None | RelationshipKind::Implicit
+            ),
+        };
+        self.confirm(DiscordEvent::RelationshipsSnapshot { entries })
+            .await?;
+        if !confirmed {
+            return Err(BackendError::DeliveryUncertain(
+                "Relationship result not yet observed; refresh before retrying".into(),
+            ));
+        }
+        Ok(())
     }
     async fn relationships(&self) -> BackendResult<Vec<(Relationship, Option<User>)>> {
         let raw = self

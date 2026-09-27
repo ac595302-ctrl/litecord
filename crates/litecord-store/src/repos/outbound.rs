@@ -98,12 +98,31 @@ pub fn observe_delete(
 }
 
 fn publish_receipt(tx: &WriteTx<'_>) -> StoreResult<()> {
-    // A late exact receipt repairs the visible proposal state too.
-    tx.execute("UPDATE action_proposals SET status='executed',updated_at=?1 WHERE identity='user_session' AND status IN ('uncertain','executing','failed') AND id IN (SELECT action_id FROM outbound_operations WHERE state='confirmed')",[tx.now().as_millis()])?;
-    tx.emit(
-        litecord_core::events::UnifiedEvent::SessionChanged,
-        Origin::LocalApplication,
-    )?;
+    let ids = {
+        let mut stmt=tx.prepare("SELECT id FROM action_proposals WHERE identity='user_session' AND status IN ('uncertain','executing','failed') AND id IN (SELECT action_id FROM outbound_operations WHERE state='confirmed')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        super::actions::set_status(
+            tx,
+            ActionId(id),
+            litecord_types::actions::ActionStatus::Executed,
+            Origin::LocalApplication,
+        )?;
+        super::actions::append_audit(
+            tx,
+            &litecord_types::actions::ActionAuditEntry {
+                action_id: ActionId(id),
+                at: tx.now(),
+                actor: litecord_types::actions::Actor::System,
+                event: litecord_types::actions::AuditEvent::Executed {
+                    summary: "confirmed by Discord observation".into(),
+                },
+                revision: tx.revision(),
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -133,4 +152,47 @@ pub fn recent(conn: &Connection, limit: u32) -> StoreResult<Vec<OutboundOperatio
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// A verified account relationship observation may settle a submitted mutation.
+pub fn observe_relationships(tx: &WriteTx<'_>) -> StoreResult<()> {
+    use litecord_types::actions::{AgentAction, RelationshipAction};
+    use litecord_types::social::RelationshipKind;
+    let Some(me) = super::accounts::current(tx, DiscordIdentity::UserSession)? else {
+        return Ok(());
+    };
+    let ids = {
+        let mut stmt=tx.prepare("SELECT action_id FROM outbound_operations WHERE account_id=?1 AND kind='relationship_change' AND state IN ('submitted','uncertain') LIMIT 100")?;
+        let rows = stmt.query_map([me.user_id.get() as i64], |r| r.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut changed = false;
+    for id in ids {
+        let Some(proposal) = super::actions::get(tx, ActionId(id))? else {
+            continue;
+        };
+        let AgentAction::RelationshipChange { user_id, action } = proposal.action else {
+            continue;
+        };
+        let kind = super::relationships::get(tx, user_id)?
+            .map(|r| r.discord)
+            .unwrap_or(RelationshipKind::None);
+        let satisfied = match action {
+            RelationshipAction::Block => kind == RelationshipKind::Blocked,
+            RelationshipAction::AcceptFriendRequest => kind == RelationshipKind::Friend,
+            RelationshipAction::SendFriendRequest => matches!(
+                kind,
+                RelationshipKind::Friend | RelationshipKind::PendingOutgoing
+            ),
+            _ => matches!(kind, RelationshipKind::None | RelationshipKind::Implicit),
+        };
+        if satisfied {
+            finish(tx, ActionId(id), OutboundState::Confirmed, None, None)?;
+            changed = true;
+        }
+    }
+    if changed {
+        publish_receipt(tx)?;
+    }
+    Ok(())
 }

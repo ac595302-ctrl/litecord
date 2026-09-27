@@ -46,10 +46,7 @@ impl Workspace {
                         ui,
                         &snapshot.account,
                         &snapshot.diagnostics.session,
-                        snapshot
-                            .diagnostics
-                            .capabilities
-                            .is_usable(litecord_types::capability::Capability::DmSend),
+                        &snapshot.diagnostics.capabilities,
                     );
                     ui.add_space(12.0);
                 }
@@ -127,8 +124,9 @@ fn discord_session_connection(
     ui: &mut Ui,
     account: &litecord_app::people::AccountViewModel,
     state: &SessionState,
-    can_write: bool,
+    capabilities: &litecord_types::capability::CapabilitySet,
 ) {
+    let can_write = capabilities.is_usable(litecord_types::capability::Capability::DmSend);
     theme::section_label(ui, "Discord connection");
     egui::Frame::new()
         .fill(theme::SIDEBAR)
@@ -170,6 +168,16 @@ fn discord_session_connection(
                 );
             });
 
+            if capabilities.is_usable(litecord_types::capability::Capability::RichPresence) && state.is_online() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Set status:");
+                    for (label,status) in [("Online",litecord_types::social::PresenceStatus::Online),("Idle",litecord_types::social::PresenceStatus::Idle),("Do not disturb",litecord_types::social::PresenceStatus::DoNotDisturb),("Invisible",litecord_types::social::PresenceStatus::Invisible)] {
+                        if ui.add_enabled(!workspace.busy,egui::Button::new(label)).clicked() {
+                            workspace.send(Command::Presence(litecord_types::actions::PresenceDraft {status,activity:None}));
+                        }
+                    }
+                });
+            }
             ui.add_space(8.0);
             ui.label(egui::RichText::new("Session credential").strong());
             ui.add_enabled(

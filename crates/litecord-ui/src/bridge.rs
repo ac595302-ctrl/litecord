@@ -61,6 +61,7 @@ pub enum Command {
     Visibility(ConversationId, AgentVisibility),
     Setting(String, serde_json::Value),
     Voice(VoiceControl),
+    Presence(litecord_types::actions::PresenceDraft),
     Relationship(UserId, litecord_types::actions::RelationshipAction),
     CompleteTask(TaskId),
     ConfirmTask(TaskId),
@@ -389,6 +390,9 @@ pub(crate) async fn execute(
         Command::Setting(key, value) => app.set_setting(&key, value)?,
         Command::Voice(control) => {
             app.voice(control).await?;
+        }
+        Command::Presence(presence) => {
+            app.change_presence(presence).await?;
         }
         Command::Relationship(user, action) => match app.change_relationship(user, action).await? {
             litecord_actions::ProposeOutcome::Executed { .. } => {

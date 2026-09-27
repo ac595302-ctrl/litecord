@@ -234,7 +234,7 @@ pub fn tools() -> Vec<ToolSpec> {
                 "content": {"type": "string"},
                 "rationale": {"type": "string"},
                 "based_on_revision": {"type": "integer"},
-                "send_as": {"type": "string", "enum": ["user", "bot"], "description": "Identity to send as (default user). The bot identity can only post in guild channels where it is installed; the user always sees which identity is proposed."}
+                "send_as": {"type": "string", "enum": ["user", "account", "bot"], "description": "Identity to send as (default user). The bot identity can only post in guild channels where it is installed; the user always sees which identity is proposed."}
             }), &["content"]),
         },
         ToolSpec {
