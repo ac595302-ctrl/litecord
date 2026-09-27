@@ -42,10 +42,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Linking the native Social SDK is impossible on hosted runners, so the
-      # test job uses default features (mock backend). All architecture is
-      # testable without the SDK.
-      - run: cargo test --workspace
+      # Exercise the real account HTTP/Gateway stack and OS keyring wiring.
+      # Account tests use scripted transport, never a live credential.
+      - run: cargo test --workspace --features litecord-desktop/gui,litecord-desktop/discord-user-session
 
   deny:
     runs-on: ubuntu-latest
@@ -54,3 +53,32 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
+
+  desktop:
+    if: github.event_name == 'push'
+    needs: [fmt, clippy, test, deny]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos-arm64
+          - os: windows-latest
+            name: windows-x64
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: account-desktop-${{ matrix.name }}
+      - run: cargo build --locked --release -p litecord-desktop --features gui,discord-user-session
+      - run: python scripts/package_account.py ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: litecord-account-${{ matrix.name }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14

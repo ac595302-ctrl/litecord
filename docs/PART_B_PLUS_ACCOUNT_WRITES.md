@@ -9,7 +9,12 @@ and deduplication path.
 
 ## Run and sign in
 
-Build the desktop with `--features gui,discord-user-session`, then launch using
+CI produces ready-to-open macOS Apple Silicon and Windows x64 desktop archives
+only after all checks pass. Opening the packaged app selects account mode with a
+dedicated per-user account data directory and shows Settings when sign-in is needed.
+The macOS build is ad-hoc signed, not notarized; Windows has no publisher signature.
+
+For a source build, build the desktop with `--features gui,discord-user-session`, then launch using
 `--config config/litecord.account.example.toml --backend user-session gui`.
 Use a dedicated account database. In Settings, paste an account-owner supplied
 session credential into the masked field and select **Sign in**. The adapter

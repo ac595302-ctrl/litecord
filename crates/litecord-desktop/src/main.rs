@@ -43,7 +43,7 @@ struct Cli {
     #[arg(long, global = true)]
     log: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -136,22 +136,63 @@ enum OmniCmd {
 }
 
 fn load_config(cli: &Cli) -> litecord_core::Result<LitecordConfig> {
-    let mut loader = ConfigLoader::new()
-        .env(std::env::vars())
-        .overrides(ConfigOverrides {
-            data_dir: cli.data_dir.clone(),
-            database_path: cli.db.clone(),
-            backend: cli.backend.map(|b| match b {
-                BackendArg::Demo => BackendKind::Demo,
-                BackendArg::SocialSdk => BackendKind::SocialSdk,
-                BackendArg::UserSession => BackendKind::UserSession,
-            }),
-            log_filter: cli.log.clone(),
+    load_config_from(cli, std::env::vars().collect())
+}
+
+fn load_config_from(
+    cli: &Cli,
+    env: Vec<(String, String)>,
+) -> litecord_core::Result<LitecordConfig> {
+    let desktop_start =
+        cfg!(all(feature = "gui", feature = "discord-user-session")) && cli.command.is_none();
+    let backend = cli
+        .backend
+        .map(|b| match b {
+            BackendArg::Demo => BackendKind::Demo,
+            BackendArg::SocialSdk => BackendKind::SocialSdk,
+            BackendArg::UserSession => BackendKind::UserSession,
+        })
+        .or_else(|| {
+            (desktop_start
+                && cli.config.is_none()
+                && !env.iter().any(|(k, _)| k == "LITECORD_BACKEND"))
+            .then_some(BackendKind::UserSession)
         });
+    let data_dir = cli.data_dir.clone().or_else(|| {
+        (desktop_start
+            && backend == Some(BackendKind::UserSession)
+            && cli.config.is_none()
+            && !env.iter().any(|(k, _)| k == "LITECORD_DATA_DIR"))
+        .then(|| desktop_data_dir(&env))
+        .flatten()
+    });
+    let mut loader = ConfigLoader::new().env(env).overrides(ConfigOverrides {
+        data_dir,
+        database_path: cli.db.clone(),
+        backend,
+        log_filter: cli.log.clone(),
+    });
     if let Some(path) = &cli.config {
         loader = loader.file(path);
     }
     loader.load()
+}
+
+fn desktop_data_dir(env: &[(String, String)]) -> Option<PathBuf> {
+    let value = |key: &str| {
+        env.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| PathBuf::from(v))
+    };
+    if cfg!(target_os = "windows") {
+        value("LOCALAPPDATA").map(|p| p.join("Litecord/account"))
+    } else if cfg!(target_os = "macos") {
+        value("HOME").map(|p| p.join("Library/Application Support/Litecord/account"))
+    } else {
+        value("XDG_DATA_HOME")
+            .or_else(|| value("HOME").map(|p| p.join(".local/share")))
+            .map(|p| p.join("litecord/account"))
+    }
 }
 
 fn init_tracing(filter: &str) {
@@ -181,7 +222,28 @@ async fn main() -> std::process::ExitCode {
         }
     };
     init_tracing(&cfg.logging.filter);
-    let result = match cli.command {
+    let command = match cli.command {
+        Some(command) => command,
+        #[cfg(feature = "gui")]
+        None => Command::Gui {
+            #[cfg(feature = "screenshots")]
+            screenshot: None,
+            #[cfg(feature = "screenshots")]
+            screen: "Settings".into(),
+            #[cfg(feature = "screenshots")]
+            width: 1586.0,
+            omni: false,
+            #[cfg(feature = "screenshots")]
+            omni_ask: None,
+        },
+        #[cfg(not(feature = "gui"))]
+        None => {
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
+            return std::process::ExitCode::SUCCESS;
+        }
+    };
+    let result = match command {
         #[cfg(feature = "gui")]
         Command::Gui {
             #[cfg(feature = "screenshots")]
@@ -227,7 +289,7 @@ async fn main() -> std::process::ExitCode {
 #[cfg(feature = "gui")]
 async fn gui(
     cfg: LitecordConfig,
-    options: litecord_ui::WindowOptions,
+    mut options: litecord_ui::WindowOptions,
     omni_ask: Option<String>,
 ) -> litecord_core::Result<()> {
     let app = with_omni(
@@ -236,6 +298,12 @@ async fn gui(
     )
     .start()
     .await?;
+    if options.destination.is_none()
+        && cfg.backend.kind == BackendKind::UserSession
+        && !app.session_state()?.is_online()
+    {
+        options.destination = Some(litecord_ui::Destination::Settings);
+    }
     if let Some(text) = omni_ask {
         let a = app.clone();
         tokio::spawn(async move {
@@ -713,4 +781,46 @@ fn with_account(
         return Err(litecord_core::Error::new(litecord_core::ErrorKind::Unsupported,"build with --features gui,discord-user-session to enable the experimental account source"));
     }
     Ok(builder)
+}
+
+#[cfg(all(test, feature = "gui", feature = "discord-user-session"))]
+mod desktop_start_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn launch_without_arguments_selects_account_and_dedicated_data() {
+        let cli = Cli::try_parse_from(["litecord"]).unwrap();
+        let cfg = load_config_from(
+            &cli,
+            vec![
+                ("HOME".into(), "/owner".into()),
+                ("LOCALAPPDATA".into(), "/local".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::UserSession);
+        assert_ne!(cfg.data_dir, PathBuf::from(".litecord"));
+        assert!(cfg.data_dir.ends_with("account"));
+    }
+
+    #[test]
+    fn explicit_configuration_still_wins() {
+        let cli = Cli::try_parse_from(["litecord", "--backend", "demo", "--data-dir", "example"])
+            .unwrap();
+        let cfg = load_config_from(&cli, vec![]).unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Demo);
+        assert_eq!(cfg.data_dir, PathBuf::from("example"));
+        let cli = Cli::try_parse_from(["litecord"]).unwrap();
+        let cfg = load_config_from(
+            &cli,
+            vec![
+                ("LITECORD_BACKEND".into(), "demo".into()),
+                ("LITECORD_DATA_DIR".into(), "custom".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Demo);
+        assert_eq!(cfg.data_dir, PathBuf::from("custom"));
+    }
 }

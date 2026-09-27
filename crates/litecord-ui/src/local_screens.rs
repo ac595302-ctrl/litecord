@@ -179,7 +179,12 @@ fn discord_session_connection(
                 });
             }
             ui.add_space(8.0);
+            if let SessionState::Error { message } = state {
+                ui.label(egui::RichText::new(message).color(theme::WARNING));
+                ui.add_space(6.0);
+            }
             ui.label(egui::RichText::new("Session credential").strong());
+            ui.label(egui::RichText::new("Use your own account credential. It is saved in your operating system's secure storage.").size(12.0).color(theme::MUTED));
             ui.add_enabled(
                 !workspace.busy,
                 egui::TextEdit::singleline(&mut workspace.discord_session_draft)

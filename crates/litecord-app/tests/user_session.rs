@@ -574,6 +574,50 @@ async fn account_presence_and_relationship_actions_round_trip_through_engine() {
         .unwrap();
     ready(&mut socket).await;
     state(&app, SessionState::Ready).await;
+    let proposal = app
+        .agent_gateway()
+        .call_tool(
+            "propose_message",
+            json!({"conversation_id":"2","content":"An approved account message"}),
+            &litecord_agent::Caller::new("test-omni"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(proposal["result"]["outcome"], "pending_approval");
+    let action_id = litecord_types::ActionId(proposal["result"]["action_id"].as_i64().unwrap());
+    let row = app
+        .database()
+        .read(|r| repos::actions::get(r, action_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.identity,
+        litecord_types::provenance::DiscordIdentity::UserSession
+    );
+    assert!(transport
+        .requests()
+        .iter()
+        .all(|r| r.method == discord_adapter::bot::rest::Method::Get));
+    let mut sent = message("899", "An approved account message");
+    sent["author"] = json!({"id":"1","username":"owner"});
+    transport.respond("POST /channels/2/messages", sent);
+    app.approve_action(action_id, None).await.unwrap();
+    assert_eq!(
+        transport
+            .requests()
+            .iter()
+            .filter(|r| r.method == discord_adapter::bot::rest::Method::Post)
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.database()
+            .read(|r| repos::messages::get(r, MessageId(899)))
+            .unwrap()
+            .unwrap()
+            .origin,
+        Origin::DiscordUserSession
+    );
     app.change_presence(PresenceDraft {
         status: PresenceStatus::DoNotDisturb,
         activity: None,
