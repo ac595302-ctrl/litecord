@@ -16,6 +16,8 @@ pub mod fake;
 pub mod opencode;
 pub mod types;
 
-pub use driver::{find_executable, HarnessDriver, HarnessLauncher, LaunchContext};
+pub use driver::{
+    find_executable, HarnessDriver, HarnessLauncher, LaunchContext, ResolvedExecutable,
+};
 pub use fake::{FakeDriver, FakeLauncher, FakeTurn};
 pub use types::*;

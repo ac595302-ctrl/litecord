@@ -30,6 +30,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+async-trait.workspace = true
 
 [lints]
 workspace = true

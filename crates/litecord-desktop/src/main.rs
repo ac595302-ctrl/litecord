@@ -102,11 +102,13 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum OmniCmd {
     /// Harness, sign-in state, model and automations.
-    Status,
-    /// Choose the harness: `codex` or `opencode`.
-    Harness {
-        kind: String,
+    Status {
+        /// Do not start the harness to check the sign-in state.
+        #[arg(long)]
+        cached: bool,
     },
+    /// Choose the harness: `codex` or `opencode`.
+    Harness { kind: String },
     /// Sign in. Without `--method`, lists the methods the harness offers.
     Login {
         /// A method id from the list (browser or API key).
@@ -116,8 +118,20 @@ enum OmniCmd {
         /// by Litecord).
         #[arg(long)]
         api_key_stdin: bool,
+        /// A value the method asks for, as `key=value` (repeatable), e.g.
+        /// `--input deploymentType=enterprise`.
+        #[arg(long = "input", value_name = "KEY=VALUE")]
+        inputs: Vec<String>,
+        /// List every provider, not only the common and connected ones.
+        #[arg(long)]
+        all: bool,
     },
-    Logout,
+    /// Sign out (OpenCode: every stored provider credential, or one with
+    /// `--provider`).
+    Logout {
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// List models; `--set <model>` or `--default` to choose.
     Models {
         #[arg(long)]
@@ -128,9 +142,7 @@ enum OmniCmd {
     /// List automations.
     Automations,
     /// Run an automation now.
-    Run {
-        id: i64,
-    },
+    Run { id: i64 },
     /// Check installed harnesses against what Litecord expects.
     Doctor,
 }
@@ -344,7 +356,12 @@ async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()
     let omni = app.omni().clone();
     let result = async {
         match cmd {
-            OmniCmd::Status => {
+            OmniCmd::Status { cached } => {
+                omni.refresh_installed();
+                if !cached && omni.status().selected.is_some() {
+                    // Starts the harness; a failure shows up as `last_error`.
+                    let _ = omni.refresh_login().await;
+                }
                 let v = omni.view(None)?;
                 print_json(&serde_json::json!({
                     "status": v.status,
@@ -361,32 +378,38 @@ async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()
             OmniCmd::Login {
                 method,
                 api_key_stdin,
+                inputs,
+                all,
             } => {
                 let options = omni.login_options().await?;
                 let Some(method) = method else {
-                    for o in &options {
-                        let kind = match o.kind {
-                            LoginKind::Browser => "browser",
-                            LoginKind::ApiKey => "api key",
-                        };
-                        println!("{:<24} {} ({kind})", o.id, o.label);
-                    }
-                    println!("\nSign in with: litecord omni login --method <id>");
+                    print_login_options(&options, all);
                     return Ok(());
                 };
                 let option = options
                     .iter()
                     .find(|o| o.id == method)
                     .ok_or_else(|| Error::validation("unknown sign-in method"))?;
+                let mut values = litecord_app::harness::LoginInputs::new();
+                for kv in &inputs {
+                    let (k, v) = kv
+                        .split_once('=')
+                        .ok_or_else(|| Error::validation("--input takes key=value"))?;
+                    values.insert(k.trim().to_owned(), v.trim().to_owned());
+                }
                 if option.kind == LoginKind::ApiKey || api_key_stdin {
                     let mut key = String::new();
                     std::io::stdin()
                         .read_line(&mut key)
                         .map_err(|e| Error::internal(format!("stdin: {e}")))?;
-                    omni.sign_in_api_key(&option.id, &litecord_core::secrets::Secret::new(key))
-                        .await?;
+                    omni.sign_in_api_key_with(
+                        &option.id,
+                        &litecord_core::secrets::Secret::new(key),
+                        &values,
+                    )
+                    .await?;
                 } else {
-                    match omni.sign_in_with(&option.id).await? {
+                    match omni.sign_in_with_inputs(&option.id, &values).await? {
                         LoginState::SigningIn {
                             url,
                             instructions,
@@ -405,6 +428,8 @@ async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()
                                     .read_line(&mut code)
                                     .map_err(|e| Error::internal(format!("stdin: {e}")))?;
                                 omni.submit_login_code(&code).await?;
+                            } else {
+                                println!("Waiting for the sign-in to finish (Ctrl-C to cancel)...");
                             }
                         }
                         other => print_json(&other),
@@ -412,20 +437,39 @@ async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()
                 }
                 // Wait (bounded) for the harness to confirm.
                 for _ in 0..600 {
-                    if omni.status().login.is_ready() {
-                        println!("Signed in.");
-                        return Ok(());
+                    match omni.status().login {
+                        LoginState::Ready { account } => {
+                            match account {
+                                Some(a) => println!("Signed in: {a}"),
+                                None => println!("Signed in."),
+                            }
+                            return Ok(());
+                        }
+                        LoginState::Error { message } => {
+                            return Err(Error::new(ErrorKind::Authentication, message));
+                        }
+                        _ => tokio::time::sleep(Duration::from_millis(500)).await,
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 return Err(Error::new(
                     ErrorKind::Authentication,
                     "sign-in did not complete",
                 ));
             }
-            OmniCmd::Logout => {
-                omni.sign_out().await?;
-                println!("Signed out.");
+            OmniCmd::Logout { provider } => {
+                match provider {
+                    Some(p) => omni.sign_out_provider(&p).await?,
+                    None => omni.sign_out().await?,
+                }
+                match omni.status().login {
+                    LoginState::Ready { account } => println!(
+                        "Signed out. Still usable through: {}",
+                        account
+                            .as_deref()
+                            .unwrap_or("the harness's own configuration")
+                    ),
+                    _ => println!("Signed out."),
+                }
             }
             OmniCmd::Models { set, default } => {
                 if default {
@@ -471,12 +515,54 @@ async fn omni_cli(cfg: LitecordConfig, cmd: OmniCmd) -> litecord_core::Result<()
     result
 }
 
+/// Prints sign-in methods grouped by provider: common providers and any
+/// already connected first; the rest only with `all`.
+fn print_login_options(options: &[litecord_app::harness::LoginOption], all: bool) {
+    use litecord_app::harness::LoginKind;
+    let groups = litecord_app::omni::login_groups(options);
+    let mut hidden = 0;
+    for g in &groups {
+        if !(all || g.featured || g.connected) {
+            hidden += 1;
+            continue;
+        }
+        let mark = if g.connected { " (connected)" } else { "" };
+        let label = if g.label.is_empty() {
+            "Sign in"
+        } else {
+            &g.label
+        };
+        println!("{label}{mark}");
+        for o in &g.options {
+            let kind = match o.kind {
+                LoginKind::Browser => "browser",
+                LoginKind::ApiKey => "api key",
+            };
+            println!("  {:<28} {} ({kind})", o.id, o.method_label);
+            for p in &o.prompts {
+                let choices: Vec<&str> = p.choices.iter().map(|c| c.value.as_str()).collect();
+                let hint = if choices.is_empty() {
+                    p.placeholder.clone().unwrap_or_default()
+                } else {
+                    choices.join("|")
+                };
+                println!("  {:<28}   --input {}=<{hint}>  {}", "", p.key, p.message);
+            }
+        }
+    }
+    if hidden > 0 {
+        println!("\n{hidden} more providers: litecord omni login --all");
+    }
+    println!("\nSign in with: litecord omni login --method <id>");
+}
+
 /// Checks what Omni depends on and prints a plain report.
 async fn doctor(
     cfg: &LitecordConfig,
     omni: &litecord_app::OmniService,
 ) -> litecord_core::Result<()> {
     let ok = |b: bool| if b { "ok  " } else { "FAIL" };
+    omni.refresh_installed();
     let status = omni.status();
     println!(
         "{} Litecord database on disk: {}",
@@ -493,10 +579,10 @@ async fn doctor(
         println!(
             "\n{}: {}",
             h.label,
-            if h.installed {
-                "installed"
-            } else {
-                "not installed"
+            match (&h.path, h.installed) {
+                (Some(p), _) => format!("installed ({p})"),
+                (None, true) => "installed".to_owned(),
+                (None, false) => format!("not installed ({})", h.install_hint),
             }
         );
         if !h.installed {

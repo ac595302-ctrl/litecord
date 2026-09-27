@@ -19,8 +19,8 @@ use litecord_core::config::OmniConfig;
 use litecord_core::error::{Error, ErrorKind, Result};
 use litecord_harness::{
     Decision, HarnessDriver, HarnessError, HarnessEvent, HarnessKind, HarnessLauncher,
-    HarnessRequest, ItemKind, LaunchContext, LoginOption, LoginState, OmniMode, RequestKind,
-    SessionConfig,
+    HarnessRequest, ItemKind, LaunchContext, LoginInputs, LoginOption, LoginState, OmniMode,
+    RequestKind, SessionConfig,
 };
 use litecord_memory::MemoryService;
 use litecord_store::repos;
@@ -41,6 +41,11 @@ const HB_ENABLED: &str = "omni.heartbeat.enabled";
 const HB_REVISION: &str = "omni.heartbeat.revision";
 const HB_TIMES: &str = "omni.heartbeat.times";
 const HB_DISMISSED: &str = "omni.heartbeat.dismissed_at";
+/// How long an installed-harness lookup is reused by `status()`.
+const DETECT_TTL: Duration = Duration::from_secs(5);
+/// A browser sign-in left open this long no longer keeps the sidecar
+/// alive (the idle stop then cancels it).
+const LOGIN_ABANDON: Duration = Duration::from_secs(15 * 60);
 
 /// Result of [`OmniService::heartbeat`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -84,6 +89,51 @@ pub struct HarnessInfo {
     pub kind: HarnessKind,
     pub label: &'static str,
     pub installed: bool,
+    /// Where the harness binary was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// How to install it (for a "not installed" hint; empty for the demo).
+    pub install_hint: &'static str,
+}
+
+/// Sign-in options of one provider, for a grouped sign-in menu
+/// ([`OmniStatus::login_groups`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LoginGroup {
+    /// Provider id (`openai`), or empty for options without one.
+    pub provider: String,
+    /// Heading ("OpenAI", "GitHub Copilot").
+    pub label: String,
+    /// Show without "More providers".
+    pub featured: bool,
+    /// Already has working credentials.
+    pub connected: bool,
+    /// In the harness's order; show each with `LoginOption::method_label`.
+    pub options: Vec<LoginOption>,
+}
+
+/// Groups options by provider, keeping the harness's order (featured
+/// providers first).
+pub fn login_groups(options: &[LoginOption]) -> Vec<LoginGroup> {
+    let mut groups: Vec<LoginGroup> = Vec::new();
+    for o in options {
+        let provider = o.provider.clone().unwrap_or_default();
+        match groups.iter_mut().find(|g| g.provider == provider) {
+            Some(g) => {
+                g.featured |= o.featured;
+                g.connected |= o.connected;
+                g.options.push(o.clone());
+            }
+            None => groups.push(LoginGroup {
+                label: o.provider_label.clone().unwrap_or_else(|| provider.clone()),
+                provider,
+                featured: o.featured,
+                connected: o.connected,
+                options: vec![o.clone()],
+            }),
+        }
+    }
+    groups
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -102,6 +152,13 @@ pub struct OmniStatus {
     pub models: Vec<String>,
     /// The chosen model; `None` = the harness default.
     pub model: Option<String>,
+}
+
+impl OmniStatus {
+    /// [`Self::login_options`] grouped by provider.
+    pub fn login_groups(&self) -> Vec<LoginGroup> {
+        login_groups(&self.login_options)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -154,12 +211,24 @@ struct Live {
     last_error: Option<String>,
     login_options: Vec<LoginOption>,
     models: Vec<String>,
+    /// Counts sign-in states reported by the harness, so a start call does
+    /// not overwrite a result that arrived while it was in flight.
+    login_seq: u64,
+    /// When the current browser sign-in started.
+    signing_in_since: Option<Instant>,
 }
 
 #[derive(Default)]
 struct Runtime {
     driver: Option<Arc<dyn HarnessDriver>>,
     pump: Option<JoinHandle<()>>,
+}
+
+/// Result of looking for each launcher's binary.
+struct Detected {
+    at: Instant,
+    /// `(kind, path)` per launcher, in launcher order.
+    found: Vec<(HarnessKind, Option<std::path::PathBuf>)>,
 }
 
 struct Shared {
@@ -172,6 +241,7 @@ struct Shared {
     tx: broadcast::Sender<OmniEvent>,
     rt: tokio::sync::Mutex<Runtime>,
     live: Mutex<Live>,
+    detected: Mutex<Option<Detected>>,
 }
 
 /// Cheap to clone.
@@ -236,6 +306,7 @@ impl OmniService {
                 tx,
                 rt: tokio::sync::Mutex::new(Runtime::default()),
                 live: Mutex::new(Live::default()),
+                detected: Mutex::new(None),
             }),
         }
     }
@@ -245,6 +316,63 @@ impl OmniService {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    /// Installed harnesses, looked up at most every [`DETECT_TTL`] (or now,
+    /// with `force`).
+    fn detect(&self, force: bool) -> Vec<(HarnessKind, Option<std::path::PathBuf>)> {
+        let mut cache = match self.shared.detected.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(d) = cache.as_ref() {
+            if !force && d.at.elapsed() < DETECT_TTL {
+                return d.found.clone();
+            }
+        }
+        let found: Vec<_> = self
+            .shared
+            .launchers
+            .iter()
+            .map(|l| {
+                let path = l.executable();
+                // Launchers without a binary (the demo) only say installed.
+                let path = match path {
+                    Some(p) => Some(p),
+                    None if l.installed() => Some(std::path::PathBuf::new()),
+                    None => None,
+                };
+                (l.kind(), path)
+            })
+            .collect();
+        *cache = Some(Detected {
+            at: Instant::now(),
+            found: found.clone(),
+        });
+        found
+    }
+
+    fn harness_infos(&self, force: bool) -> Vec<HarnessInfo> {
+        self.detect(force)
+            .into_iter()
+            .map(|(kind, path)| HarnessInfo {
+                kind,
+                label: kind.label(),
+                installed: path.is_some(),
+                path: path
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.display().to_string()),
+                install_hint: kind.install_hint(),
+            })
+            .collect()
+    }
+
+    /// Looks for Codex and OpenCode again (after the user installed one)
+    /// without restarting the app, and reports what was found.
+    pub fn refresh_installed(&self) -> Vec<HarnessInfo> {
+        let infos = self.harness_infos(true);
+        self.notify(None);
+        infos
     }
 
     pub(crate) fn db(&self) -> &Database {
@@ -318,32 +446,15 @@ impl OmniService {
             .ok()
             .flatten()
             .and_then(|s| HarnessKind::parse(&s));
-        let installed = |k: HarnessKind| {
-            self.shared
-                .launchers
-                .iter()
-                .any(|l| l.kind() == k && l.installed())
-        };
-        stored.filter(|k| installed(*k)).or_else(|| {
-            self.shared
-                .launchers
-                .iter()
-                .find(|l| l.installed())
-                .map(|l| l.kind())
-        })
+        let detected = self.detect(false);
+        let installed = |k: HarnessKind| detected.iter().any(|(d, p)| *d == k && p.is_some());
+        stored
+            .filter(|k| installed(*k))
+            .or_else(|| detected.iter().find(|(_, p)| p.is_some()).map(|(k, _)| *k))
     }
 
     pub fn status(&self) -> OmniStatus {
-        let harnesses = self
-            .shared
-            .launchers
-            .iter()
-            .map(|l| HarnessInfo {
-                kind: l.kind(),
-                label: l.kind().label(),
-                installed: l.installed(),
-            })
-            .collect();
+        let harnesses = self.harness_infos(false);
         let selected = self.selected();
         let running = self
             .shared
@@ -374,11 +485,11 @@ impl OmniService {
 
     /// Choose the harness. Stops a running sidecar of another kind.
     pub async fn select(&self, kind: HarnessKind) -> Result<()> {
+        // Look again: the user may have just installed it.
         if !self
-            .shared
-            .launchers
+            .harness_infos(true)
             .iter()
-            .any(|l| l.kind() == kind && l.installed())
+            .any(|h| h.kind == kind && h.installed)
         {
             return Err(Error::new(
                 ErrorKind::Unsupported,
@@ -448,25 +559,77 @@ impl OmniService {
         Ok(driver)
     }
 
-    /// Query the harness for its sign-in state (starts the sidecar).
+    /// Query the harness for its sign-in state (starts the sidecar). A
+    /// browser sign-in in progress stays `SigningIn` until the harness
+    /// reports the result.
     pub async fn refresh_login(&self) -> Result<LoginState> {
         let d = self.driver().await?;
         let l = d.login_state().await.map_err(harness_err)?;
-        self.live().login = Some(l.clone());
+        let shown = {
+            let mut live = self.live();
+            let waiting = matches!(live.login, Some(LoginState::SigningIn { .. }))
+                && live
+                    .signing_in_since
+                    .is_some_and(|t| t.elapsed() < LOGIN_ABANDON);
+            // Keep showing the sign-in in progress unless it finished.
+            if !waiting || l.is_ready() {
+                live.login = Some(l.clone());
+                if l.is_ready() {
+                    live.signing_in_since = None;
+                }
+            }
+            live.login.clone().unwrap_or(l)
+        };
         self.notify(None);
-        Ok(l)
+        Ok(shown)
+    }
+
+    /// Records the state a sign-in start returned, unless the harness
+    /// already reported a newer one while the call was in flight.
+    fn started_login(&self, seq: u64, l: &LoginState) {
+        let mut live = self.live();
+        if live.login_seq == seq {
+            live.login = Some(l.clone());
+        }
+        live.signing_in_since = matches!(l, LoginState::SigningIn { .. }).then(Instant::now);
+        live.last_used = Some(Instant::now());
+    }
+
+    /// The driver to start a new sign-in on: an earlier browser sign-in
+    /// still waiting is cancelled first. When the harness cannot cancel it
+    /// in place (OpenCode keeps its callback server bound), the sidecar is
+    /// restarted so the new attempt gets a clean start.
+    async fn driver_for_sign_in(&self) -> Result<Arc<dyn HarnessDriver>> {
+        let d = self.driver().await?;
+        if !matches!(self.live().login, Some(LoginState::SigningIn { .. })) {
+            return Ok(d);
+        }
+        match d.cancel_login().await {
+            Err(HarnessError::Unsupported(_)) => {
+                tracing::debug!("restarting the Omni sidecar to cancel a pending sign-in");
+                self.stop().await;
+                self.driver().await
+            }
+            Err(e) => {
+                tracing::debug!("could not cancel the pending sign-in: {e}");
+                Ok(d)
+            }
+            Ok(()) => Ok(d),
+        }
     }
 
     /// Start the harness's own sign-in. Open `SigningIn.url` in a browser.
     pub async fn sign_in(&self) -> Result<LoginState> {
-        let d = self.driver().await?;
+        let d = self.driver_for_sign_in().await?;
+        let seq = self.live().login_seq;
         let l = d.begin_login().await.map_err(harness_err)?;
-        self.live().login = Some(l.clone());
+        self.started_login(seq, &l);
         self.notify(None);
         Ok(l)
     }
 
-    /// Sign-in methods the harness offers (starts the sidecar).
+    /// Sign-in methods the harness offers (starts the sidecar). Group them
+    /// for display with [`login_groups`] / [`OmniStatus::login_groups`].
     pub async fn login_options(&self) -> Result<Vec<LoginOption>> {
         let d = self.driver().await?;
         let options = d.login_options().await.map_err(harness_err)?;
@@ -475,13 +638,54 @@ impl OmniService {
         Ok(options)
     }
 
-    /// Start a specific browser sign-in method.
+    /// Start a specific browser sign-in method. Open `SigningIn.url` in a
+    /// browser; completion arrives as a status change (`Ready` or `Error`).
     pub async fn sign_in_with(&self, option: &str) -> Result<LoginState> {
-        let d = self.driver().await?;
-        let l = d.begin_login_with(option).await.map_err(harness_err)?;
-        self.live().login = Some(l.clone());
+        self.sign_in_with_inputs(option, &LoginInputs::new()).await
+    }
+
+    /// [`Self::sign_in_with`] plus values for the option's
+    /// `LoginOption::prompts`.
+    pub async fn sign_in_with_inputs(
+        &self,
+        option: &str,
+        inputs: &LoginInputs,
+    ) -> Result<LoginState> {
+        let d = self.driver_for_sign_in().await?;
+        let seq = self.live().login_seq;
+        let l = d
+            .begin_login_with_inputs(option, inputs)
+            .await
+            .map_err(harness_err)?;
+        self.started_login(seq, &l);
         self.notify(None);
         Ok(l)
+    }
+
+    /// Abandon a browser sign-in in progress (frees the harness's localhost
+    /// callback; restarts the sidecar when the harness cannot do that in
+    /// place). The status goes back to what the harness reports.
+    pub async fn cancel_sign_in(&self) -> Result<()> {
+        let driver = self.shared.rt.lock().await.driver.clone();
+        if let Some(d) = driver {
+            match d.cancel_login().await {
+                Ok(()) => {}
+                Err(HarnessError::Unsupported(_)) => self.stop().await,
+                Err(e) => tracing::debug!("could not cancel the pending sign-in: {e}"),
+            }
+        }
+        let running = self.shared.rt.lock().await.driver.clone();
+        let state = match running {
+            Some(d) => d.login_state().await.ok(),
+            None => None,
+        };
+        {
+            let mut live = self.live();
+            live.signing_in_since = None;
+            live.login = Some(state.unwrap_or(LoginState::Stopped));
+        }
+        self.notify(None);
+        Ok(())
     }
 
     /// Finish a browser sign-in that shows a code to paste back.
@@ -501,10 +705,23 @@ impl OmniService {
         option: &str,
         key: &litecord_core::secrets::Secret<String>,
     ) -> Result<()> {
+        self.sign_in_api_key_with(option, key, &LoginInputs::new())
+            .await
+    }
+
+    /// [`Self::sign_in_api_key`] plus values for the option's
+    /// `LoginOption::prompts` (e.g. an Azure resource name).
+    pub async fn sign_in_api_key_with(
+        &self,
+        option: &str,
+        key: &litecord_core::secrets::Secret<String>,
+        inputs: &LoginInputs,
+    ) -> Result<()> {
         let d = self.driver().await?;
-        d.login_api_key(option, key.expose_secret().trim())
+        d.login_api_key_with(option, key.expose_secret().trim(), inputs)
             .await
             .map_err(harness_err)?;
+        self.live().signing_in_since = None;
         self.notify(None);
         Ok(())
     }
@@ -539,12 +756,37 @@ impl OmniService {
         Ok(())
     }
 
+    /// Sign out of the harness. For Codex this is its ChatGPT/API-key
+    /// sign-in on this computer; for OpenCode, every credential it stored
+    /// (providers set up through environment variables stay connected, so
+    /// the resulting state can still be `Ready`).
+    ///
+    /// The resulting state is in [`Self::status`].
     pub async fn sign_out(&self) -> Result<()> {
         let d = self.driver().await?;
         d.logout().await.map_err(harness_err)?;
-        self.live().login = Some(LoginState::SignedOut);
-        self.notify(None);
+        self.after_sign_out(&d).await;
         Ok(())
+    }
+
+    /// Sign out of one provider (OpenCode; `provider` is
+    /// `LoginOption::provider`). The resulting state is in [`Self::status`].
+    pub async fn sign_out_provider(&self, provider: &str) -> Result<()> {
+        let d = self.driver().await?;
+        d.logout_provider(provider).await.map_err(harness_err)?;
+        self.after_sign_out(&d).await;
+        Ok(())
+    }
+
+    async fn after_sign_out(&self, d: &Arc<dyn HarnessDriver>) {
+        let l = d.login_state().await.unwrap_or(LoginState::SignedOut);
+        {
+            let mut live = self.live();
+            live.login = Some(l);
+            live.signing_in_since = None;
+            live.login_seq += 1;
+        }
+        self.notify(None);
     }
 
     /// Create a chat session (the harness side opens on the first message).
@@ -1014,6 +1256,11 @@ impl OmniService {
             live.running.clear();
             live.streaming.clear();
             live.pending.clear();
+            live.signing_in_since = None;
+            // A sign-in in progress ended with the sidecar.
+            if matches!(live.login, Some(LoginState::SigningIn { .. })) {
+                live.login = Some(LoginState::Stopped);
+            }
         }
         self.notify(None);
     }
@@ -1025,7 +1272,12 @@ impl OmniService {
             let live = self.live();
             live.running.is_empty()
                 && live.pending.is_empty()
-                && !matches!(live.login, Some(LoginState::SigningIn { .. }))
+                // A browser sign-in keeps the sidecar alive, unless it
+                // was abandoned (stopping cancels it).
+                && !(matches!(live.login, Some(LoginState::SigningIn { .. }))
+                    && live
+                        .signing_in_since
+                        .is_none_or(|t| t.elapsed() < LOGIN_ABANDON))
                 && live.last_used.is_some_and(|t| t.elapsed() >= idle)
         };
         let running = self.shared.rt.lock().await.driver.is_some();
@@ -1128,13 +1380,34 @@ impl OmniService {
                     }
                 }
                 HarnessEvent::Login(l) => {
-                    self.live().login = Some(l);
+                    let (ready, reload_options, reload_models) = {
+                        let mut live = self.live();
+                        live.login_seq += 1;
+                        if !matches!(l, LoginState::SigningIn { .. }) {
+                            live.signing_in_since = None;
+                        }
+                        let ready = l.is_ready();
+                        live.login = Some(l);
+                        (
+                            ready,
+                            !live.login_options.is_empty(),
+                            !live.models.is_empty(),
+                        )
+                    };
                     self.notify(None);
+                    if ready && (reload_options || reload_models) {
+                        // What the user may pick changed with the account.
+                        self.refresh_after_sign_in(&driver, reload_options, reload_models);
+                    }
                 }
                 HarnessEvent::Exited { message } => {
                     {
                         let mut live = self.live();
                         live.last_error = message;
+                        live.signing_in_since = None;
+                        if matches!(live.login, Some(LoginState::SigningIn { .. })) {
+                            live.login = Some(LoginState::Stopped);
+                        }
                         live.attached.clear();
                         live.by_external.clear();
                         live.running.clear();
@@ -1152,6 +1425,26 @@ impl OmniService {
                 }
             }
         }
+    }
+
+    /// Reloads the sign-in options (their `connected` flags) and the model
+    /// list the UI already loaded, after a sign-in completed.
+    fn refresh_after_sign_in(&self, driver: &Arc<dyn HarnessDriver>, options: bool, models: bool) {
+        let me = self.clone();
+        let d = driver.clone();
+        tokio::spawn(async move {
+            if options {
+                if let Ok(o) = d.login_options().await {
+                    me.live().login_options = o;
+                }
+            }
+            if models {
+                if let Ok(m) = d.models().await {
+                    me.live().models = m;
+                }
+            }
+            me.notify(None);
+        });
     }
 
     async fn on_request(&self, driver: &Arc<dyn HarnessDriver>, req: HarnessRequest) {

@@ -688,3 +688,177 @@ mod automations {
         app.shutdown().await;
     }
 }
+
+// ---- Sign-in lifecycle -----------------------------------------------------
+
+use litecord_app::harness::{HarnessDriver, HarnessLauncher, HarnessResult, LaunchContext};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrying_a_browser_sign_in_cancels_the_first_and_completes() {
+    let h = start(FakeDriver::demo().signed_out(), 600).await;
+    let omni = h.app.omni();
+    let l = omni.sign_in_with("browser").await.unwrap();
+    assert!(matches!(l, LoginState::SigningIn { url: Some(_), .. }));
+    // The user abandons the browser tab and tries again.
+    let l = omni.sign_in_with("browser").await.unwrap();
+    assert!(matches!(l, LoginState::SigningIn { .. }));
+    assert_eq!(h.launcher.driver().cancelled_logins(), 1);
+    assert!(matches!(omni.status().login, LoginState::SigningIn { .. }));
+    // The harness reports completion: SigningIn -> Ready.
+    h.launcher.driver().complete_login();
+    until(|| omni.status().login.is_ready().then_some(())).await;
+    h.app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_sign_in_goes_back_to_the_harness_state() {
+    let h = start(FakeDriver::demo().signed_out(), 600).await;
+    let omni = h.app.omni();
+    omni.sign_in_with("code").await.unwrap();
+    omni.cancel_sign_in().await.unwrap();
+    assert_eq!(omni.status().login, LoginState::SignedOut);
+    assert_eq!(h.launcher.driver().cancelled_logins(), 1);
+    // A new attempt works after the cancel.
+    omni.sign_in_with("code").await.unwrap();
+    omni.submit_login_code("ABCD-1234").await.unwrap();
+    until(|| omni.status().login.is_ready().then_some(())).await;
+    h.app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_mid_sign_in_does_not_leave_it_signing_in() {
+    let h = start(FakeDriver::demo().signed_out(), 600).await;
+    let omni = h.app.omni();
+    omni.sign_in_with("browser").await.unwrap();
+    omni.stop().await;
+    assert_eq!(omni.status().login, LoginState::Stopped);
+    // A late harness report for the stopped sidecar changes nothing.
+    h.launcher.driver().emit_login(LoginState::Error {
+        message: "Login cancelled".into(),
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(omni.status().login, LoginState::Stopped);
+    h.app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_refreshes_loaded_options_and_groups_them() {
+    let h = start(FakeDriver::demo().signed_out(), 600).await;
+    let omni = h.app.omni();
+    let options = omni.login_options().await.unwrap();
+    assert!(options.iter().all(|o| !o.connected));
+    let groups = omni.status().login_groups();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].label, "Demo");
+    assert_eq!(groups[0].options.len(), 3);
+    assert!(groups[0].featured && !groups[0].connected);
+    omni.sign_in_api_key(
+        "api_key",
+        &litecord_core::secrets::Secret::new("sk-demo-key-123".into()),
+    )
+    .await
+    .unwrap();
+    until(|| {
+        omni.status()
+            .login_options
+            .iter()
+            .all(|o| o.connected)
+            .then_some(())
+    })
+    .await;
+    assert!(omni.status().login_groups()[0].connected);
+    h.app.shutdown().await;
+}
+
+/// A launcher whose binary appears while the app runs.
+#[derive(Debug)]
+struct Appearing {
+    inner: FakeLauncher,
+    present: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl HarnessLauncher for Appearing {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::Codex
+    }
+
+    fn executable(&self) -> Option<std::path::PathBuf> {
+        self.present
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| "/opt/test/bin/codex".into())
+    }
+
+    async fn launch(&self, ctx: &LaunchContext) -> HarnessResult<Arc<dyn HarnessDriver>> {
+        self.inner.launch(ctx).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_installed_while_running_is_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = LitecordConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..LitecordConfig::default()
+    };
+    let launcher = Arc::new(Appearing {
+        inner: FakeLauncher::new(FakeDriver::demo()),
+        present: std::sync::atomic::AtomicBool::new(false),
+    });
+    let app = LitecordApp::builder(cfg)
+        .backend(Arc::new(MockBackend::new(fixtures::generate(
+            5,
+            Timestamp::now(),
+        ))))
+        .omni_launcher(launcher.clone())
+        .omni_mcp_command("/usr/bin/litecord".into())
+        .start()
+        .await
+        .unwrap();
+    let omni = app.omni();
+    let status = omni.status();
+    assert!(!status.harnesses[0].installed);
+    assert_eq!(
+        status.harnesses[0].install_hint,
+        "npm install -g @openai/codex"
+    );
+    assert_eq!(status.login, LoginState::NotInstalled);
+    assert!(omni.select(HarnessKind::Codex).await.is_err());
+
+    launcher
+        .present
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let infos = omni.refresh_installed();
+    assert!(infos[0].installed);
+    assert_eq!(infos[0].path.as_deref(), Some("/opt/test/bin/codex"));
+    let status = omni.status();
+    assert_eq!(status.selected, Some(HarnessKind::Codex));
+    assert_eq!(status.login, LoginState::Stopped);
+    omni.select(HarnessKind::Codex).await.unwrap();
+    assert!(omni.refresh_login().await.unwrap().is_ready());
+    app.shutdown().await;
+}
+
+/// OpenCode cannot cancel a pending browser sign-in in place; a retry
+/// restarts the sidecar so the new attempt does not hit a busy port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_restarts_a_harness_that_cannot_cancel() {
+    let h = start(FakeDriver::demo().signed_out().cancel_needs_restart(), 600).await;
+    let omni = h.app.omni();
+    omni.sign_in_with("browser").await.unwrap();
+    assert_eq!(h.launcher.launches(), 1);
+    let l = omni.sign_in_with("browser").await.unwrap();
+    assert!(matches!(l, LoginState::SigningIn { .. }));
+    assert_eq!(h.launcher.launches(), 2, "sidecar restarted");
+    assert!(matches!(omni.status().login, LoginState::SigningIn { .. }));
+    h.launcher.driver().complete_login();
+    until(|| omni.status().login.is_ready().then_some(())).await;
+
+    // An explicit cancel restarts it too, and the status leaves SigningIn.
+    omni.sign_out().await.unwrap();
+    omni.sign_in_with("browser").await.unwrap();
+    omni.cancel_sign_in().await.unwrap();
+    assert!(!matches!(omni.status().login, LoginState::SigningIn { .. }));
+    assert!(!omni.status().running);
+    h.app.shutdown().await;
+}

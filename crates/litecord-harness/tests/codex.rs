@@ -125,7 +125,7 @@ async fn login_flow() {
     assert_eq!(
         next(&mut rx).await,
         HarnessEvent::Login(LoginState::Ready {
-            account: Some("ChatGPT Pro".into())
+            account: Some("ChatGPT Pro (me@x.y)".into())
         })
     );
 }
@@ -311,25 +311,178 @@ async fn failed_turn_and_pending_request_on_eof() {
 async fn login_options_and_unknown_option() {
     let (driver, _srv) = setup().await;
     let opts = driver.login_options().await.unwrap();
+    let got: Vec<(&str, &str, LoginKind, bool)> = opts
+        .iter()
+        .map(|o| (o.id.as_str(), o.label.as_str(), o.kind, o.featured))
+        .collect();
     assert_eq!(
-        opts,
+        got,
         [
-            LoginOption {
-                id: "chatgpt".into(),
-                label: "ChatGPT account".into(),
-                kind: LoginKind::Browser,
-            },
-            LoginOption {
-                id: "api_key".into(),
-                label: "OpenAI API key".into(),
-                kind: LoginKind::ApiKey,
-            },
+            ("chatgpt", "Sign in with ChatGPT", LoginKind::Browser, true),
+            ("api_key", "OpenAI API key", LoginKind::ApiKey, true),
+            (
+                "chatgpt_device_code",
+                "Sign in with ChatGPT using a device code",
+                LoginKind::Browser,
+                false
+            ),
         ]
     );
+    for o in &opts {
+        assert_eq!(o.provider.as_deref(), Some("openai"));
+        assert_eq!(o.provider_label.as_deref(), Some("OpenAI"));
+        assert_eq!(o.method_label, o.label);
+        assert!(!o.connected);
+        assert!(o.prompts.is_empty());
+    }
     assert!(matches!(
         driver.begin_login_with("api_key").await,
         Err(HarnessError::Unsupported(_))
     ));
+    assert!(matches!(
+        driver.login_api_key("chatgpt", "sk-x").await,
+        Err(HarnessError::Unsupported(_))
+    ));
+}
+
+/// A browser sign-in that is abandoned and restarted: Codex reports the
+/// first attempt as cancelled after the second one started. That late
+/// failure must not turn the new attempt into an error.
+#[tokio::test]
+async fn superseded_browser_login_is_ignored() {
+    let (driver, mut srv) = setup().await;
+    let mut rx = driver.subscribe();
+    for id in ["l1", "l2"] {
+        let (state, ()) = tokio::join!(driver.begin_login_with("chatgpt"), async {
+            let req = srv.expect("account/login/start").await;
+            assert_eq!(req["params"], json!({ "type": "chatgpt" }));
+            if id == "l2" {
+                // As codex-cli 0.157.1 does: the old attempt is reported
+                // cancelled before the new request is answered.
+                srv.send(json!({ "method": "account/login/completed", "params": {
+                    "loginId": "l1", "success": false, "error": "Login server error: Login cancelled" } }))
+                    .await;
+            }
+            srv.reply(
+                &req,
+                json!({ "type": "chatgpt", "loginId": id, "authUrl": format!("https://auth.example/{id}") }),
+            )
+            .await;
+        });
+        assert!(matches!(
+            state.unwrap(),
+            LoginState::SigningIn { url: Some(_), .. }
+        ));
+    }
+    // A late duplicate for the old attempt is ignored too.
+    srv.send(json!({ "method": "account/login/completed", "params": {
+        "loginId": "l1", "success": false, "error": "Login server error: Login cancelled" } }))
+        .await;
+    srv.send(json!({ "method": "account/login/completed", "params": {
+        "loginId": "l2", "success": false, "error": "Login server error: port busy" } }))
+        .await;
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Error {
+            message: "Login server error: port busy".into()
+        })
+    );
+    // A retry after the failure still works and completes.
+    let (state, ()) = tokio::join!(driver.begin_login(), async {
+        let req = srv.expect("account/login/start").await;
+        srv.reply(
+            &req,
+            json!({ "type": "chatgpt", "loginId": "l3", "authUrl": "https://auth.example/l3" }),
+        )
+        .await;
+    });
+    state.unwrap();
+    srv.send(json!({ "method": "account/login/completed", "params": { "loginId": "l3", "success": true, "error": null } }))
+        .await;
+    let req = srv.expect("account/read").await;
+    srv.reply(
+        &req,
+        json!({ "account": { "type": "chatgpt", "email": null, "planType": "plus" }, "requiresOpenaiAuth": true }),
+    )
+    .await;
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("ChatGPT Plus".into())
+        })
+    );
+}
+
+#[tokio::test]
+async fn cancel_login_frees_the_pending_attempt() {
+    let (driver, mut srv) = setup().await;
+    let mut rx = driver.subscribe();
+    // Nothing pending: no request is sent.
+    driver.cancel_login().await.unwrap();
+    let (state, ()) = tokio::join!(driver.begin_login(), async {
+        let req = srv.expect("account/login/start").await;
+        srv.reply(
+            &req,
+            json!({ "type": "chatgpt", "loginId": "l9", "authUrl": "https://auth.example/l9" }),
+        )
+        .await;
+    });
+    state.unwrap();
+    let (r, ()) = tokio::join!(driver.cancel_login(), async {
+        let req = srv.expect("account/login/cancel").await;
+        assert_eq!(req["params"], json!({ "loginId": "l9" }));
+        srv.reply(&req, json!({ "status": "canceled" })).await;
+    });
+    r.unwrap();
+    // Codex then reports the cancelled attempt; it is not an error.
+    srv.send(json!({ "method": "account/login/completed", "params": {
+        "loginId": "l9", "success": false, "error": "Login server error: Login cancelled" } }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn device_code_login() {
+    let (driver, mut srv) = setup().await;
+    let (state, ()) = tokio::join!(driver.begin_login_with("chatgpt_device_code"), async {
+        let req = srv.expect("account/login/start").await;
+        assert_eq!(req["params"], json!({ "type": "chatgptDeviceCode" }));
+        srv.reply(
+            &req,
+            json!({ "type": "chatgptDeviceCode", "loginId": "d1",
+                    "verificationUrl": "https://auth.example/device", "userCode": "ABCD-1234" }),
+        )
+        .await;
+    });
+    let LoginState::SigningIn {
+        url,
+        instructions,
+        needs_code,
+    } = state.unwrap()
+    else {
+        panic!("expected SigningIn");
+    };
+    assert_eq!(url.as_deref(), Some("https://auth.example/device"));
+    assert!(instructions.unwrap().contains("ABCD-1234"));
+    assert!(!needs_code);
+}
+
+#[tokio::test]
+async fn provider_without_openai_auth_is_ready() {
+    let (driver, mut srv) = setup().await;
+    let (state, ()) = tokio::join!(driver.login_state(), async {
+        let req = srv.expect("account/read").await;
+        srv.reply(
+            &req,
+            json!({ "account": null, "requiresOpenaiAuth": false }),
+        )
+        .await;
+    });
+    assert!(state.unwrap().is_ready());
 }
 
 #[tokio::test]
@@ -338,22 +491,47 @@ async fn api_key_login_success_and_failure_redacts_key() {
     let mut rx = driver.subscribe();
     const KEY: &str = "sk-test-SECRET-123";
 
-    let (r, ()) = tokio::join!(driver.login_api_key("api_key", KEY), async {
+    // A browser sign-in left open is cancelled first (it holds a port).
+    let (state, ()) = tokio::join!(driver.begin_login(), async {
+        let req = srv.expect("account/login/start").await;
+        srv.reply(
+            &req,
+            json!({ "type": "chatgpt", "loginId": "b1", "authUrl": "https://auth.example/b1" }),
+        )
+        .await;
+    });
+    state.unwrap();
+
+    let padded = format!(" {KEY}\n");
+    let (r, ()) = tokio::join!(driver.login_api_key("api_key", &padded), async {
+        let req = srv.expect("account/login/cancel").await;
+        assert_eq!(req["params"]["loginId"], "b1");
+        srv.reply(&req, json!({ "status": "canceled" })).await;
         let req = srv.expect("account/login/start").await;
         assert_eq!(req["params"]["type"], "apiKey");
-        assert_eq!(req["params"]["apiKey"], KEY);
-        srv.reply(&req, json!({})).await;
+        assert_eq!(req["params"]["apiKey"], KEY, "trimmed");
+        srv.reply(&req, json!({ "type": "apiKey" })).await;
         let req = srv.expect("account/read").await;
-        srv.reply(&req, json!({ "account": { "type": "apiKey" } }))
-            .await;
+        srv.reply(
+            &req,
+            json!({ "account": { "type": "apiKey" }, "requiresOpenaiAuth": true }),
+        )
+        .await;
     });
     r.unwrap();
     assert_eq!(
         next(&mut rx).await,
         HarnessEvent::Login(LoginState::Ready {
-            account: Some("API key".into())
+            account: Some("OpenAI API key".into())
         })
     );
+    // Now the options report the account as connected.
+    assert!(driver
+        .login_options()
+        .await
+        .unwrap()
+        .iter()
+        .all(|o| o.connected));
 
     let (r, ()) = tokio::join!(driver.login_api_key("api_key", KEY), async {
         let req = srv.expect("account/login/start").await;
@@ -365,10 +543,33 @@ async fn api_key_login_success_and_failure_redacts_key() {
     let text = format!("{err} {err:?}");
     assert!(!text.contains(KEY), "key leaked: {text}");
     assert!(text.contains("invalid key"));
+
+    assert!(matches!(
+        driver.login_api_key("api_key", "   ").await,
+        Err(HarnessError::Protocol(_))
+    ));
 }
 
 #[tokio::test]
-async fn models_list_and_method_not_found() {
+async fn logout_reports_the_new_state() {
+    let (driver, mut srv) = setup().await;
+    let mut rx = driver.subscribe();
+    let (r, ()) = tokio::join!(driver.logout(), async {
+        let req = srv.expect("account/logout").await;
+        srv.reply(&req, json!({})).await;
+        let req = srv.expect("account/read").await;
+        srv.reply(&req, json!({ "account": null, "requiresOpenaiAuth": true }))
+            .await;
+    });
+    r.unwrap();
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::SignedOut)
+    );
+}
+
+#[tokio::test]
+async fn models_list_pages_and_method_not_found() {
     let (driver, mut srv) = setup().await;
 
     let (r, ()) = tokio::join!(driver.models(), async {
@@ -376,11 +577,19 @@ async fn models_list_and_method_not_found() {
         assert_eq!(req["params"], json!({}));
         srv.reply(
             &req,
-            json!({ "data": [{ "id": "gpt-5-codex" }, { "model": "o4-mini" }] }),
+            json!({ "data": [{ "id": "model-a" }, { "model": "model-b" }, { "id": "old", "hidden": true }],
+                    "nextCursor": "p2" }),
+        )
+        .await;
+        let req = srv.expect("model/list").await;
+        assert_eq!(req["params"], json!({ "cursor": "p2" }));
+        srv.reply(
+            &req,
+            json!({ "data": [{ "id": "model-c" }, { "id": "model-a" }], "nextCursor": null }),
         )
         .await;
     });
-    assert_eq!(r.unwrap(), ["gpt-5-codex", "o4-mini"]);
+    assert_eq!(r.unwrap(), ["model-a", "model-b", "model-c"]);
 
     let (r, ()) = tokio::join!(driver.models(), async {
         let req = srv.expect("model/list").await;

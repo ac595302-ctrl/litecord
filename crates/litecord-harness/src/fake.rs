@@ -33,6 +33,9 @@ struct State {
     interrupted: Vec<String>,
     stopped: bool,
     next_request: u64,
+    cancelled: u32,
+    /// Like OpenCode: a pending sign-in can only be cancelled by a restart.
+    cancel_needs_restart: bool,
 }
 
 #[derive(Clone)]
@@ -78,6 +81,13 @@ impl FakeDriver {
         self
     }
 
+    /// Makes `cancel_login` of a pending sign-in return `Unsupported`, as
+    /// OpenCode does (the app then restarts the sidecar).
+    pub fn cancel_needs_restart(self) -> Self {
+        self.lock().cancel_needs_restart = true;
+        self
+    }
+
     /// Simulates the browser completing sign-in.
     pub fn complete_login(&self) {
         let state = LoginState::Ready {
@@ -101,6 +111,17 @@ impl FakeDriver {
 
     pub fn is_stopped(&self) -> bool {
         self.lock().stopped
+    }
+
+    /// How many times a pending sign-in was cancelled.
+    pub fn cancelled_logins(&self) -> u32 {
+        self.lock().cancelled
+    }
+
+    /// Simulates the harness reporting a sign-in result (e.g. a late
+    /// completion) without changing its stored state.
+    pub fn emit_login(&self, state: LoginState) {
+        let _ = self.tx.send(HarnessEvent::Login(state));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -150,23 +171,42 @@ impl HarnessDriver for FakeDriver {
     }
 
     async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        let connected = self.lock().login.as_ref().is_some_and(LoginState::is_ready);
+        let option = |id: &str, label: &str, method: &str, kind: LoginKind| LoginOption {
+            provider: Some("demo".into()),
+            provider_label: Some("Demo".into()),
+            method_label: method.into(),
+            featured: true,
+            connected,
+            ..LoginOption::new(id, label, kind)
+        };
         Ok(vec![
-            LoginOption {
-                id: "browser".into(),
-                label: "Demo account (browser)".into(),
-                kind: LoginKind::Browser,
-            },
-            LoginOption {
-                id: "code".into(),
-                label: "Demo account (paste a code)".into(),
-                kind: LoginKind::Browser,
-            },
-            LoginOption {
-                id: "api_key".into(),
-                label: "Demo API key".into(),
-                kind: LoginKind::ApiKey,
-            },
+            option(
+                "browser",
+                "Demo account (browser)",
+                "Browser",
+                LoginKind::Browser,
+            ),
+            option(
+                "code",
+                "Demo account (paste a code)",
+                "Paste a code",
+                LoginKind::Browser,
+            ),
+            option("api_key", "Demo API key", "API key", LoginKind::ApiKey),
         ])
+    }
+
+    async fn cancel_login(&self) -> HarnessResult<()> {
+        let mut s = self.lock();
+        s.cancelled += 1;
+        if matches!(s.login, Some(LoginState::SigningIn { .. })) {
+            s.login = Some(LoginState::SignedOut);
+            if s.cancel_needs_restart {
+                return Err(HarnessError::Unsupported("cancelling a sign-in"));
+            }
+        }
+        Ok(())
     }
 
     async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
@@ -393,9 +433,14 @@ impl HarnessLauncher for FakeLauncher {
             Err(p) => p.into_inner(),
         };
         if current.is_stopped() {
-            let (login, sessions) = {
+            let (login, sessions, cancel_needs_restart) = {
                 let s = current.lock();
-                (s.login.clone(), s.sessions.clone())
+                // A sign-in in progress ends with the sidecar.
+                let login = match &s.login {
+                    Some(LoginState::SigningIn { .. }) => Some(LoginState::SignedOut),
+                    other => other.clone(),
+                };
+                (login, s.sessions.clone(), s.cancel_needs_restart)
             };
             let (tx, _) = broadcast::channel(256);
             let responder = current.responder.clone();
@@ -404,6 +449,7 @@ impl HarnessLauncher for FakeLauncher {
                 state: Arc::new(Mutex::new(State {
                     login,
                     sessions,
+                    cancel_needs_restart,
                     ..State::default()
                 })),
                 responder,

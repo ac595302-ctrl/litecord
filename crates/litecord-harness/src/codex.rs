@@ -1,10 +1,18 @@
 //! Codex `app-server` driver (feature `codex`). See docs/AGENT_HARNESS.md.
 //!
 //! Speaks newline-delimited JSON-RPC 2.0 (without the `jsonrpc` field, like
-//! Codex itself) over the child's stdin/stdout. Method and field names come
-//! from the public app-server README and are kept as constants below so they
-//! are easy to check against `codex app-server generate-json-schema`.
+//! Codex itself) over the child's stdin/stdout. Method and field names are
+//! kept as constants below and were checked against
+//! `codex app-server generate-json-schema` of codex-cli 0.157.1 (the doctor
+//! command repeats that check against whatever version is installed).
 //! Parsing is tolerant: unknown notifications and odd payloads are ignored.
+//!
+//! npm installs `codex` as a Node shim that starts a native binary from a
+//! platform package. The launcher starts that native binary directly when
+//! it can find it, so Omni does not depend on `node` being on the app's
+//! `PATH` (a macOS app started from Finder, or a Windows app whose `Path`
+//! predates the Node install), and stopping the sidecar stops Codex itself
+//! rather than only the shim (or `cmd.exe` on Windows).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +27,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::driver::{find_executable, HarnessDriver, HarnessLauncher, LaunchContext};
+use crate::driver::{
+    find_executable, HarnessDriver, HarnessLauncher, LaunchContext, ResolvedExecutable,
+};
 use crate::types::*;
 
 // ---- Protocol names --------------------------------------------------------
@@ -32,6 +42,7 @@ const M_INITIALIZE: &str = "initialize";
 const M_INITIALIZED: &str = "initialized";
 const M_ACCOUNT_READ: &str = "account/read";
 const M_LOGIN_START: &str = "account/login/start";
+const M_LOGIN_CANCEL: &str = "account/login/cancel";
 const M_LOGOUT: &str = "account/logout";
 const M_THREAD_START: &str = "thread/start";
 const M_THREAD_RESUME: &str = "thread/resume";
@@ -62,6 +73,7 @@ pub const PROTOCOL_METHODS: &[&str] = &[
     M_INITIALIZED,
     M_ACCOUNT_READ,
     M_LOGIN_START,
+    M_LOGIN_CANCEL,
     M_LOGOUT,
     M_THREAD_START,
     M_THREAD_RESUME,
@@ -120,11 +132,35 @@ const F_OUTPUT_TOKENS: &str = "outputTokens";
 const F_API_KEY: &str = "apiKey";
 const F_DATA: &str = "data";
 const F_MODELS: &str = "models";
+const F_LOGIN_ID: &str = "loginId";
+const F_REQUIRES_OPENAI_AUTH: &str = "requiresOpenaiAuth";
+const F_EMAIL: &str = "email";
+const F_VERIFICATION_URL: &str = "verificationUrl";
+const F_USER_CODE: &str = "userCode";
+const F_CURSOR: &str = "cursor";
+const F_NEXT_CURSOR: &str = "nextCursor";
+const F_HIDDEN: &str = "hidden";
+
+/// Payload fields the sign-in and model paths depend on; the doctor checks
+/// they are in the installed version's schema.
+pub const PROTOCOL_FIELDS: &[&str] = &[
+    F_AUTH_URL,
+    F_LOGIN_ID,
+    F_API_KEY,
+    F_PLAN_TYPE,
+    F_SUCCESS,
+    F_REQUIRES_OPENAI_AUTH,
+    F_VERIFICATION_URL,
+    F_USER_CODE,
+    F_NEXT_CURSOR,
+];
 
 // Values.
 const ACCOUNT_CHATGPT: &str = "chatgpt";
 const ACCOUNT_API_KEY: &str = "apiKey";
+const ACCOUNT_BEDROCK: &str = "amazonBedrock";
 const LOGIN_TYPE_CHATGPT: &str = "chatgpt";
+const LOGIN_TYPE_DEVICE_CODE: &str = "chatgptDeviceCode";
 const LOGIN_TYPE_API_KEY: &str = "apiKey";
 const TURN_FAILED: &str = "failed";
 const INPUT_TEXT: &str = "text";
@@ -152,16 +188,30 @@ const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
 
 // Login options offered to the app.
 const OPTION_CHATGPT: &str = "chatgpt";
-const OPTION_CHATGPT_LABEL: &str = "ChatGPT account";
+const OPTION_CHATGPT_LABEL: &str = "Sign in with ChatGPT";
+const OPTION_DEVICE_CODE: &str = "chatgpt_device_code";
+const OPTION_DEVICE_CODE_LABEL: &str = "Sign in with ChatGPT using a device code";
 const OPTION_API_KEY: &str = "api_key";
 const OPTION_API_KEY_LABEL: &str = "OpenAI API key";
+const PROVIDER: &str = "openai";
+const PROVIDER_LABEL: &str = "OpenAI";
+/// Account label when Codex is configured for a provider that needs no
+/// OpenAI sign-in (`requiresOpenaiAuth: false`).
+const NO_AUTH_NEEDED_LABEL: &str = "configured model provider";
 
-// CLI (doctor).
+// CLI (doctor) and launch.
 const ARG_VERSION: &str = "--version";
 const SUBCOMMAND_SCHEMA: &str = "generate-json-schema";
 const ARG_OUT: &str = "--out";
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEMA_TIMEOUT: Duration = Duration::from_secs(60);
+/// The npm package whose `bin/codex.js` shim starts the native binary.
+const NPM_PACKAGE: &str = "@openai/codex";
+/// Environment the npm shim gives the native binary.
+const ENV_MANAGED_BY_NPM: &str = "CODEX_MANAGED_BY_NPM";
+const ENV_MANAGED_PACKAGE_ROOT: &str = "CODEX_MANAGED_PACKAGE_ROOT";
+/// Upper bound on `model/list` pages.
+const MODEL_PAGES: usize = 20;
 
 // JSON-RPC.
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
@@ -315,6 +365,11 @@ struct Inner {
     exited: AtomicBool,
     child: Mutex<Option<Child>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// `loginId` of the browser/device sign-in in progress. Completions for
+    /// any other id (a superseded or cancelled attempt) are ignored.
+    pending_login: Mutex<Option<String>>,
+    /// Last sign-in state read or reported.
+    last_login: Mutex<Option<LoginState>>,
 }
 
 impl Drop for Inner {
@@ -362,6 +417,8 @@ impl CodexDriver {
             exited: AtomicBool::new(false),
             child: Mutex::new(child),
             tasks: Mutex::new(Vec::new()),
+            pending_login: Mutex::new(None),
+            last_login: Mutex::new(None),
         });
         let writer_task = tokio::spawn(write_loop(writer, out_rx));
         let reader_task = tokio::spawn(read_loop(reader, Arc::downgrade(&inner)));
@@ -408,6 +465,9 @@ impl CodexDriver {
 
 impl Inner {
     fn emit(&self, e: HarnessEvent) {
+        if let HarnessEvent::Login(l) = &e {
+            *lock(&self.last_login) = Some(l.clone());
+        }
         let _ = self.tx.send(e);
     }
 
@@ -428,7 +488,44 @@ impl Inner {
 
     async fn read_login(&self) -> HarnessResult<LoginState> {
         let result = self.peer.call(M_ACCOUNT_READ, json!({})).await?;
-        Ok(login_from_account(result.get(F_ACCOUNT)))
+        let state = login_from_read(&result);
+        *lock(&self.last_login) = Some(state.clone());
+        Ok(state)
+    }
+
+    /// Cancels the pending browser/device sign-in, if any (best effort).
+    async fn cancel_pending_login(&self) -> HarnessResult<()> {
+        let Some(id) = lock(&self.pending_login).take() else {
+            return Ok(());
+        };
+        match self
+            .peer
+            .request(M_LOGIN_CANCEL, json!({ F_LOGIN_ID: id }))
+            .await?
+        {
+            // `{"status":"canceled"}` or `{"status":"notFound"}` (it had
+            // already finished): either way nothing is pending any more.
+            Ok(_) => Ok(()),
+            Err(e) if e.code == ERR_METHOD_NOT_FOUND => {
+                Err(HarnessError::Unsupported("cancelling a sign-in"))
+            }
+            Err(e) => Err(HarnessError::Harness(e.message)),
+        }
+    }
+
+    /// Whether a `account/login/completed` for `login_id` belongs to the
+    /// sign-in in progress (and, if so, clears it). An id-less completion
+    /// (API key logins) always counts.
+    fn take_login_completion(&self, login_id: Option<&str>) -> bool {
+        let mut pending = lock(&self.pending_login);
+        match login_id {
+            None => true,
+            Some(id) if pending.as_deref() == Some(id) => {
+                *pending = None;
+                true
+            }
+            Some(_) => false,
+        }
     }
 
     fn on_message(self: &Arc<Self>, msg: Map<String, Value>) {
@@ -482,6 +579,13 @@ impl Inner {
     fn on_notification(self: &Arc<Self>, method: &str, params: &Value) {
         match method {
             N_LOGIN_COMPLETED => {
+                let login_id = params.get(F_LOGIN_ID).and_then(Value::as_str);
+                if !self.take_login_completion(login_id) {
+                    // A superseded or cancelled attempt: Codex reports
+                    // "Login cancelled" for it after the new one started.
+                    tracing::debug!("codex: ignoring completion of an old sign-in");
+                    return;
+                }
                 if params.get(F_SUCCESS).and_then(Value::as_bool) == Some(false) {
                     let message = params
                         .get(F_ERROR)
@@ -645,16 +749,52 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn login_from_account(account: Option<&Value>) -> LoginState {
-    let Some(account) = account.filter(|a| !a.is_null()) else {
-        return LoginState::SignedOut;
+/// Display name of a ChatGPT `planType`; `None` for "unknown"/empty.
+fn plan_label(plan: &str) -> Option<String> {
+    let label = match plan {
+        "" | "unknown" => return None,
+        "prolite" => "Pro Lite".to_owned(),
+        "edu_plus" => "Edu Plus".to_owned(),
+        "edu_pro" => "Edu Pro".to_owned(),
+        p if p.starts_with("self_serve_business") || p == "business" => "Business".to_owned(),
+        p if p.starts_with("enterprise") || p.starts_with("ent") => "Enterprise".to_owned(),
+        p => p.split('_').map(capitalize).collect::<Vec<_>>().join(" "),
     };
+    Some(label)
+}
+
+/// Sign-in state from an `account/read` result.
+fn login_from_read(result: &Value) -> LoginState {
+    match result.get(F_ACCOUNT).filter(|a| !a.is_null()) {
+        Some(account) => login_from_account(account),
+        // A provider that needs no OpenAI sign-in (e.g. a local model
+        // server configured in config.toml) is usable as is.
+        None if result.get(F_REQUIRES_OPENAI_AUTH).and_then(Value::as_bool) == Some(false) => {
+            LoginState::Ready {
+                account: Some(NO_AUTH_NEEDED_LABEL.to_owned()),
+            }
+        }
+        None => LoginState::SignedOut,
+    }
+}
+
+fn login_from_account(account: &Value) -> LoginState {
     let label = match account.get(F_TYPE).and_then(Value::as_str) {
-        Some(ACCOUNT_CHATGPT) => match str_field(account, F_PLAN_TYPE) {
-            Some(plan) if !plan.is_empty() => format!("ChatGPT {}", capitalize(&plan)),
-            _ => "ChatGPT".to_owned(),
-        },
-        Some(ACCOUNT_API_KEY) => "API key".to_owned(),
+        Some(ACCOUNT_CHATGPT) => {
+            let mut label = match str_field(account, F_PLAN_TYPE)
+                .as_deref()
+                .and_then(plan_label)
+            {
+                Some(plan) => format!("ChatGPT {plan}"),
+                None => "ChatGPT".to_owned(),
+            };
+            if let Some(email) = str_field(account, F_EMAIL).filter(|e| !e.is_empty()) {
+                label.push_str(&format!(" ({email})"));
+            }
+            label
+        }
+        Some(ACCOUNT_API_KEY) => "OpenAI API key".to_owned(),
+        Some(ACCOUNT_BEDROCK) => "Amazon Bedrock".to_owned(),
         _ => return LoginState::Ready { account: None },
     };
     LoginState::Ready {
@@ -729,22 +869,23 @@ fn transcript_item(item: &Value) -> Option<TranscriptItem> {
     Some(TranscriptItem { kind, text })
 }
 
-/// Model names from a `model/list` result. Accepts `{"data":[..]}`,
+/// Model names from a `model/list` result, appended to `out` without
+/// duplicates. Accepts `{"data":[..]}` (the schema's shape),
 /// `{"models":[..]}` or a bare array, whose entries are strings or objects
-/// with `id` / `model`.
-fn parse_models(result: &Value) -> Vec<String> {
+/// with `id` / `model`; entries marked `hidden` are skipped.
+fn parse_models_into(result: &Value, out: &mut Vec<String>) {
     let list = result
         .get(F_DATA)
         .and_then(Value::as_array)
         .or_else(|| result.get(F_MODELS).and_then(Value::as_array))
         .or_else(|| result.as_array());
     let Some(list) = list else {
-        return Vec::new();
+        return;
     };
-    let mut out: Vec<String> = Vec::new();
     for entry in list {
         let name = match entry {
             Value::String(s) => Some(s.clone()),
+            Value::Object(_) if entry.get(F_HIDDEN).and_then(Value::as_bool) == Some(true) => None,
             Value::Object(_) => str_field(entry, F_ID).or_else(|| str_field(entry, F_MODEL)),
             _ => None,
         };
@@ -754,16 +895,20 @@ fn parse_models(result: &Value) -> Vec<String> {
             }
         }
     }
+}
+
+#[cfg(test)]
+fn parse_models(result: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    parse_models_into(result, &mut out);
     out
 }
 
-/// Removes every occurrence of `secret` from `text`.
-fn redact(text: &str, secret: &str) -> String {
-    if secret.is_empty() {
-        text.to_owned()
-    } else {
-        text.replace(secret, "[redacted]")
-    }
+/// The `authUrl` host, for logs that must not carry the full URL (it holds
+/// the PKCE challenge and state).
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
 // ---- Trait impls -----------------------------------------------------------
@@ -783,6 +928,11 @@ impl HarnessDriver for CodexDriver {
     }
 
     async fn begin_login(&self) -> HarnessResult<LoginState> {
+        // Codex cancels an earlier browser sign-in itself when a new one
+        // starts, and reports that ("Login cancelled", old `loginId`)
+        // before answering the new request. Forget the old id first so
+        // that report is ignored.
+        *lock(&self.inner.pending_login) = None;
         let result = self
             .inner
             .peer
@@ -790,6 +940,8 @@ impl HarnessDriver for CodexDriver {
             .await?;
         let url = str_field(&result, F_AUTH_URL)
             .ok_or_else(|| HarnessError::Protocol("login/start returned no authUrl".into()))?;
+        *lock(&self.inner.pending_login) = str_field(&result, F_LOGIN_ID);
+        tracing::debug!(host = url_host(&url), "codex: browser sign-in started");
         Ok(LoginState::SigningIn {
             url: Some(url),
             instructions: None,
@@ -798,28 +950,84 @@ impl HarnessDriver for CodexDriver {
     }
 
     async fn login_options(&self) -> HarnessResult<Vec<LoginOption>> {
+        let connected = lock(&self.inner.last_login)
+            .as_ref()
+            .is_some_and(LoginState::is_ready);
+        let option = |id: &str, label: &str, kind: LoginKind, featured: bool| LoginOption {
+            provider: Some(PROVIDER.into()),
+            provider_label: Some(PROVIDER_LABEL.into()),
+            featured,
+            connected,
+            ..LoginOption::new(id, label, kind)
+        };
         Ok(vec![
-            LoginOption {
-                id: OPTION_CHATGPT.into(),
-                label: OPTION_CHATGPT_LABEL.into(),
-                kind: LoginKind::Browser,
-            },
-            LoginOption {
-                id: OPTION_API_KEY.into(),
-                label: OPTION_API_KEY_LABEL.into(),
-                kind: LoginKind::ApiKey,
-            },
+            option(
+                OPTION_CHATGPT,
+                OPTION_CHATGPT_LABEL,
+                LoginKind::Browser,
+                true,
+            ),
+            option(
+                OPTION_API_KEY,
+                OPTION_API_KEY_LABEL,
+                LoginKind::ApiKey,
+                true,
+            ),
+            option(
+                OPTION_DEVICE_CODE,
+                OPTION_DEVICE_CODE_LABEL,
+                LoginKind::Browser,
+                false,
+            ),
         ])
     }
 
     async fn begin_login_with(&self, option: &str) -> HarnessResult<LoginState> {
         match option {
             OPTION_CHATGPT => self.begin_login().await,
+            OPTION_DEVICE_CODE => {
+                self.inner.cancel_pending_login().await.ok();
+                *lock(&self.inner.pending_login) = None;
+                let result = self
+                    .inner
+                    .peer
+                    .call(M_LOGIN_START, json!({ F_TYPE: LOGIN_TYPE_DEVICE_CODE }))
+                    .await?;
+                let (Some(url), Some(code)) = (
+                    str_field(&result, F_VERIFICATION_URL),
+                    str_field(&result, F_USER_CODE),
+                ) else {
+                    return Err(HarnessError::Protocol(
+                        "device code sign-in returned no URL or code".into(),
+                    ));
+                };
+                *lock(&self.inner.pending_login) = str_field(&result, F_LOGIN_ID);
+                Ok(LoginState::SigningIn {
+                    url: Some(url),
+                    instructions: Some(format!(
+                        "Sign in to ChatGPT on that page and enter the code {code}."
+                    )),
+                    needs_code: false,
+                })
+            }
             _ => Err(HarnessError::Unsupported("this sign-in method")),
         }
     }
 
-    async fn login_api_key(&self, _option: &str, key: &str) -> HarnessResult<()> {
+    async fn cancel_login(&self) -> HarnessResult<()> {
+        self.inner.cancel_pending_login().await
+    }
+
+    async fn login_api_key(&self, option: &str, key: &str) -> HarnessResult<()> {
+        if option != OPTION_API_KEY {
+            return Err(HarnessError::Unsupported("this sign-in method"));
+        }
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(HarnessError::Protocol("empty API key".into()));
+        }
+        // A browser sign-in left open keeps its localhost callback bound.
+        self.inner.cancel_pending_login().await.ok();
         // The key only ever lives in this request body; it is never logged,
         // stored, or echoed back in errors.
         let params = json!({ F_TYPE: LOGIN_TYPE_API_KEY, F_API_KEY: key });
@@ -837,22 +1045,42 @@ impl HarnessDriver for CodexDriver {
     }
 
     async fn models(&self) -> HarnessResult<Vec<String>> {
-        match self.inner.peer.request(M_MODEL_LIST, json!({})).await {
-            Ok(Ok(result)) => Ok(parse_models(&result)),
-            Ok(Err(e)) => {
-                tracing::debug!(code = e.code, "codex: model/list failed: {}", e.message);
-                Ok(Vec::new())
-            }
-            Err(e) => {
-                tracing::debug!("codex: model/list failed: {e}");
-                Ok(Vec::new())
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MODEL_PAGES {
+            let params = match &cursor {
+                Some(c) => json!({ F_CURSOR: c }),
+                None => json!({}),
+            };
+            let result = match self.inner.peer.request(M_MODEL_LIST, params).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    tracing::debug!(code = e.code, "codex: model/list failed: {}", e.message);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("codex: model/list failed: {e}");
+                    break;
+                }
+            };
+            parse_models_into(&result, &mut out);
+            match str_field(&result, F_NEXT_CURSOR).filter(|c| !c.is_empty()) {
+                Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
+                _ => break,
             }
         }
+        Ok(out)
     }
 
     async fn logout(&self) -> HarnessResult<()> {
+        self.inner.cancel_pending_login().await.ok();
         self.inner.peer.call(M_LOGOUT, json!({})).await?;
-        self.inner.emit(HarnessEvent::Login(LoginState::SignedOut));
+        let state = self
+            .inner
+            .read_login()
+            .await
+            .unwrap_or(LoginState::SignedOut);
+        self.inner.emit(HarnessEvent::Login(state));
         Ok(())
     }
 
@@ -1002,23 +1230,106 @@ pub fn launch_args(mcp: &McpLaunch) -> Vec<String> {
     ]
 }
 
+/// `(target triple, npm platform package)` of the native Codex binary for
+/// this build's platform, as `bin/codex.js` maps them.
+fn native_target() -> Option<(&'static str, &'static str)> {
+    let arm = cfg!(target_arch = "aarch64");
+    let x64 = cfg!(target_arch = "x86_64");
+    Some(match () {
+        _ if cfg!(target_os = "linux") && x64 => ("x86_64-unknown-linux-musl", "codex-linux-x64"),
+        _ if cfg!(target_os = "linux") && arm => {
+            ("aarch64-unknown-linux-musl", "codex-linux-arm64")
+        }
+        _ if cfg!(target_os = "macos") && x64 => ("x86_64-apple-darwin", "codex-darwin-x64"),
+        _ if cfg!(target_os = "macos") && arm => ("aarch64-apple-darwin", "codex-darwin-arm64"),
+        _ if cfg!(windows) && x64 => ("x86_64-pc-windows-msvc", "codex-win32-x64"),
+        _ if cfg!(windows) && arm => ("aarch64-pc-windows-msvc", "codex-win32-arm64"),
+        _ => return None,
+    })
+}
+
+/// The native binary inside an `@openai/codex` npm package at `root`:
+/// `vendor/<triple>/bin/codex[.exe]` in the platform package (nested or
+/// hoisted beside the main package) or in the main package itself; older
+/// releases used `vendor/<triple>/codex/codex[.exe]`.
+pub fn native_codex_in(
+    root: &Path,
+    triple: &str,
+    platform_pkg: &str,
+    exe: &str,
+) -> Option<PathBuf> {
+    let vendors = [
+        root.join("node_modules")
+            .join("@openai")
+            .join(platform_pkg)
+            .join("vendor"),
+        root.join("..").join(platform_pkg).join("vendor"),
+        root.join("vendor"),
+    ];
+    vendors
+        .iter()
+        .flat_map(|v| {
+            [
+                v.join(triple).join("bin").join(exe),
+                v.join(triple).join("codex").join(exe),
+            ]
+        })
+        .find(|p| crate::driver::is_executable(p))
+}
+
+/// Sees through the npm shim to the native binary when possible.
+pub fn resolve(found: PathBuf) -> ResolvedExecutable {
+    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let native = native_target().and_then(|(triple, pkg)| {
+        let root = crate::driver::npm_package_root(&found, NPM_PACKAGE)?;
+        let program = native_codex_in(&root, triple, pkg, exe)?;
+        Some((root, program))
+    });
+    match native {
+        Some((root, program)) => ResolvedExecutable {
+            bin_dir: found.parent().map(Path::to_path_buf),
+            program,
+            package_root: Some(root),
+        },
+        None => ResolvedExecutable::plain(found),
+    }
+}
+
+impl CodexLauncher {
+    fn resolved(&self) -> Option<ResolvedExecutable> {
+        find_executable(BINARY, self.path.as_deref()).map(resolve)
+    }
+}
+
+/// A `Command` for `exe` with the sidecar environment (and, when the npm
+/// shim was bypassed, the variables the shim would have set).
+fn command(exe: &ResolvedExecutable) -> Command {
+    let mut cmd = Command::new(&exe.program);
+    cmd.env_clear()
+        .envs(crate::env::child_env_with_path(exe.bin_dir.as_deref()));
+    if let Some(root) = &exe.package_root {
+        cmd.env(ENV_MANAGED_BY_NPM, "1")
+            .env(ENV_MANAGED_PACKAGE_ROOT, root);
+    }
+    crate::driver::hide_console(&mut cmd);
+    cmd
+}
+
 #[async_trait]
 impl HarnessLauncher for CodexLauncher {
     fn kind(&self) -> HarnessKind {
         HarnessKind::Codex
     }
 
-    fn installed(&self) -> bool {
-        find_executable(BINARY, self.path.as_deref()).is_some()
+    fn executable(&self) -> Option<PathBuf> {
+        find_executable(BINARY, self.path.as_deref())
     }
 
     async fn launch(&self, ctx: &LaunchContext) -> HarnessResult<Arc<dyn HarnessDriver>> {
-        let exe = find_executable(BINARY, self.path.as_deref())
-            .ok_or(HarnessError::NotInstalled("Codex"))?;
-        let mut child = Command::new(exe)
+        let exe = self.resolved().ok_or(HarnessError::NotInstalled("Codex"))?;
+        tracing::debug!(program = %exe.program.display(), "starting codex app-server");
+        let mut child = command(&exe)
             .args(launch_args(&ctx.mcp))
-            .env_clear()
-            .envs(crate::env::child_env())
             .current_dir(&ctx.workspace)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1047,11 +1358,9 @@ impl HarnessLauncher for CodexLauncher {
 
 /// `codex --version`, trimmed. `None` when not installed or it fails.
 pub async fn version(path: Option<&Path>) -> Option<String> {
-    let exe = find_executable(BINARY, path)?;
-    let run = Command::new(exe)
+    let exe = resolve(find_executable(BINARY, path)?);
+    let run = command(&exe)
         .arg(ARG_VERSION)
-        .env_clear()
-        .envs(crate::env::child_env())
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -1064,11 +1373,12 @@ pub async fn version(path: Option<&Path>) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Entries of [`PROTOCOL_METHODS`] that do not appear (as quoted strings)
-/// anywhere in `schema_text`.
+/// Entries of [`PROTOCOL_METHODS`] and [`PROTOCOL_FIELDS`] that do not
+/// appear (as quoted strings) anywhere in `schema_text`.
 fn missing_methods(schema_text: &str) -> Vec<&'static str> {
     PROTOCOL_METHODS
         .iter()
+        .chain(PROTOCOL_FIELDS)
         .copied()
         .filter(|m| !schema_text.contains(&format!("\"{m}\"")))
         .collect()
@@ -1108,18 +1418,16 @@ fn read_all_text(dir: &Path) -> String {
     text
 }
 
-/// Generates Codex's JSON schema and returns the [`PROTOCOL_METHODS`] it
-/// does not mention.
+/// Generates Codex's JSON schema and returns the [`PROTOCOL_METHODS`] and
+/// [`PROTOCOL_FIELDS`] it does not mention.
 pub async fn schema_check(path: Option<&Path>) -> Result<Vec<&'static str>, HarnessError> {
-    let exe = find_executable(BINARY, path).ok_or(HarnessError::NotInstalled("Codex"))?;
+    let exe = resolve(find_executable(BINARY, path).ok_or(HarnessError::NotInstalled("Codex"))?);
     let dir = unique_temp_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| HarnessError::Harness(format!("could not create temp dir: {e}")))?;
-    let run = Command::new(exe)
+    let run = command(&exe)
         .args([SUBCOMMAND, SUBCOMMAND_SCHEMA, ARG_OUT])
         .arg(&dir)
-        .env_clear()
-        .envs(crate::env::child_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1143,6 +1451,7 @@ pub async fn schema_check(path: Option<&Path>) -> Result<Vec<&'static str>, Harn
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1153,13 +1462,42 @@ mod tests {
             toml_array(&["mcp".into(), "--x".into()]),
             r#"["mcp", "--x"]"#
         );
+        // No raw CR/LF survives: Windows refuses to pass those to a `.cmd`.
+        let s = toml_string("a\r\nb");
+        assert!(!s.contains('\n') && !s.contains('\r'), "{s}");
+    }
+
+    #[test]
+    fn launch_args_survive_windows_paths() {
+        let args = launch_args(&McpLaunch {
+            command: PathBuf::from(r"C:\Program Files\Litecord\litecord.exe"),
+            args: vec![
+                "--db".into(),
+                r"C:\Users\A B\AppData\Roaming\litecord\litecord.db".into(),
+                "mcp".into(),
+            ],
+        });
+        assert_eq!(
+            args[1],
+            r#"mcp_servers.litecord.command="C:\\Program Files\\Litecord\\litecord.exe""#
+        );
+        assert_eq!(
+            args[3],
+            r#"mcp_servers.litecord.args=["--db", "C:\\Users\\A B\\AppData\\Roaming\\litecord\\litecord.db", "mcp"]"#
+        );
+        assert_eq!(args.last().map(String::as_str), Some(SUBCOMMAND));
+        assert!(args.iter().all(|a| !a.contains(['\r', '\n', '\0'])));
     }
 
     #[test]
     fn model_list_shapes() {
         assert_eq!(
-            parse_models(&json!({"data":[{"id":"gpt-5"},{"model":"o3"},{"x":1}]})),
-            ["gpt-5", "o3"]
+            parse_models(&json!({"data":[{"id":"model-a"},{"model":"model-b"},{"x":1}]})),
+            ["model-a", "model-b"]
+        );
+        assert_eq!(
+            parse_models(&json!({"data":[{"id":"shown"},{"id":"preview","hidden":true}]})),
+            ["shown"]
         );
         assert_eq!(
             parse_models(&json!({"models":["a", {"id":"b"}, 3]})),
@@ -1171,16 +1509,22 @@ mod tests {
     }
 
     #[test]
-    fn schema_missing_methods() {
+    fn schema_missing_methods_and_fields() {
         let all: String = PROTOCOL_METHODS
             .iter()
+            .chain(PROTOCOL_FIELDS)
             .map(|m| format!("{{\"const\": \"{m}\"}}\n"))
             .collect();
         assert!(missing_methods(&all).is_empty());
         let partial = all.replace("\"model/list\"", "\"model/listing\"");
         assert_eq!(missing_methods(&partial), ["model/list"]);
+        let partial = all.replace("\"loginId\"", "\"login_id\"");
+        assert_eq!(missing_methods(&partial), ["loginId"]);
         // Unquoted mentions do not count.
-        assert_eq!(missing_methods("initialize").len(), PROTOCOL_METHODS.len());
+        assert_eq!(
+            missing_methods("initialize").len(),
+            PROTOCOL_METHODS.len() + PROTOCOL_FIELDS.len()
+        );
     }
 
     #[test]
@@ -1195,22 +1539,105 @@ mod tests {
     #[test]
     fn account_labels() {
         assert_eq!(
-            login_from_account(Some(&Value::Null)),
+            login_from_read(&json!({"account": null, "requiresOpenaiAuth": true})),
             LoginState::SignedOut
         );
+        assert_eq!(login_from_read(&json!({})), LoginState::SignedOut);
+        // A provider that needs no OpenAI sign-in is ready as is.
         assert_eq!(
-            login_from_account(Some(
-                &json!({"type":"chatgpt","email":"a@b.c","planType":"plus"})
-            )),
+            login_from_read(&json!({"account": null, "requiresOpenaiAuth": false})),
             LoginState::Ready {
-                account: Some("ChatGPT Plus".into())
+                account: Some(NO_AUTH_NEEDED_LABEL.into())
             }
         );
+        let chatgpt = |plan: &str| {
+            login_from_read(&json!({"account": {"type":"chatgpt","email":"a@b.c","planType":plan}}))
+        };
+        let ready = |a: &str| LoginState::Ready {
+            account: Some(a.into()),
+        };
+        assert_eq!(chatgpt("plus"), ready("ChatGPT Plus (a@b.c)"));
+        assert_eq!(chatgpt("prolite"), ready("ChatGPT Pro Lite (a@b.c)"));
         assert_eq!(
-            login_from_account(Some(&json!({"type":"apiKey"}))),
-            LoginState::Ready {
-                account: Some("API key".into())
-            }
+            chatgpt("self_serve_business_usage_based"),
+            ready("ChatGPT Business (a@b.c)")
         );
+        assert_eq!(chatgpt("unknown"), ready("ChatGPT (a@b.c)"));
+        assert_eq!(
+            login_from_read(&json!({"account": {"type":"chatgpt","email":null,"planType":"team"}})),
+            ready("ChatGPT Team")
+        );
+        assert_eq!(
+            login_from_read(&json!({"account": {"type":"apiKey"}, "requiresOpenaiAuth": true})),
+            ready("OpenAI API key")
+        );
+    }
+
+    #[test]
+    fn auth_url_host_only() {
+        assert_eq!(
+            url_host("https://auth.openai.com/oauth/authorize?state=x"),
+            "auth.openai.com"
+        );
+        assert_eq!(url_host("http://localhost:1455"), "localhost:1455");
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("litecord-codex-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch_exec(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_binary_layouts() {
+        let (triple, pkg, exe) = ("x86_64-pc-windows-msvc", "codex-win32-x64", "codex.exe");
+        // Nested platform package (npm, 0.15x).
+        let root = temp_dir("nested").join("node_modules/@openai/codex");
+        let nested = root.join(
+            "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+        );
+        touch_exec(&nested);
+        assert_eq!(native_codex_in(&root, triple, pkg, exe), Some(nested));
+        // Hoisted platform package beside the main one.
+        let base = temp_dir("hoisted").join("node_modules/@openai");
+        let root = base.join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        let hoisted = base.join("codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        touch_exec(&hoisted);
+        assert_eq!(
+            native_codex_in(&root, triple, pkg, exe).map(|p| std::fs::canonicalize(p).unwrap()),
+            Some(std::fs::canonicalize(&hoisted).unwrap())
+        );
+        // Older releases vendored it in the main package.
+        let root = temp_dir("legacy").join("node_modules/@openai/codex");
+        let legacy = root.join("vendor/x86_64-pc-windows-msvc/codex/codex.exe");
+        touch_exec(&legacy);
+        assert_eq!(native_codex_in(&root, triple, pkg, exe), Some(legacy));
+        // Nothing there: spawn what was found.
+        let root = temp_dir("none");
+        assert_eq!(native_codex_in(&root, triple, pkg, exe), None);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_found_executable() {
+        let dir = temp_dir("plain");
+        let found = dir.join("codex");
+        touch_exec(&found);
+        let r = resolve(found.clone());
+        assert_eq!(r.program, found);
+        assert_eq!(r.bin_dir.as_deref(), Some(dir.as_path()));
+        assert_eq!(r.package_root, None);
     }
 }

@@ -1,28 +1,36 @@
 # Omni on Codex / OpenCode — harness integration design
 
-Status (September 26, 2026): **backend implemented; UI in progress.**
+Status (September 27, 2026): **backend implemented; sign-in verified
+against real binaries (codex-cli 0.157.1, opencode 1.18.32); UI in
+progress.**
 
 | Piece | Where | Verified by |
 |---|---|---|
 | Driver trait, types, env allowlist, scripted fake | `crates/litecord-harness` | unit tests |
-| Codex `app-server` driver (feature `codex`) | `litecord-harness/src/codex.rs` | scripted JSON-RPC peer tests |
-| OpenCode `serve` driver (feature `opencode`) | `litecord-harness/src/opencode.rs` | fake HTTP/SSE server tests |
+| Codex `app-server` driver (feature `codex`) | `litecord-harness/src/codex.rs` | scripted JSON-RPC peer tests; real binary |
+| OpenCode `serve` driver (feature `opencode`) | `litecord-harness/src/opencode.rs` | fake HTTP/SSE server tests; real binary |
 | `OmniService`: lazy sidecar, idle stop, sessions, capped transcripts, approval bridge by mode, "remember" into memory, heartbeats | `litecord-app/src/omni.rs`, `migrations/0003_omni.sql` | `litecord-app/tests/omni.rs` |
 | Desktop wiring (launchers, `litecord mcp --harness`) | `litecord-desktop` | builds |
-| Every sign-in method (browser, pasted code, API key passed straight to the harness), model list and choice | trait defaults in `driver.rs`; `codex.rs`, `opencode.rs`, `OmniService` | driver tests; `tests/omni.rs` |
+| Every sign-in method (browser, device code, pasted code, API key passed straight to the harness), cancel/retry, sign-out, model list and choice | trait defaults in `driver.rs`; `codex.rs`, `opencode.rs`, `OmniService` | driver tests; `tests/omni.rs`; `tests/real_harness.rs` (opt-in) |
 | Automations: daily / every N hours / DM from a person / keyword; output to Inbox, suggested tasks or drafts; `AUTOMATION_OK`; hourly budget; Assistant mode only | `litecord-app/src/automations.rs`, `0004_omni_automations.sql`, `prompts/automation.md` | unit + `tests/omni.rs` |
-| CLI: `litecord omni status, harness, login, logout, models, automations, run, doctor` | `litecord-desktop` | run against the demo harness |
+| CLI: `litecord omni status, harness, login, logout, models, automations, run, doctor` | `litecord-desktop` | run against the demo harness and the real binaries |
 
-**Not yet verified against real binaries.** Run `litecord omni doctor`
-with Codex or OpenCode installed. It checks the harness version, whether
-every method or endpoint Litecord uses is in that version's schema (Codex
-`generate-json-schema`, OpenCode `/doc`), and sign-in. No Codex or OpenCode binary was
-available where this was built. Method, event and field names are constants
-at the top of each driver. Before relying on them, check them against the
-installed version (`codex app-server generate-json-schema`, OpenCode
-`GET /doc`). Known gaps:
-- OpenCode providers whose OAuth sign-in needs a pasted code are not
-  supported yet; the UI points to `opencode auth login`.
+`litecord omni doctor` checks the installed harness: its version, whether
+every method, payload field or endpoint Litecord uses is in that version's
+schema (Codex `generate-json-schema`, OpenCode `GET /doc`), and sign-in. The
+sign-in paths run against the real binaries with
+`LITECORD_REAL_HARNESS=1 cargo test -p litecord-harness --features
+codex,opencode --test real_harness -- --ignored --test-threads=1` (isolated
+`CODEX_HOME`/`XDG_*` homes, a dummy API key, no model calls). Known gaps:
+- Completing a ChatGPT (or any provider) OAuth sign-in needs a person and
+  a real account, so only the start (auth URL, localhost callback bound),
+  cancel and retry are exercised automatically.
+- Device-code flows (Codex `chatgptDeviceCode`, OpenCode's ChatGPT
+  "headless" and GitHub Copilot) follow the schema but could not be run
+  where this was verified (the auth hosts were unreachable).
+- OpenCode cannot cancel a pending OAuth sign-in; `OmniService` restarts the
+  sidecar instead (a retry for the same provider could otherwise fail with
+  "port in use").
 - Codex has no confirmed per-thread switch to turn off its shell tool.
   Assistant mode therefore relies on `sandbox: read-only`,
   `approvalPolicy: untrusted`, and Litecord declining every command request.
@@ -104,8 +112,13 @@ which harness and model the user picked and whether they are signed in.
 
 | Harness | Detect | Status | Sign in | Sign out |
 |---|---|---|---|---|
-| Codex | `codex` on `PATH` (or a path set in config); version check | `account/read` | `account/login/start {type:"chatgpt"}` returns `authUrl`. Open it in the browser, then wait for `account/login/completed`. A device-code or API-key login is available for headless machines. | `account/logout` |
-| OpenCode | `opencode` on `PATH`; `GET /global/health` | `GET /provider`, `GET /config/providers` | `GET /provider/auth` lists the methods. OAuth: `POST /provider/{id}/oauth/authorize` returns a URL, then `POST /provider/{id}/oauth/callback`. API-key providers use the harness's own form (`PUT /auth/:id`). The key is passed straight through and never persisted by Litecord. | Handled by the harness |
+| Codex | `codex` on `PATH`, then the usual npm/pnpm/bun/Homebrew/nvm bin dirs (or a path set in config). The npm shim is bypassed: the native binary in `@openai/codex`'s platform package is started directly, so `node` need not be on the app's `PATH`. | `account/read` (`account: null` with `requiresOpenaiAuth: false` counts as ready) | `account/login/start {type:"chatgpt"}` returns `authUrl` + `loginId`; open it, Codex listens on `localhost:1455` (or the next free port) and reports `account/login/completed`. Completions for another `loginId` (Codex reports the superseded attempt as "Login cancelled" before answering a retry) are ignored. `chatgptDeviceCode` and `apiKey` (stored in `CODEX_HOME/auth.json`) are the other methods; `account/login/cancel` frees the port. | `account/logout` (removes `auth.json`) |
+| OpenCode | `opencode` on `PATH` and the same dirs plus `~/.opencode/bin`; on Windows the npm `.cmd` shim is bypassed for `node_modules/opencode-ai/bin/opencode.exe`. `GET /global/health` | `GET /provider` (`connected`, `source`); its own free provider is always connected | `GET /provider/auth` lists plugin methods (ChatGPT browser/headless, GitHub Copilot, GitLab, xAI, ...) with optional `prompts`; every other provider in `GET /provider` takes an API key, as in `opencode auth login`. OAuth: `POST /provider/{id}/oauth/authorize {method, inputs}` returns a URL, then `POST /provider/{id}/oauth/callback`. API keys: `PUT /auth/{id} {type:"api", key, metadata}`. After any credential change `POST /instance/dispose`, or OpenCode keeps the old provider list. | `DELETE /auth/{id}` for stored credentials (env/config ones stay) |
+
+Litecord keeps no copy of any key or token. `GET /provider` and
+`GET /config/providers` include stored keys in their bodies, so the driver
+never logs response bodies; errors quote only the server's message with the
+submitted key removed.
 
 For OpenCode, whether a provider's subscription can be used from a
 third-party app is that provider's policy. The UI lists the providers the
@@ -114,6 +127,19 @@ own.
 
 Settings UI states: not installed → installed, signed out → signing in → ready
 (shows model and, for Codex, rate limits via `account/rateLimits/read`).
+
+`OmniService` API for the UI (all in `litecord-app/src/omni.rs`):
+
+| Step | Call | Notes |
+|---|---|---|
+| Detect / re-detect installs | `status().harnesses` (`installed`, `path`, `install_hint`); `refresh_installed()` after the user installs one | Detection is cached 5 s; `select()` re-detects too. No restart needed. |
+| List methods | `login_options()`, then `status().login_groups()` (or `omni::login_groups(&options)`) | Group heading `LoginGroup::label`, entries `LoginOption::method_label`; show `featured` or `connected` groups first, the rest under "More providers". |
+| Browser sign-in | `sign_in_with(id)` / `sign_in_with_inputs(id, &inputs)` → `SigningIn { url, instructions, needs_code }` | Open `url`; show `instructions` (device codes). Retrying cancels the earlier attempt (restarting OpenCode if needed). |
+| Pasted code | `submit_login_code(code)` when `needs_code` | |
+| API key | `sign_in_api_key(id, &Secret)` / `sign_in_api_key_with(id, &Secret, &inputs)` | Extra fields come from `LoginOption::prompts` (show a prompt only when `when.applies(&inputs)`). |
+| Completion | `subscribe()` → `OmniEvent::Changed`, then `status().login` | `SigningIn` → `Ready { account }` or `Error { message }`. |
+| Cancel | `cancel_sign_in()` | Back to the harness's state. |
+| Sign out | `sign_out()`; OpenCode per provider: `sign_out_provider(provider)` | Read `status().login` after: OpenCode can stay `Ready` through env-configured or free providers. |
 
 ## 4. Process model and performance
 
@@ -311,10 +337,11 @@ Tests keep the prompts honest:
    the installed binary (`codex app-server generate-json-schema`) and check
    the method, decision and `dynamicTools` names against it. The names in §5
    and §6 come from the public app-server README and still need this check.
-   The live test is opt-in through `LITECORD_TEST_CODEX=1`.
+   Sign-in names were checked against codex-cli 0.157.1; the live sign-in
+   test is opt-in through `LITECORD_REAL_HARNESS=1` (`tests/real_harness.rs`).
 4. **OpenCode driver.** Check it against the server's OpenAPI (`GET /doc`) and
-   the permission-config names. The live test is opt-in through
-   `LITECORD_TEST_OPENCODE=1`.
+   the permission-config names. Sign-in was checked against opencode 1.18.32
+   by the same opt-in test.
 5. **Heartbeats**: scheduler, revision skip, `HEARTBEAT_OK`, limits.
 6. **Session rotation, profiles and subagent rendering.**
 7. **Workspace and computer-use modes**, with the sandbox and deny-list
