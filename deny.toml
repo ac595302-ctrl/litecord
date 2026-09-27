@@ -25,6 +25,7 @@ confidence-threshold = 0.9
 # retain their own font licenses; scope these exceptions to their packages.
 exceptions = [
     { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+    { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
     { name = "clipboard-win", allow = ["BSL-1.0"] },
     { name = "error-code", allow = ["BSL-1.0"] },
     { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },

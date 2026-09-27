@@ -136,7 +136,7 @@ impl AppBuilder {
             ))),
             None => None,
         };
-        db.write(|tx| repos::outbound::recover_interrupted(tx))?;
+        db.write(|tx| litecord_store::repos::outbound::recover_interrupted(tx))?;
         if backend.source() == litecord_types::provenance::DiscordSource::UserSession {
             if let Some(account) = db.read(|r| litecord_store::repos::accounts::current_user(r))? {
                 if account.origin == litecord_types::provenance::Origin::Synthetic {

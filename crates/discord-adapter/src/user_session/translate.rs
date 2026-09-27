@@ -233,6 +233,16 @@ pub fn dispatch(event: &str, raw: &Value) -> Result<Vec<DiscordEvent>, Translate
     }
 }
 
+/// Bounded protocol nonce; it is an operation ID, never a credential.
+pub fn message_nonce(raw: &Value) -> Option<String> {
+    let nonce = match raw.get("nonce")? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!nonce.is_empty() && nonce.len() <= 25).then_some(nonce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,14 +269,4 @@ mod tests {
             DiscordEvent::Invalidated { .. }
         ));
     }
-}
-
-/// Bounded protocol nonce; it is an operation ID, never a credential.
-pub fn message_nonce(raw: &Value) -> Option<String> {
-    let nonce = match raw.get("nonce")? {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    (!nonce.is_empty() && nonce.len() <= 25).then_some(nonce)
 }
