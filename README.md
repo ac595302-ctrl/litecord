@@ -34,13 +34,22 @@ the complete pipeline, protocol limits, and submission/run instructions.
 
 ```sh
 cargo test --workspace                       # no credentials needed
-cargo run -p litecord-desktop --features gui -- gui
-cargo run -p litecord-desktop --features gui,discord-user-session -- --config config/litecord.account.example.toml gui
+cargo run -p litecord-desktop --features gui -- gui  # synthetic demo
+cargo run -p litecord-desktop --features gui,discord-user-session -- gui  # account mode, opens Settings
 cargo run -p litecord-desktop -- demo --in-memory  # headless synthetic demo
 cargo run -p litecord-desktop -- mcp --data-dir .litecord   # MCP server on stdio
 ```
 
 Requirements: stable Rust. SQLite is bundled.
+
+The account build starts with an empty, separate account database and opens
+Settings for connection. It does not import demo contacts or messages. This
+user-session path is experimental, uses a manually supplied account credential,
+and has not been verified with a real Discord account. Do not enter a Discord
+email or password in Litecord. Standard browser sign-in through the official
+Social SDK OAuth path is not yet implemented. See
+[`docs/PART_B_ACCOUNT_PIPELINE.md`](docs/PART_B_ACCOUNT_PIPELINE.md) before using
+the account connection.
 
 ## Architecture at a glance
 

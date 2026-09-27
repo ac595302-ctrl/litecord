@@ -143,8 +143,8 @@ fn load_config_from(
     cli: &Cli,
     env: Vec<(String, String)>,
 ) -> litecord_core::Result<LitecordConfig> {
-    let desktop_start =
-        cfg!(all(feature = "gui", feature = "discord-user-session")) && cli.command.is_none();
+    let desktop_start = cfg!(all(feature = "gui", feature = "discord-user-session"))
+        && (cli.command.is_none() || matches!(cli.command, Some(Command::Gui { .. })));
     let backend = cli
         .backend
         .map(|b| match b {
@@ -801,6 +801,11 @@ mod desktop_start_tests {
         .unwrap();
         assert_eq!(cfg.backend.kind, BackendKind::UserSession);
         assert_ne!(cfg.data_dir, PathBuf::from(".litecord"));
+        assert!(cfg.data_dir.ends_with("account"));
+
+        let cli = Cli::try_parse_from(["litecord", "gui"]).unwrap();
+        let cfg = load_config_from(&cli, vec![("HOME".into(), "/owner".into())]).unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::UserSession);
         assert!(cfg.data_dir.ends_with("account"));
     }
 

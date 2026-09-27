@@ -237,69 +237,82 @@ impl Workspace {
         );
         ui.add_space(4.0);
         let mut action: Option<u8> = None;
-        ui.horizontal_wrapped(|ui| {
-            let cards: [(String, String, &str, u8); 4] = [
-                (
-                    format!("{approvals} waiting for approval"),
-                    "Messages and actions proposed by Omni or you".into(),
-                    "Review",
-                    0,
+        let available = ui.available_width();
+        let columns = if available >= 1000.0 {
+            4
+        } else if available >= 350.0 {
+            2
+        } else {
+            1
+        };
+        let card_width = ((available - (columns - 1) as f32 * 8.0) / columns as f32).max(150.0);
+        let cards: [(String, String, &str, u8); 4] = [
+            (
+                format!("{approvals} waiting for approval"),
+                "Messages and actions proposed by Omni or you".into(),
+                "Review",
+                0,
+            ),
+            (
+                first_reply.as_ref().map_or_else(
+                    || "No replies owed".into(),
+                    |(_, f)| format!("Reply to {}", self.display(f)),
                 ),
-                (
-                    first_reply.as_ref().map_or_else(
-                        || "No replies owed".into(),
-                        |(_, f)| format!("Reply to {}", self.display(f)),
-                    ),
-                    "Oldest conversation waiting on you".into(),
-                    "Open",
-                    1,
-                ),
-                (
-                    format!("{memory_review} memories to review"),
-                    "New facts picked up from your messages".into(),
-                    "Review",
-                    2,
-                ),
-                (
-                    "Catch-up summary".into(),
-                    "Ask Omni what changed today".into(),
-                    "Ask Omni",
-                    3,
-                ),
-            ];
-            for (title, body, button, id) in cards {
-                egui::Frame::new()
-                    .fill(theme::OMNI.gamma_multiply(0.07))
-                    .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.35)))
-                    .corner_radius(8)
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_width(190.0);
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(&title).color(theme::TEXT));
-                            ui.label(theme::meta(body));
-                            let enabled = match id {
-                                0 => approvals > 0,
-                                1 => first_reply.is_some(),
-                                2 => memory_review > 0,
-                                _ => true,
-                            };
-                            if ui
-                                .add_enabled(
-                                    enabled,
-                                    egui::Button::new(
-                                        egui::RichText::new(button).color(theme::OMNI),
+                "Oldest conversation waiting on you".into(),
+                "Open",
+                1,
+            ),
+            (
+                format!("{memory_review} memories to review"),
+                "New facts picked up from your messages".into(),
+                "Review",
+                2,
+            ),
+            (
+                "Catch-up summary".into(),
+                "Ask Omni what changed today".into(),
+                "Ask Omni",
+                3,
+            ),
+        ];
+        for row in cards.chunks(columns) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (title, body, button, id) in row {
+                    egui::Frame::new()
+                        .fill(theme::OMNI.gamma_multiply(0.07))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.35)))
+                        .corner_radius(8)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.set_width(card_width - 20.0);
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(title.as_str()).color(theme::TEXT));
+                                ui.label(theme::meta(body));
+                                let enabled = match *id {
+                                    0 => approvals > 0,
+                                    1 => first_reply.is_some(),
+                                    2 => memory_review > 0,
+                                    _ => true,
+                                };
+                                if ui
+                                    .add_enabled(
+                                        enabled,
+                                        egui::Button::new(
+                                            egui::RichText::new(*button).color(theme::OMNI),
+                                        )
+                                        .small(),
                                     )
-                                    .small(),
-                                )
-                                .clicked()
-                            {
-                                action = Some(id);
-                            }
+                                    .clicked()
+                                {
+                                    action = Some(*id);
+                                }
+                            });
                         });
-                    });
-            }
-        });
+                }
+            });
+            ui.add_space(8.0);
+        }
         match action {
             Some(0) => self.inbox_filter = 2,
             Some(1) => {

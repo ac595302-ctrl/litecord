@@ -401,13 +401,19 @@ fn models_from(v: &Value) -> Vec<String> {
         else {
             continue;
         };
+        let supports_tools = |model: &Value| {
+            model.pointer("/capabilities/toolcall") != Some(&Value::Bool(false))
+                && model.get("status").and_then(Value::as_str) != Some("deprecated")
+        };
         let ids: Vec<&str> = match p.get("models") {
             Some(Value::Object(m)) => m
                 .iter()
+                .filter(|(_, model)| supports_tools(model))
                 .map(|(k, v)| v.get("id").and_then(Value::as_str).unwrap_or(k))
                 .collect(),
             Some(Value::Array(a)) => a
                 .iter()
+                .filter(|model| supports_tools(model))
                 .filter_map(|m| match m {
                     Value::String(s) => Some(s.as_str()),
                     other => other.get("id").and_then(Value::as_str),
@@ -1245,17 +1251,14 @@ impl HarnessDriver for OpenCodeDriver {
     }
 
     async fn models(&self) -> HarnessResult<Vec<String>> {
-        if self.check_running().is_err() {
-            return Ok(Vec::new());
-        }
-        Ok(self
+        self.check_running()?;
+        let providers = self
             .json(
                 self.request(reqwest::Method::GET, PATH_CONFIG_PROVIDERS),
                 "config providers",
             )
-            .await
-            .map(|v| models_from(&v))
-            .unwrap_or_default())
+            .await?;
+        Ok(models_from(&providers))
     }
 
     async fn logout(&self) -> HarnessResult<()> {

@@ -36,7 +36,7 @@ static PANELS: [PanelDescriptor; 17] = [
     PanelDescriptor {
         id: "primary_navigation",
         label: "Primary navigation",
-        minimum_width: 64.0,
+        minimum_width: 100.0,
         minimum_height: 320.0,
         destinations: ALL_DESTINATIONS,
         orientations: HORIZONTAL_AND_VERTICAL,
@@ -44,7 +44,7 @@ static PANELS: [PanelDescriptor; 17] = [
     PanelDescriptor {
         id: "user_controls",
         label: "User controls",
-        minimum_width: 64.0,
+        minimum_width: 100.0,
         minimum_height: 64.0,
         destinations: ALL_DESTINATIONS,
         orientations: HORIZONTAL_AND_VERTICAL,

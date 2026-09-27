@@ -387,7 +387,7 @@ async fn models_list_and_method_not_found() {
         srv.send(json!({"id": req["id"], "error": {"code": -32601, "message": "nope"}}))
             .await;
     });
-    assert_eq!(r.unwrap(), Vec::<String>::new());
+    assert!(r.unwrap_err().to_string().contains("could not list models"));
 }
 
 #[test]

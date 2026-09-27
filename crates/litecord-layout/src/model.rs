@@ -16,8 +16,7 @@ pub enum Destination {
     Servers,
     Voice,
     Inbox,
-    /// Omni: the assistant and the unified memory it works from. Saved
-    /// layouts from before the rename still load (`memory`).
+    /// Unified memory workspace. The internal name preserves saved layouts.
     #[serde(alias = "memory")]
     Omni,
     Tasks,
@@ -45,7 +44,7 @@ impl Destination {
             Self::Servers => "Servers",
             Self::Voice => "Voice",
             Self::Inbox => "Inbox",
-            Self::Omni => "Omni",
+            Self::Omni => "Memory",
             Self::Tasks => "Tasks",
             Self::Settings => "Settings",
         }

@@ -436,8 +436,16 @@ async fn every_sign_in_method_and_model_choice() {
     assert!(!format!("{:?}", omni.status()).contains("sk-demo-key-123"));
 
     // Models and the saved preference.
+    omni.set_model(Some("no-longer-offered")).unwrap();
     assert_eq!(omni.models().await.unwrap(), ["demo-large", "demo-small"]);
     assert_eq!(omni.status().model, None);
+    assert!(omni
+        .status()
+        .last_error
+        .as_deref()
+        .unwrap()
+        .contains("unavailable"));
+    assert!(omni.set_model(Some("no-longer-offered")).is_err());
     omni.set_model(Some("demo-small")).unwrap();
     assert_eq!(omni.status().model.as_deref(), Some("demo-small"));
     omni.set_model(None).unwrap();

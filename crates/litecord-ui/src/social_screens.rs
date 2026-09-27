@@ -65,6 +65,15 @@ impl Workspace {
                     }
                 }
             });
+        if self.selected_channel.is_none() {
+            self.selected_channel = s
+                .guilds
+                .guilds
+                .iter()
+                .find(|guild| Some(guild.guild.id) == self.selected_guild)
+                .and_then(|guild| guild.channels.first())
+                .map(|channel| channel.channel.id);
+        }
         ui.add_space(16.0);
         theme::section_label(ui, "Channels");
         egui::ScrollArea::vertical()
@@ -95,6 +104,19 @@ impl Workspace {
         let Some(s) = self.snapshot.clone() else {
             return;
         };
+        if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::UserSession
+            && !s.diagnostics.session.is_online()
+        {
+            theme::empty_state(
+                ui,
+                "No Discord account connected",
+                "Connect an account in Settings to load your servers and channels.",
+            );
+            if ui.button("Open Discord settings").clicked() {
+                self.navigate(litecord_layout::Destination::Settings);
+            }
+            return;
+        }
         let channel = s
             .guilds
             .guilds
@@ -134,6 +156,10 @@ impl Workspace {
         let Some(s) = self.snapshot.clone() else {
             return;
         };
+        if !s.voice.voice_supported {
+            ui.label("Voice is unavailable through this Discord connection.");
+            return;
+        }
         if s.rooms.rooms.is_empty() {
             ui.label("No rooms discovered yet.");
             ui.add(egui::TextEdit::singleline(&mut self.lobby_text).hint_text("Known lobby ID"));
@@ -182,6 +208,14 @@ impl Workspace {
             ui.spinner();
             return;
         };
+        if !s.voice.voice_supported {
+            theme::empty_state(
+                ui,
+                "Voice is unavailable",
+                "This Discord connection does not provide voice rooms or device controls.",
+            );
+            return;
+        }
         let room = s
             .rooms
             .rooms

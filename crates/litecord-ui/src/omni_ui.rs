@@ -24,6 +24,20 @@ impl Workspace {
         if !self.omni_ready(ui, omni) {
             return;
         }
+        if let Some(selected) = omni.status.selected {
+            if omni.status.models.is_empty()
+                && self.omni_models_requested_for != Some(selected)
+                && !self.busy
+            {
+                self.omni_models_requested_for = Some(selected);
+                self.send(Command::Omni(OmniCommand::LoadModels));
+            }
+        }
+        self.model_row(ui, omni);
+        if let Some(error) = &omni.status.last_error {
+            ui.label(RichText::new(error).size(12.0).color(theme::WARNING));
+        }
+        ui.add_space(6.0);
         for req in &omni.requests {
             self.omni_request(ui, req);
         }
@@ -62,6 +76,22 @@ impl Workspace {
     fn omni_header(&mut self, ui: &mut Ui, omni: &OmniViewModel) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Omni").size(18.0).color(theme::OMNI).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::kit::icon_button_ex(
+                    ui,
+                    crate::ph::X,
+                    "Close Omni (Ctrl+J)",
+                    30.0,
+                    theme::SECONDARY,
+                    true,
+                )
+                .clicked()
+                {
+                    self.omni_open = false;
+                }
+            });
+        });
+        ui.horizontal(|ui| {
             let harness = omni
                 .status
                 .selected
@@ -75,13 +105,8 @@ impl Workspace {
                 LoginState::NotInstalled => "No harness installed".to_owned(),
                 LoginState::Error { .. } => format!("{harness} · error"),
             };
-            ui.label(theme::meta(account));
+            ui.add(egui::Label::new(theme::meta(account)).truncate());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::kit::icon_button_ex(ui, crate::ph::X, "Close Omni (Ctrl+J)", 30.0, theme::SECONDARY, true)
-                    .clicked()
-                {
-                    self.omni_open = false;
-                }
                 ui.menu_button("History", |ui| {
                     ui.set_min_width(260.0);
                     let chats: Vec<&OmniSessionRow> =
@@ -323,7 +348,24 @@ impl Workspace {
                 ui.add_space(4.0);
             }
             ("system", "message") if item.text.starts_with("Error:") => {
-                ui.label(RichText::new(text).size(12.0).color(theme::PRIORITY));
+                if item
+                    .text
+                    .contains("No endpoints found that support tool use")
+                {
+                    ui.label(
+                        RichText::new("This model cannot use Omni's Litecord tools through its current provider route.")
+                            .size(12.0)
+                            .color(theme::PRIORITY),
+                    );
+                    ui.label(theme::meta(
+                        "Choose another model above, then start a new Assistant chat. The model setting applies to new chats.",
+                    ));
+                    ui.collapsing("Provider details", |ui| {
+                        ui.label(theme::meta(text));
+                    });
+                } else {
+                    ui.label(RichText::new(text).size(12.0).color(theme::PRIORITY));
+                }
             }
             ("system", "message") => {
                 // Check-in prompts and other system turns: collapsed.
@@ -465,6 +507,7 @@ impl Workspace {
                     egui::Button::selectable(selected == Some(h.kind), label),
                 );
                 if r.clicked() && selected != Some(h.kind) {
+                    self.omni_models_requested_for = None;
                     self.send(Command::Omni(OmniCommand::Select(h.kind)));
                 }
             }
@@ -631,26 +674,59 @@ impl Workspace {
             let current = omni.status.model.clone();
             let shown = current.clone().unwrap_or_else(|| "Harness default".into());
             let mut choice = current.clone();
-            let r = egui::ComboBox::from_id_salt("omni_model")
-                .selected_text(shown)
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut choice, None, "Harness default");
-                    for m in &omni.status.models {
-                        ui.selectable_value(&mut choice, Some(m.clone()), m);
-                    }
-                    if omni.status.models.is_empty() {
-                        ui.label(theme::meta("Loading models…"));
-                    }
-                });
-            if r.response.clicked() && omni.status.models.is_empty() && !self.busy {
-                self.send(Command::Omni(OmniCommand::LoadModels));
-            }
+            ui.menu_button(egui::RichText::new(&shown).size(13.0), |ui| {
+                ui.set_min_width(320.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.omni_model_query)
+                        .hint_text("Search models")
+                        .desired_width(f32::INFINITY),
+                );
+                if ui
+                    .selectable_label(current.is_none(), "Harness default")
+                    .clicked()
+                {
+                    choice = None;
+                    ui.close();
+                }
+                ui.separator();
+                let query = self.omni_model_query.trim().to_lowercase();
+                let matches: Vec<_> = omni
+                    .status
+                    .models
+                    .iter()
+                    .filter(|model| model.to_lowercase().contains(&query))
+                    .collect();
+                ui.label(theme::meta(format!("{} matching models", matches.len())));
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for model in matches.into_iter().take(80) {
+                            if ui
+                                .selectable_label(current.as_ref() == Some(model), model)
+                                .clicked()
+                            {
+                                choice = Some(model.clone());
+                                ui.close();
+                            }
+                        }
+                    });
+            });
             if choice != current {
                 self.send(Command::Omni(OmniCommand::SetModel(choice)));
             }
-            ui.label(theme::meta("Applies to new chats"));
         });
+        ui.label(theme::meta("Applies to new chats"));
+        if omni.status.models.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(theme::meta("No models loaded from this harness."));
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Refresh models"))
+                    .clicked()
+                {
+                    self.send(Command::Omni(OmniCommand::LoadModels));
+                }
+            });
+        }
     }
 }
 

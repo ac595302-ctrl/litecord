@@ -504,10 +504,15 @@ async fn omni(
                 message: "Saved to Memory for review.".into(),
             });
         }
-        OmniCommand::Select(kind) => omni.select(kind).await?,
+        OmniCommand::Select(kind) => {
+            omni.select(kind).await?;
+            omni.refresh_login().await?;
+            omni.models().await?;
+        }
         OmniCommand::SignOut => omni.sign_out().await?,
         OmniCommand::Refresh => {
             omni.refresh_login().await?;
+            omni.models().await?;
         }
         OmniCommand::Heartbeats(on) => omni.set_heartbeat_enabled(on)?,
         OmniCommand::CheckNow => match omni.heartbeat(true).await? {

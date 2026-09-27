@@ -57,6 +57,9 @@ pub struct Workspace {
     pub omni_code_draft: String,
     pub omni_key_draft: String,
     pub omni_key_option: Option<String>,
+    /// Tracks the harness whose models were requested in this UI session.
+    pub omni_models_requested_for: Option<litecord_app::harness::HarnessKind>,
+    pub omni_model_query: String,
     /// In-memory input for the experimental Discord user-session connection.
     pub discord_session_draft: String,
     pub automation_form: crate::omni_ui::AutomationForm,
@@ -141,6 +144,8 @@ impl Workspace {
             omni_code_draft: String::new(),
             omni_key_draft: String::new(),
             omni_key_option: None,
+            omni_models_requested_for: None,
+            omni_model_query: String::new(),
             discord_session_draft: String::new(),
             automation_form: crate::omni_ui::AutomationForm::default(),
             task_title_draft: String::new(),
@@ -429,7 +434,25 @@ impl Workspace {
                 self.cancel_edit();
             }
         } else if let Some(s) = self.snapshot.clone() {
-            connection_status(&mut lui, &s.diagnostics.session, "Discord");
+            if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::UserSession
+                && !s.diagnostics.session.is_online()
+            {
+                if kit::button_ex(
+                    &mut lui,
+                    kit::Kind::Primary,
+                    None,
+                    "Discord setup",
+                    30.0,
+                    true,
+                )
+                .clicked()
+                {
+                    self.settings_section = None;
+                    self.navigate(Destination::Settings);
+                }
+            } else if s.diagnostics.backend_mode != litecord_types::capability::BackendMode::Demo {
+                connection_status(&mut lui, &s.diagnostics.session, "Discord");
+            }
             if let Some(bot) = &s.diagnostics.bot {
                 connection_status(&mut lui, &bot.session, "Bot");
             }
@@ -525,7 +548,8 @@ impl Workspace {
                         .get(&self.selection.destination)
                         .cloned();
                     if let Some(mut t) = source {
-                        if rect.width() < 900.0 && self.edit_original.is_none() {
+                        if (rect.width() < 900.0 || self.omni_open) && self.edit_original.is_none()
+                        {
                             hide(&mut t, "context_inspector");
                         }
                         if rect.width() < 560.0 && self.edit_original.is_none() {
@@ -816,8 +840,9 @@ impl Workspace {
             self.omni_open = !self.omni_open;
         }
         if self.omni_open {
+            let panel_width = (root.available_width() * 0.36).clamp(380.0, 560.0);
             egui::Panel::right("omni_panel")
-                .exact_size(420.0)
+                .exact_size(panel_width)
                 .frame(
                     egui::Frame::new()
                         .fill(theme::SIDEBAR)

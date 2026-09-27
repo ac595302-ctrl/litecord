@@ -669,7 +669,7 @@ pub(crate) fn rail_glyph(d: Destination) -> &'static str {
         Destination::Servers => ph::SQUARES_FOUR,
         Destination::Voice => ph::WAVEFORM,
         Destination::Inbox => ph::ENVELOPE_SIMPLE,
-        Destination::Omni => ph::SPARKLE,
+        Destination::Omni => ph::BRAIN,
         Destination::Tasks => ph::CHECK_SQUARE,
         Destination::Settings => ph::GEAR_SIX,
     }

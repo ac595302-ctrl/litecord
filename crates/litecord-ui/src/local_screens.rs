@@ -137,7 +137,7 @@ fn discord_session_connection(
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Experimental account connection; Discord forbids account automation and may terminate accounts.",
+                    "Standard Discord sign-in is not available in this build. Discord forbids account automation and may terminate accounts.",
                 )
                 .color(theme::WARNING),
             );
@@ -195,14 +195,14 @@ fn discord_session_connection(
                 ui.label(egui::RichText::new(message).color(theme::WARNING));
                 ui.add_space(6.0);
             }
-            ui.label(egui::RichText::new("Session credential").strong());
-            ui.label(egui::RichText::new("Use your own account credential. It is saved in your operating system's secure storage.").size(12.0).color(theme::MUTED));
+            ui.label(egui::RichText::new("Experimental session credential").strong());
+            ui.label(egui::RichText::new("This is not your Discord email or password. Browser OAuth is not implemented here. The credential is saved in your operating system's secure storage.").size(12.0).color(theme::MUTED));
             ui.add_enabled(
                 !workspace.busy,
                 egui::TextEdit::singleline(&mut workspace.discord_session_draft)
                     .password(true)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Paste credential"),
+                    .hint_text("Experimental credential — never enter your password"),
             );
 
             ui.add_space(6.0);
@@ -210,7 +210,7 @@ fn discord_session_connection(
                 let can_connect =
                     !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
                 if ui
-                    .add_enabled(can_connect, egui::Button::new("Sign in"))
+                    .add_enabled(can_connect, egui::Button::new("Connect experimental session"))
                     .clicked()
                 {
                     let credential = std::mem::take(&mut workspace.discord_session_draft);
@@ -606,8 +606,9 @@ mod tests {
 
         assert!(!rendered.contains(CREDENTIAL));
         assert!(
-            rendered.contains("Experimental account connection; Discord forbids account automation and may terminate accounts.")
+            rendered.contains("Standard Discord sign-in is not available in this build. Discord forbids account automation and may terminate accounts.")
         );
+        assert!(rendered.contains("This is not your Discord email or password."));
         assert!(rendered.contains("Discord account"));
         assert!(rendered.contains("Example account"));
 

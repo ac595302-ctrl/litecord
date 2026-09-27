@@ -395,6 +395,7 @@ impl OmniService {
         if running_other {
             self.stop().await;
         }
+        self.live().models.clear();
         self.notify(None);
         Ok(())
     }
@@ -513,6 +514,14 @@ impl OmniService {
     pub async fn models(&self) -> Result<Vec<String>> {
         let d = self.driver().await?;
         let models = d.models().await.map_err(harness_err)?;
+        if let Some(selected) = self.model() {
+            if !models.is_empty() && !models.contains(&selected) {
+                self.set_model(None)?;
+                self.live().last_error = Some(format!(
+                    "{selected} is unavailable for this account. New chats use the harness default."
+                ));
+            }
+        }
         self.live().models = models.clone();
         self.notify(None);
         Ok(models)
@@ -520,18 +529,23 @@ impl OmniService {
 
     /// The chosen model (user preference, else config), `None` = default.
     pub fn model(&self) -> Option<String> {
-        self.shared
-            .db
-            .read(|r| repos::app_state::get(r, MODEL_KEY))
-            .ok()
-            .flatten()
-            .filter(|m| !m.is_empty())
-            .or_else(|| self.shared.cfg.model.clone())
+        match self.shared.db.read(|r| repos::app_state::get(r, MODEL_KEY)) {
+            Ok(Some(saved)) => (!saved.is_empty()).then_some(saved),
+            _ => self.shared.cfg.model.clone(),
+        }
     }
 
     /// Choose the model for new sessions (`None` = harness default).
     pub fn set_model(&self, model: Option<&str>) -> Result<()> {
         let value = model.map(str::trim).unwrap_or("");
+        if !value.is_empty() {
+            let available = self.live().models.clone();
+            if !available.is_empty() && !available.iter().any(|m| m == value) {
+                return Err(Error::validation(
+                    "choose a model offered by the selected harness",
+                ));
+            }
+        }
         self.shared
             .db
             .write(|tx| repos::app_state::set(tx, MODEL_KEY, value))?;
@@ -600,6 +614,12 @@ impl OmniService {
             if let Some(ext) = &s.external_id {
                 return Ok(ext.clone());
             }
+        }
+        // A saved preference can outlive the account's model entitlement.
+        // Refresh before opening a thread so an unsupported model does not
+        // make every new Omni chat fail with a raw harness error.
+        if self.model().is_some() {
+            let _ = self.models().await;
         }
         let mode = OmniMode::parse(&s.mode).unwrap_or_default();
         let cfg = self.session_config(mode)?;

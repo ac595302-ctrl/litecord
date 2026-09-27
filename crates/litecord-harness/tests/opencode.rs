@@ -885,7 +885,7 @@ async fn models_are_listed() {
 
     let broken = serve(|_| (500, "oops".into()));
     let d = broken.driver();
-    assert_eq!(d.models().await.unwrap(), Vec::<String>::new());
+    assert!(d.models().await.is_err());
     d.shutdown().await;
 }
 

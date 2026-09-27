@@ -841,11 +841,14 @@ impl HarnessDriver for CodexDriver {
             Ok(Ok(result)) => Ok(parse_models(&result)),
             Ok(Err(e)) => {
                 tracing::debug!(code = e.code, "codex: model/list failed: {}", e.message);
-                Ok(Vec::new())
+                Err(HarnessError::Harness(format!(
+                    "Codex could not list models: {}",
+                    e.message
+                )))
             }
             Err(e) => {
                 tracing::debug!("codex: model/list failed: {e}");
-                Ok(Vec::new())
+                Err(e)
             }
         }
     }
