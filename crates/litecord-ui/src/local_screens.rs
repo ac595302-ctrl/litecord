@@ -47,7 +47,7 @@ impl Workspace {
                         &snapshot.account,
                         &snapshot.diagnostics.session,
                         snapshot
-                            .settings
+                            .diagnostics
                             .capabilities
                             .is_usable(litecord_types::capability::Capability::DmSend),
                     );
