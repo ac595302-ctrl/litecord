@@ -101,15 +101,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(SEMIBOLD.into()), family("inter-semibold"));
+    // Icon subsets lack replacement characters; retain text fallbacks so
+    // epaint can render unsupported glyphs without warnings or empty output.
     fonts
         .families
-        .insert(FontFamily::Name(ICON_FILL.into()), vec!["ph-fill".into()]);
+        .insert(FontFamily::Name(ICON_FILL.into()), family("ph-fill"));
     fonts
         .families
-        .insert(FontFamily::Name(ICON_LINE.into()), vec!["ph-line".into()]);
+        .insert(FontFamily::Name(ICON_LINE.into()), family("ph-line"));
     fonts
         .families
-        .insert(FontFamily::Name(ICON_BOLD.into()), vec!["ph-bold".into()]);
+        .insert(FontFamily::Name(ICON_BOLD.into()), family("ph-bold"));
     ctx.set_fonts(fonts);
 }
 
@@ -118,6 +120,26 @@ const SEMIBOLD: &str = "inter-semibold";
 const ICON_FILL: &str = "ph-fill";
 const ICON_LINE: &str = "ph-line";
 const ICON_BOLD: &str = "ph-bold";
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn icon_families_support_icons_and_replacement_characters() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx().fonts_mut(|fonts| {
+                for font in [icon_fill(16.0), icon_line(16.0), icon_bold(16.0)] {
+                    assert!(fonts.has_glyph(&font, '\u{E2C2}'), "missing house icon");
+                    assert!(fonts.has_glyph(&font, '?'), "missing replacement glyph");
+                    assert!(fonts.glyph_width(&font, '\u{10FFFF}') > 0.0);
+                }
+            });
+        });
+    }
+}
 
 /// Inter Regular.
 pub fn regular(size: f32) -> FontId {
