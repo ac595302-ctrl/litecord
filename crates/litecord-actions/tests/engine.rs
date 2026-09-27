@@ -433,3 +433,134 @@ async fn user_sends_execute_immediately_and_only_own_messages_are_editable() {
         Err(ActionError::Invalid(_))
     ));
 }
+
+#[derive(Debug)]
+struct ReceiptBeforeError {
+    db: Database,
+    owner: UserId,
+}
+
+#[async_trait::async_trait]
+impl litecord_actions::ActionExecutor for ReceiptBeforeError {
+    fn capabilities(
+        &self,
+        _: litecord_types::provenance::DiscordIdentity,
+    ) -> litecord_types::capability::CapabilitySet {
+        litecord_types::capability::CapabilitySet::default().with(
+            litecord_types::capability::Capability::DmSend,
+            litecord_types::capability::SupportLevel::Full,
+        )
+    }
+    async fn execute(
+        &self,
+        id: ActionId,
+        action: &AgentAction,
+        _: &Actor,
+        identity: litecord_types::provenance::DiscordIdentity,
+    ) -> Result<litecord_actions::ExecutionOutcome, ActionError> {
+        assert_eq!(
+            identity,
+            litecord_types::provenance::DiscordIdentity::UserSession
+        );
+        let AgentAction::SendMessage {
+            target: MessageTarget::Conversation { conversation_id },
+            content,
+            ..
+        } = action
+        else {
+            panic!("send expected")
+        };
+        self.db.write(|tx| {
+            repos::outbound::start(
+                tx,
+                id,
+                self.owner,
+                Some(*conversation_id),
+                "send_message",
+                "race-nonce",
+                None,
+            )
+        })?;
+        reducer::apply(
+            &self.db,
+            &SourceEnvelope::new(
+                DiscordSource::UserSession,
+                NOW,
+                DiscordEvent::MessageWriteObserved {
+                    message: litecord_types::social::Message {
+                        id: MessageId(9999999999),
+                        conversation_id: *conversation_id,
+                        author_id: self.owner,
+                        content: content.clone().into(),
+                        sent_at: NOW,
+                        edited_at: None,
+                        reply_to: None,
+                        extras: vec![],
+                    },
+                    nonce: "race-nonce".into(),
+                    imported: false,
+                },
+            ),
+            &ReducerConfig::default(),
+        )?;
+        Err(ActionError::Uncertain(
+            "response was lost after the event committed".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn committed_receipt_wins_over_a_concurrent_executor_error() {
+    let h = setup(AgentConfig::default()).await;
+    reducer::apply(
+        &h.db,
+        &SourceEnvelope::new(
+            DiscordSource::UserSession,
+            NOW,
+            DiscordEvent::CurrentUser {
+                user: h.data.current_user.clone(),
+            },
+        ),
+        &ReducerConfig::default(),
+    )
+    .unwrap();
+    let engine = ActionEngine::new(
+        h.db.clone(),
+        &AgentConfig::default(),
+        Arc::new(ReceiptBeforeError {
+            db: h.db.clone(),
+            owner: h.data.current_user.id,
+        }),
+    )
+    .unwrap();
+    let outcome = engine
+        .propose_as(
+            send_to_conversation(&h.data, "confirmed once"),
+            Actor::User,
+            litecord_types::provenance::DiscordIdentity::UserSession,
+            h.db.current_revision().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let ProposeOutcome::Executed { action_id, result } = outcome else {
+        panic!("executed expected")
+    };
+    assert_eq!(
+        result.entity,
+        Some(EntityId::Message(MessageId(9999999999)))
+    );
+    assert_eq!(
+        engine.get(action_id).unwrap().unwrap().status,
+        ActionStatus::Executed
+    );
+    assert!(h
+        .db
+        .read(|r| repos::outbound::is_confirmed(r, action_id))
+        .unwrap());
+    assert!(!engine
+        .audit(action_id)
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e.event, AuditEvent::Failed { .. })));
+}

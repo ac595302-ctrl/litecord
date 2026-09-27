@@ -715,8 +715,10 @@ async fn account_write_switch_blocks_pending_approvals_and_survives_restart() {
     use litecord_types::actions::{MessageTarget, PresenceDraft, RelationshipAction};
     use litecord_types::capability::{Capability, SessionAccessMode};
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = LitecordConfig::default();
-    cfg.data_dir = dir.path().to_owned();
+    let cfg = LitecordConfig {
+        data_dir: dir.path().to_owned(),
+        ..Default::default()
+    };
     let (_, transport, secrets) = setup();
     let backend = Arc::new(UserSessionBackend::with_access(
         Arc::new(transport.clone()),

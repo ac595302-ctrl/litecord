@@ -55,6 +55,14 @@ pub fn confirmed_message(conn: &Connection, action: ActionId) -> StoreResult<Opt
     Ok(id.map(|v| MessageId(v as u64)))
 }
 
+pub fn is_confirmed(conn: &Connection, action: ActionId) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outbound_operations WHERE action_id=?1 AND state='confirmed')",
+        [action.get()],
+        |r| r.get(0),
+    )?)
+}
+
 /// Only an exact nonce, account and channel receipt can confirm a send.
 pub fn observe_send(
     tx: &WriteTx<'_>,

@@ -503,8 +503,13 @@ async fn run_executor(
     actor: &Actor,
     identity: DiscordIdentity,
 ) -> Result<ExecutionOutcome, ActionError> {
-    let result = inner.executor.execute(id, action, actor, identity).await;
+    let mut result = inner.executor.execute(id, action, actor, identity).await;
     inner.db.write(|tx| -> Result<(), ActionError> {
+        if result.is_err() && identity == DiscordIdentity::UserSession {
+            if let Some(outcome) = crate::executor::observed_outcome(tx, id, action)? {
+                result = Ok(outcome);
+            }
+        }
         match &result {
             Ok(outcome) => {
                 repos::actions::set_status(tx, id, ActionStatus::Executed, origin_for(actor))?;

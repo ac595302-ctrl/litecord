@@ -32,6 +32,25 @@ pub struct ExecutionOutcome {
     pub entity: Option<EntityId>,
 }
 
+/// An exact committed receipt takes precedence over a concurrent transport error.
+pub(crate) fn observed_outcome(
+    conn: &litecord_store::repos::Connection,
+    id: ActionId,
+    action: &AgentAction,
+) -> Result<Option<ExecutionOutcome>, ActionError> {
+    if !repos::outbound::is_confirmed(conn, id)? {
+        return Ok(None);
+    }
+    let entity = match action {
+        AgentAction::RelationshipChange { user_id, .. } => Some(EntityId::User(*user_id)),
+        _ => repos::outbound::confirmed_message(conn, id)?.map(EntityId::Message),
+    };
+    Ok(Some(ExecutionOutcome {
+        summary: "confirmed by Discord observation".into(),
+        entity,
+    }))
+}
+
 #[async_trait]
 pub trait ActionExecutor: Send + Sync + std::fmt::Debug {
     /// Backend capabilities (used for validation). Local-only executors
@@ -226,14 +245,8 @@ impl ActionExecutor for DefaultExecutor {
             .await;
         if nonce.is_some() {
             if result.is_err() {
-                if let Some(message) = self
-                    .db
-                    .read(|r| repos::outbound::confirmed_message(r, id))?
-                {
-                    result = Ok(ExecutionOutcome {
-                        summary: "message confirmed by Discord observation".into(),
-                        entity: Some(EntityId::Message(message)),
-                    });
+                if let Some(outcome) = self.db.read(|r| observed_outcome(r, id, action))? {
+                    result = Ok(outcome);
                 }
             }
             self.db.write(|tx| -> Result<(), ActionError> {
@@ -341,7 +354,7 @@ impl DefaultExecutor {
             AgentAction::ChangePresence { presence } => {
                 backend()?.set_presence(presence).await.map_err(exec_err)?;
                 Ok(ExecutionOutcome {
-                    summary: format!("presence set to {}", presence.status),
+                    summary: format!("presence update submitted for {}", presence.status),
                     entity: None,
                 })
             }
