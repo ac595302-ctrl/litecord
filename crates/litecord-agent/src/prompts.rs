@@ -96,6 +96,7 @@ impl AutomationPrompt<'_> {
             format!("Context: {}\n", self.context.trim())
         };
         AUTOMATION
+            .replace("\r\n", "\n")
             .replace("{{name}}", self.name)
             .replace("{{trigger}}", self.trigger)
             .replace("{{instructions}}", self.instructions.trim())
