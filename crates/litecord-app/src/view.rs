@@ -108,6 +108,8 @@ pub struct ConversationViewModel {
     pub title: String,
     /// Oldest first; a window of the most recent messages (virtualize in UI).
     pub messages: Vec<MessageRow>,
+    /// Last sanitized history fetch error, when Discord could not supply messages.
+    pub history_error: Option<String>,
     /// Pass the oldest `sent_at` as `before` to page further back.
     pub has_more: bool,
     pub capabilities: ConversationCapabilities,

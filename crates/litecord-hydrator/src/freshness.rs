@@ -101,6 +101,13 @@ pub trait FreshnessStore: Send + Sync + std::fmt::Debug {
         error: &str,
         stale_after: DurationMs,
     ) -> Result<(), HydrationError>;
+    fn record_terminal_failure(
+        &self,
+        key: &HydrationKey,
+        error: &str,
+        at: Timestamp,
+        stale_after: DurationMs,
+    ) -> Result<(), HydrationError>;
 }
 
 fn empty(stale_after: DurationMs) -> Freshness {
@@ -186,6 +193,22 @@ impl FreshnessStore for InMemoryFreshnessStore {
         entry.failure_count += 1;
         entry.stale_after = stale_after;
         tracing::debug!(key = ?key, error, failure_count = entry.failure_count, "hydration failure recorded");
+        Ok(())
+    }
+
+    fn record_terminal_failure(
+        &self,
+        key: &HydrationKey,
+        _error: &str,
+        at: Timestamp,
+        stale_after: DurationMs,
+    ) -> Result<(), HydrationError> {
+        let mut guard = self.lock();
+        let entry = guard.entry(*key).or_insert_with(|| empty(stale_after));
+        entry.observed_at = Some(at);
+        entry.stale_after = stale_after;
+        entry.dirty = false;
+        entry.failure_count += 1;
         Ok(())
     }
 }

@@ -82,6 +82,19 @@ impl FreshnessStore for StoreFreshness {
             .map_err(err)?;
         Ok(())
     }
+
+    fn record_terminal_failure(
+        &self,
+        key: &HydrationKey,
+        error: &str,
+        at: Timestamp,
+        stale_after: DurationMs,
+    ) -> Result<(), HydrationError> {
+        self.db
+            .write(|tx| sync_state::record_terminal_failure(tx, key, error, at, stale_after))
+            .map_err(err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

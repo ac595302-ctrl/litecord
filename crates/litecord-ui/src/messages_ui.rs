@@ -125,12 +125,27 @@ impl Workspace {
                             ui.horizontal(|ui| {
                                 ui.add_space(INSET);
                                 ui.vertical(|ui| {
-                                    kit::empty(
-                                        ui,
-                                        Some(ph::CHAT_CIRCLE_DOTS),
-                                        "No messages cached yet",
-                                        "Recent history loads in the background when Discord provides it.",
-                                    )
+                                    let (title, detail) = if chat
+                                        .history_error
+                                        .as_deref()
+                                        .is_some_and(|error| error.starts_with("permission denied"))
+                                    {
+                                        (
+                                            "Message history unavailable",
+                                            "Discord denied access to this channel's history. You can open it in Discord from the chat menu.",
+                                        )
+                                    } else if chat.history_error.is_some() {
+                                        (
+                                            "Could not load message history",
+                                            "The last refresh failed. Litecord will try again; you can also open this conversation in Discord.",
+                                        )
+                                    } else {
+                                        (
+                                            "No messages cached yet",
+                                            "Recent history loads in the background when Discord provides it.",
+                                        )
+                                    };
+                                    kit::empty(ui, Some(ph::CHAT_CIRCLE_DOTS), title, detail)
                                 });
                             });
                         }

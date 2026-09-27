@@ -346,12 +346,12 @@ impl Hydrator {
                 sched.release_offline(job.key);
                 sched.pause();
             }
-            BackendError::Unsupported { .. } => {
-                tracing::debug!(key = ?job.key, error = %err, "hydration capability unsupported; not retrying");
-                let stale_after = self.policy.stale_after(&job.key);
+            BackendError::Unsupported { .. } | BackendError::PermissionDenied { .. } => {
+                tracing::debug!(key = ?job.key, error = %err, "hydration unavailable; delaying retry");
+                let stale_after = litecord_types::DurationMs::from_mins(10);
                 if let Err(e) =
                     self.freshness
-                        .record_failure(&job.key, &err.to_string(), stale_after)
+                        .record_terminal_failure(&job.key, &err.to_string(), now, stale_after)
                 {
                     tracing::warn!(error = %e, "record_failure failed");
                 }

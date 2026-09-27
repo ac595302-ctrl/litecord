@@ -164,6 +164,36 @@ pub fn record_failure(
     Ok(n > 0)
 }
 
+/// Keep a nonretryable error visible while delaying another background fetch.
+pub fn record_terminal_failure(
+    tx: &WriteTx<'_>,
+    key: &HydrationKey,
+    error: &str,
+    at: Timestamp,
+    stale_after: DurationMs,
+) -> StoreResult<bool> {
+    let truncated: String = error.chars().take(200).collect();
+    let n = tx.execute(
+        "INSERT INTO sync_state (key, observed_at, stale_after_ms, revision, dirty, failure_count, last_error)
+         VALUES (?1, ?2, ?3, ?4, 0, 1, ?5)
+         ON CONFLICT(key) DO UPDATE SET
+             observed_at = excluded.observed_at,
+             stale_after_ms = excluded.stale_after_ms,
+             revision = excluded.revision,
+             dirty = 0,
+             failure_count = sync_state.failure_count + 1,
+             last_error = excluded.last_error",
+        params![
+            key.storage_key(),
+            at.as_millis(),
+            stale_after.as_millis() as i64,
+            tx.revision().get() as i64,
+            truncated,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

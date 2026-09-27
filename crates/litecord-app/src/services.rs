@@ -309,11 +309,17 @@ impl LitecordApp {
                 });
             }
             let open_drafts = repos::drafts::list(r, Some(id), Some(&[DraftStatus::Open]), 10)?;
+            let history_error = repos::sync_state::get(
+                r,
+                &HydrationKey::DmConversation { conversation_id: id },
+            )?
+            .and_then(|state| state.last_error);
             Ok(ConversationViewModel {
                 as_of_revision: r.revision(),
                 conversation_id: id,
                 title: title_of(r, &conv.conversation)?,
                 messages,
+                history_error,
                 has_more,
                 capabilities: ConversationCapabilities {
                     can_send: send_identity.is_some(),
