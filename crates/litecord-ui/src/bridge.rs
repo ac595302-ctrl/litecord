@@ -307,19 +307,20 @@ pub(crate) fn snapshot(
     });
     let (chat, files) = match prev {
         Some(p) if !needs(d, "chat") && same_conversation => (p.chat.clone(), p.files.clone()),
-        _ => (
-            selection
-                .conversation
-                .map(|id| {
-                    app.conversation_view(id, 200, selection.before)
-                        .map(Arc::new)
-                })
-                .transpose()?,
-            selection
-                .conversation
-                .map(|id| app.conversation_files_view(id, 30, None).map(Arc::new))
-                .transpose()?,
-        ),
+        _ => match selection.conversation {
+            Some(id) => match app.conversation_view(id, 200, selection.before) {
+                Ok(chat) => (
+                    Some(Arc::new(chat)),
+                    Some(Arc::new(app.conversation_files_view(id, 30, None)?)),
+                ),
+                Err(e) if e.kind() == litecord_core::error::ErrorKind::NotFound => {
+                    selection.conversation = None;
+                    (None, None)
+                }
+                Err(e) => return Err(e),
+            },
+            None => (None, None),
+        },
     };
     let contact_id = selection.contact.or_else(|| {
         conversations

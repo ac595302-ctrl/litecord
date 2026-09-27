@@ -341,9 +341,7 @@ impl Workspace {
             let result = self.bridge.snapshots.borrow_and_update().clone();
             match result {
                 Ok(s) if s.selection.generation == self.selection.generation => {
-                    if self.selection.conversation.is_none() {
-                        self.selection.conversation = s.selection.conversation;
-                    }
+                    self.selection.conversation = s.selection.conversation;
                     if self.edit_original.is_none() && !self.saving_layout && !self.layout_dirty {
                         if let Some(p) = s
                             .layouts

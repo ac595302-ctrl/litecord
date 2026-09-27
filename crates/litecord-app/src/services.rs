@@ -201,11 +201,12 @@ impl LitecordApp {
     ) -> Result<ConversationViewModel> {
         // Guild channels are served by the bot source (the Social SDK has no
         // guild history); everything else by the user source.
-        let is_guild_channel = self
+        let conversation = self
             .inner
             .db
             .read(|r| repos::conversations::get(r, id))?
-            .is_some_and(|c| c.conversation.kind == ConversationKind::GuildChannel);
+            .ok_or_else(|| Error::not_found(format!("conversation {id}")))?;
+        let is_guild_channel = conversation.conversation.kind == ConversationKind::GuildChannel;
         let (hydrator, caps, send_identity) = match (&self.inner.bot, &self.inner.bot_hydrator) {
             (Some(bot), Some(h)) if is_guild_channel => {
                 let caps = bot.capabilities();
