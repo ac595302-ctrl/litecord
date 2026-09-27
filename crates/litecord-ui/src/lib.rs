@@ -1,6 +1,8 @@
 //! Native presentation. All data and writes go through `LitecordApp`.
 mod attention;
 mod bridge;
+#[cfg(all(feature = "browser-login", target_os = "windows"))]
+mod browser_login;
 mod context_ui;
 mod friends_ui;
 mod home_ui;

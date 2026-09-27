@@ -66,6 +66,10 @@ pub struct Workspace {
     pub discord_password_draft: String,
     pub discord_totp_draft: String,
     pub discord_totp_required: bool,
+    #[cfg(all(feature = "browser-login", target_os = "windows"))]
+    pub discord_browser_requested: bool,
+    #[cfg(all(feature = "browser-login", target_os = "windows"))]
+    pub discord_browser: Option<crate::browser_login::LoginView>,
     pub automation_form: crate::omni_ui::AutomationForm,
     /// Tasks screen: new-task form and comment drafts.
     pub task_title_draft: String,
@@ -153,6 +157,10 @@ impl Workspace {
             discord_session_draft: String::new(),
             discord_email_draft: String::new(),
             discord_password_draft: String::new(),
+            #[cfg(all(feature = "browser-login", target_os = "windows"))]
+            discord_browser_requested: false,
+            #[cfg(all(feature = "browser-login", target_os = "windows"))]
+            discord_browser: None,
             discord_totp_draft: String::new(),
             discord_totp_required: false,
             automation_form: crate::omni_ui::AutomationForm::default(),
@@ -760,7 +768,62 @@ impl Workspace {
 
 impl eframe::App for Workspace {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(all(feature = "browser-login", target_os = "windows"))]
+        if self.draw_discord_browser(ui, _frame) {
+            return;
+        }
         self.draw(ui);
+    }
+}
+
+#[cfg(all(feature = "browser-login", target_os = "windows"))]
+impl Workspace {
+    fn draw_discord_browser(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) -> bool {
+        let ctx = ui.ctx().clone();
+        if self.discord_browser_requested {
+            self.discord_browser_requested = false;
+            self.discord_password_draft.clear();
+            self.discord_session_draft.clear();
+            self.discord_totp_draft.clear();
+            self.discord_totp_required = false;
+            self.notice = None;
+            match crate::browser_login::LoginView::open(frame, &ctx) {
+                Ok(view) => self.discord_browser = Some(view),
+                Err(message) => self.notice = Some(message),
+            }
+        }
+        let Some(view) = &self.discord_browser else {
+            return false;
+        };
+        if view.expired() {
+            self.discord_browser = None;
+            self.notice = Some("Discord sign-in expired. Start again when ready.".into());
+            return false;
+        }
+        if let Some(credential) = view.credential() {
+            self.discord_browser = None;
+            self.notice = Some("Checking the Discord session…".into());
+            self.send(Command::ConnectSession(credential));
+            return false;
+        }
+        view.resize(&ctx);
+        let mut cancel = false;
+        egui::Panel::top("discord_browser_header")
+            .exact_size(crate::browser_login::HEADER_HEIGHT as f32)
+            .show_inside(ui, |ui| {
+                ui.heading("Connect Discord");
+                ui.label("Discord sign-in · https://discord.com · Complete verification yourself.");
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Cancel sign-in").clicked();
+                    ui.label("This temporary sign-in view closes after ten minutes.");
+                });
+            });
+        if cancel {
+            self.discord_browser = None;
+            self.notice = Some("Discord sign-in cancelled.".into());
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        true
     }
 }
 

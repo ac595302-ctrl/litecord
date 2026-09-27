@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 screenshots = ["dep:image"]
+browser-login = ["dep:wry", "dep:url", "dep:tempfile", "dep:getrandom", "dep:zeroize"]
 
 [dependencies]
 litecord-app.workspace = true
@@ -21,6 +22,13 @@ eframe = { version = "=0.34.3", default-features = false, features = ["accesskit
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 # Local wall-clock time for timestamps (the store keeps UTC).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wry = { version = "=0.57.0", default-features = false, features = ["os-webview"], optional = true }
+url = { version = "2.5", optional = true }
+tempfile = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+zeroize = { version = "1.8", optional = true }
 
 [lints]
 workspace = true

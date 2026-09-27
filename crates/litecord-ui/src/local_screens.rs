@@ -196,6 +196,14 @@ fn discord_session_connection(
                 ui.add_space(6.0);
             }
             if !state.is_online() {
+                #[cfg(all(feature = "browser-login", target_os = "windows"))]
+                {
+                    ui.label("Sign in on Discord's own page and complete any verification there.");
+                    if ui.add_enabled(!workspace.busy, egui::Button::new("Open Discord sign-in")).clicked() {
+                        workspace.discord_browser_requested = true;
+                    }
+                    ui.add_space(8.0);
+                }
                 if workspace.discord_totp_required {
                     ui.label(egui::RichText::new("Authenticator code").strong());
                     ui.add_enabled(
