@@ -173,6 +173,14 @@ fn unsupported<T>(capability: Capability) -> BackendResult<T> {
     Err(BackendError::Unsupported { capability })
 }
 
+/// Result of an experimental account password exchange. The backend retains
+/// any MFA ticket; neither it nor a Discord token crosses this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountLoginStep {
+    Connected,
+    TotpRequired,
+}
+
 /// A Discord-facing data source/sink.
 ///
 /// Thread-safety: implementations must be `Send + Sync`; methods take `&self`
@@ -246,6 +254,22 @@ pub trait SocialBackend: Send + Sync + std::fmt::Debug + 'static {
     ) -> BackendResult<()> {
         Err(BackendError::Authentication(
             "this backend does not accept session credentials".into(),
+        ))
+    }
+
+    async fn login_with_password(
+        &self,
+        _login: crate::secrets::Secret<String>,
+        _password: crate::secrets::Secret<String>,
+    ) -> BackendResult<AccountLoginStep> {
+        Err(BackendError::Authentication(
+            "this backend has no password sign-in".into(),
+        ))
+    }
+
+    async fn complete_totp(&self, _code: crate::secrets::Secret<String>) -> BackendResult<()> {
+        Err(BackendError::Authentication(
+            "this backend has no TOTP sign-in".into(),
         ))
     }
 

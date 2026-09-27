@@ -101,6 +101,11 @@ pub enum Command {
     SyncHistory(ConversationId, bool),
     /// Authenticate with an experimental Discord user-session credential.
     ConnectSession(litecord_core::secrets::Secret<String>),
+    DiscordPasswordLogin(
+        litecord_core::secrets::Secret<String>,
+        litecord_core::secrets::Secret<String>,
+    ),
+    DiscordTotp(litecord_core::secrets::Secret<String>),
     /// Sign out of the current Discord user session.
     DiscordSignOut,
 }
@@ -143,6 +148,7 @@ pub struct Completion {
     /// Omni session to show after the command (e.g. a new chat).
     pub omni_session: Option<i64>,
     pub task_created: Option<TaskId>,
+    pub discord_login_step: Option<litecord_core::ports::AccountLoginStep>,
     pub error: Option<String>,
 }
 
@@ -459,6 +465,13 @@ pub(crate) async fn execute(
         }
         Command::SyncHistory(id, false) => app.stop_history_sync(id)?,
         Command::ConnectSession(credential) => app.authenticate_session(credential).await?,
+        Command::DiscordPasswordLogin(login, password) => {
+            c.discord_login_step = Some(app.login_with_password(login, password).await?);
+        }
+        Command::DiscordTotp(code) => {
+            app.complete_totp(code).await?;
+            c.discord_login_step = Some(litecord_core::ports::AccountLoginStep::Connected);
+        }
         Command::DiscordSignOut => app.sign_out().await?,
         Command::CreateTask(draft) => {
             if let litecord_actions::ProposeOutcome::Executed {

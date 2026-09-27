@@ -161,12 +161,17 @@ impl Workspace {
         };
         let name = self.display(&s.account.display_name);
         let area = ui.max_rect();
-        let size = if orientation == Orientation::Horizontal {
+        // The account panel sits below the vertical rail. Its Bottom placement
+        // resolves to Horizontal, so use its compact footer shape to keep the
+        // avatar on the same center line as the navigation icons.
+        let rail_footer = orientation == Orientation::Vertical
+            || (area.width() <= 240.0 && area.height() >= 80.0);
+        let size = if !rail_footer {
             (area.height() - 12.0).clamp(28.0, 44.0)
         } else {
             (area.width() - 44.0).clamp(36.0, 56.0)
         };
-        let c = if orientation == Orientation::Horizontal {
+        let c = if !rail_footer {
             egui::pos2(area.left() + size * 0.5 + 12.0, area.center().y)
         } else {
             egui::pos2(area.center().x, area.bottom() - size * 0.5 - 18.0)

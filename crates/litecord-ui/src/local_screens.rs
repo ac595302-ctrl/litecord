@@ -137,7 +137,7 @@ fn discord_session_connection(
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Standard Discord sign-in is not available in this build. Discord forbids account automation and may terminate accounts.",
+                    "Experimental account sign-in uses Discord's unsupported password endpoint. Discord forbids account automation and may terminate accounts.",
                 )
                 .color(theme::WARNING),
             );
@@ -195,40 +195,100 @@ fn discord_session_connection(
                 ui.label(egui::RichText::new(message).color(theme::WARNING));
                 ui.add_space(6.0);
             }
-            ui.label(egui::RichText::new("Experimental session credential").strong());
-            ui.label(egui::RichText::new("This is not your Discord email or password. Browser OAuth is not implemented here. The credential is saved in your operating system's secure storage.").size(12.0).color(theme::MUTED));
-            ui.add_enabled(
-                !workspace.busy,
-                egui::TextEdit::singleline(&mut workspace.discord_session_draft)
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Experimental credential — never enter your password"),
-            );
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let can_connect =
-                    !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
-                if ui
-                    .add_enabled(can_connect, egui::Button::new("Connect experimental session"))
-                    .clicked()
-                {
-                    let credential = std::mem::take(&mut workspace.discord_session_draft);
-                    workspace.send(Command::ConnectSession(
-                        litecord_core::secrets::Secret::new(credential),
-                    ));
+            if !state.is_online() {
+                if workspace.discord_totp_required {
+                    ui.label(egui::RichText::new("Authenticator code").strong());
+                    ui.add_enabled(
+                        !workspace.busy,
+                        egui::TextEdit::singleline(&mut workspace.discord_totp_draft)
+                            .desired_width(240.0)
+                            .hint_text("6-digit code"),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !workspace.busy && !workspace.discord_totp_draft.trim().is_empty(),
+                                egui::Button::new("Finish sign-in"),
+                            )
+                            .clicked()
+                        {
+                            let code = std::mem::take(&mut workspace.discord_totp_draft);
+                            workspace.send(Command::DiscordTotp(
+                                litecord_core::secrets::Secret::new(code),
+                            ));
+                        }
+                        if ui.button("Start over").clicked() {
+                            workspace.discord_totp_required = false;
+                            workspace.discord_totp_draft.clear();
+                        }
+                    });
+                } else {
+                    ui.label(egui::RichText::new("Email or verified phone").strong());
+                    ui.add_enabled(
+                        !workspace.busy,
+                        egui::TextEdit::singleline(&mut workspace.discord_email_draft)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Your Discord email or phone"),
+                    );
+                    ui.label(egui::RichText::new("Password").strong());
+                    ui.add_enabled(
+                        !workspace.busy,
+                        egui::TextEdit::singleline(&mut workspace.discord_password_draft)
+                            .password(true)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Discord password"),
+                    );
+                    let can_login = !workspace.busy
+                        && !workspace.discord_email_draft.trim().is_empty()
+                        && !workspace.discord_password_draft.is_empty();
+                    if ui
+                        .add_enabled(can_login, egui::Button::new("Sign in to Discord"))
+                        .clicked()
+                    {
+                        let login = workspace.discord_email_draft.trim().to_owned();
+                        let password = std::mem::take(&mut workspace.discord_password_draft);
+                        workspace.send(Command::DiscordPasswordLogin(
+                            litecord_core::secrets::Secret::new(login),
+                            litecord_core::secrets::Secret::new(password),
+                        ));
+                    }
                 }
-
-                let connected =
-                    account.user_id.is_some() || !matches!(state, SessionState::LoggedOut);
-                if ui
-                    .add_enabled(!workspace.busy && connected, egui::Button::new("Log out"))
-                    .clicked()
-                {
-                    workspace.discord_session_draft.clear();
-                    workspace.send(Command::DiscordSignOut);
-                }
-            });
+                ui.add_space(8.0);
+                ui.collapsing("Advanced: connect with a session credential", |ui| {
+                    ui.label(egui::RichText::new("This is not your email or password. Only the resulting credential is saved in OS secure storage.").size(12.0).color(theme::MUTED));
+                    ui.add_enabled(
+                        !workspace.busy,
+                        egui::TextEdit::singleline(&mut workspace.discord_session_draft)
+                            .password(true)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Session credential"),
+                    );
+                    if ui
+                        .add_enabled(
+                            !workspace.busy && !workspace.discord_session_draft.trim().is_empty(),
+                            egui::Button::new("Connect session"),
+                        )
+                        .clicked()
+                    {
+                        let credential = std::mem::take(&mut workspace.discord_session_draft);
+                        workspace.send(Command::ConnectSession(
+                            litecord_core::secrets::Secret::new(credential),
+                        ));
+                    }
+                });
+            }
+            let connected = account.user_id.is_some() || !matches!(state, SessionState::LoggedOut);
+            if ui
+                .add_enabled(!workspace.busy && connected, egui::Button::new("Log out"))
+                .clicked()
+            {
+                workspace.discord_session_draft.clear();
+                workspace.discord_email_draft.clear();
+                workspace.discord_password_draft.clear();
+                workspace.discord_totp_draft.clear();
+                workspace.discord_totp_required = false;
+                workspace.send(Command::DiscordSignOut);
+            }
         });
 }
 
@@ -606,9 +666,9 @@ mod tests {
 
         assert!(!rendered.contains(CREDENTIAL));
         assert!(
-            rendered.contains("Standard Discord sign-in is not available in this build. Discord forbids account automation and may terminate accounts.")
+            rendered.contains("Experimental account sign-in uses Discord's unsupported password endpoint. Discord forbids account automation and may terminate accounts.")
         );
-        assert!(rendered.contains("This is not your Discord email or password."));
+        assert!(rendered.contains("Email or verified phone"));
         assert!(rendered.contains("Discord account"));
         assert!(rendered.contains("Example account"));
 

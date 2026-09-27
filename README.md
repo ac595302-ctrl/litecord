@@ -44,10 +44,13 @@ Requirements: stable Rust. SQLite is bundled.
 
 The account build starts with an empty, separate account database and opens
 Settings for connection. It does not import demo contacts or messages. This
-user-session path is experimental, uses a manually supplied account credential,
-and has not been verified with a real Discord account. Do not enter a Discord
-email or password in Litecord. Standard browser sign-in through the official
-Social SDK OAuth path is not yet implemented. See
+user-session path is experimental and has not been verified with a real Discord
+account. Settings now accepts an email or verified phone and password, followed
+by a TOTP code when Discord requests one. Litecord exchanges those values with
+Discord's unsupported account-login endpoint, keeps the password only during
+the request, and stores the resulting session credential in OS secure storage.
+CAPTCHA and non-TOTP challenges are not supported. Standard browser sign-in
+through the official Social SDK OAuth path is not yet implemented. See
 [`docs/PART_B_ACCOUNT_PIPELINE.md`](docs/PART_B_ACCOUNT_PIPELINE.md) before using
 the account connection.
 

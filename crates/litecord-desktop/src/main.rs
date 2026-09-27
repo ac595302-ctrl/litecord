@@ -185,7 +185,9 @@ fn desktop_data_dir(env: &[(String, String)]) -> Option<PathBuf> {
             .map(|(_, v)| PathBuf::from(v))
     };
     if cfg!(target_os = "windows") {
-        value("LOCALAPPDATA").map(|p| p.join("Litecord/account"))
+        value("LOCALAPPDATA")
+            .or_else(|| value("HOME"))
+            .map(|p| p.join("Litecord").join("account"))
     } else if cfg!(target_os = "macos") {
         value("HOME").map(|p| p.join("Library/Application Support/Litecord/account"))
     } else {

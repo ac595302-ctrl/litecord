@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use litecord_core::bus::IngestSender;
 use litecord_core::clock::SharedClock;
 use litecord_core::events::{DiscordEvent, SourceEnvelope};
+#[cfg(feature = "discord-user-session")]
+use litecord_core::ports::AccountLoginStep;
 use litecord_core::ports::{
     BackendError, BackendResult, HistoryPage, HistoryPageRequest, SocialBackend,
 };
@@ -55,6 +57,7 @@ struct Shared {
     transport: Arc<dyn SessionTransport>,
     secrets: Arc<dyn SecretStore>,
     credential: Mutex<Option<Secret<String>>>,
+    pending_mfa_ticket: Mutex<Option<Secret<String>>>,
     pinned_account: Mutex<Option<UserId>>,
     metadata: Mutex<Metadata>,
     sink: Mutex<Option<IngestSender>>,
@@ -205,6 +208,47 @@ fn payload_error(_: common::TranslateError) -> BackendError {
     BackendError::Sdk("Discord returned an unsupported account payload".into())
 }
 
+/// Discord's account-password exchange is not part of its public OAuth API.
+/// Keep this isolated from the ordinary REST transport and never log the
+/// request, response, password, MFA ticket, or returned session token.
+#[cfg(feature = "discord-user-session")]
+async fn password_auth_request(path: &str, body: Value) -> BackendResult<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| BackendError::Offline)?;
+    let response = client
+        .post(format!("https://discord.com/api/v9/auth/{path}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| BackendError::Offline)?;
+    let status = response.status();
+    let payload: Value = response.json().await.map_err(|_| {
+        BackendError::Authentication("Discord returned an unreadable login response".into())
+    })?;
+    if payload.get("captcha_key").is_some() || payload.get("captcha_sitekey").is_some() {
+        return Err(BackendError::Authentication(
+            "Discord requires a CAPTCHA for this login; Litecord cannot complete that challenge"
+                .into(),
+        ));
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(BackendError::Authentication(
+            "Discord rate limited this login; wait before trying again".into(),
+        ));
+    }
+    if !status.is_success() {
+        return Err(BackendError::Authentication(if path == "login" {
+            "Discord rejected the email or password, or requires an unsupported challenge".into()
+        } else {
+            "Discord rejected the authentication code".into()
+        }));
+    }
+    Ok(payload)
+}
+
 impl UserSessionBackend {
     pub fn new(
         transport: Arc<dyn SessionTransport>,
@@ -228,6 +272,7 @@ impl UserSessionBackend {
                 transport,
                 secrets,
                 credential: Mutex::new(None),
+                pending_mfa_ticket: Mutex::new(None),
                 pinned_account: Mutex::new(None),
                 metadata: Mutex::new(Metadata::default()),
                 sink: Mutex::new(None),
@@ -794,6 +839,11 @@ impl SocialBackend for UserSessionBackend {
         let user = common::user(&raw).map_err(payload_error)?;
         self.shared.check_account(&user)?;
         self.stop().await;
+        *self
+            .shared
+            .pending_mfa_ticket
+            .lock()
+            .map_err(|_| BackendError::Offline)? = None;
         let store = self.shared.secrets.clone();
         let persisted = Secret::new(credential.expose_secret().clone());
         let saved = tokio::task::spawn_blocking(move || {
@@ -836,9 +886,101 @@ impl SocialBackend for UserSessionBackend {
         self.shared.emit(DiscordEvent::CurrentUser { user });
         self.start().await
     }
+    #[cfg(feature = "discord-user-session")]
+    async fn login_with_password(
+        &self,
+        login: Secret<String>,
+        password: Secret<String>,
+    ) -> BackendResult<AccountLoginStep> {
+        *self
+            .shared
+            .pending_mfa_ticket
+            .lock()
+            .map_err(|_| BackendError::Offline)? = None;
+        if login.expose_secret().trim().is_empty() || password.expose_secret().is_empty() {
+            return Err(BackendError::Authentication(
+                "enter your Discord email and password".into(),
+            ));
+        }
+        let payload = password_auth_request(
+            "login",
+            json!({
+                "login": login.expose_secret().trim(),
+                "password": password.expose_secret(),
+                "undelete": false,
+            }),
+        )
+        .await?;
+        if let Some(token) = payload.get("token").and_then(Value::as_str) {
+            self.authenticate_session(Secret::new(token.to_owned()))
+                .await?;
+            return Ok(AccountLoginStep::Connected);
+        }
+        if payload.get("mfa").and_then(Value::as_bool) == Some(true) {
+            if payload.get("totp").and_then(Value::as_bool) == Some(false) {
+                return Err(BackendError::Authentication(
+                    "This account requires an MFA method other than an authenticator code".into(),
+                ));
+            }
+            let ticket = payload
+                .get("ticket")
+                .and_then(Value::as_str)
+                .filter(|ticket| !ticket.is_empty())
+                .ok_or_else(|| {
+                    BackendError::Authentication("Discord did not provide an MFA ticket".into())
+                })?;
+            *self
+                .shared
+                .pending_mfa_ticket
+                .lock()
+                .map_err(|_| BackendError::Offline)? = Some(Secret::new(ticket.to_owned()));
+            return Ok(AccountLoginStep::TotpRequired);
+        }
+        Err(BackendError::Authentication(
+            "Discord did not complete sign-in or identify an MFA step".into(),
+        ))
+    }
+    #[cfg(feature = "discord-user-session")]
+    async fn complete_totp(&self, code: Secret<String>) -> BackendResult<()> {
+        let ticket = self
+            .shared
+            .pending_mfa_ticket
+            .lock()
+            .map_err(|_| BackendError::Offline)?
+            .as_ref()
+            .map(|ticket| ticket.expose_secret().clone())
+            .ok_or_else(|| BackendError::Authentication("Start sign-in again".into()))?;
+        if code.expose_secret().trim().is_empty() {
+            return Err(BackendError::Authentication(
+                "enter your authenticator code".into(),
+            ));
+        }
+        let payload = password_auth_request(
+            "mfa/totp",
+            json!({
+                "ticket": ticket,
+                "code": code.expose_secret().trim(),
+            }),
+        )
+        .await?;
+        let token = payload
+            .get("token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                BackendError::Authentication("Discord did not return a session".into())
+            })?;
+        self.authenticate_session(Secret::new(token.to_owned()))
+            .await
+    }
     async fn sign_out(&self) -> BackendResult<()> {
         let _lifecycle = self.lifecycle.lock().await;
         self.stop().await;
+        *self
+            .shared
+            .pending_mfa_ticket
+            .lock()
+            .map_err(|_| BackendError::Offline)? = None;
         *self
             .shared
             .credential

@@ -18,8 +18,9 @@ harness subprocesses provide AI tooling and are not Discord data sources.
 ## End-to-end path
 
 ```text
-Settings (masked credential field)
-  └─ ConnectSession(Secret<String>)
+Settings (email/password + optional TOTP, or advanced credential field)
+  └─ DiscordPasswordLogin → Discord auth exchange → ConnectSession(Secret<String>)
+     or ConnectSession(Secret<String>) directly
        └─ LitecordApp::authenticate_session
             └─ UserSessionBackend
                  ├─ GET /users/@me validates a non-bot account and account binding
@@ -42,9 +43,13 @@ Stage C history sync:
 
 The desktop binary constructs the adapter only when its `discord-user-session`
 feature is enabled and `backend.kind` selects `user_session`. `Settings`
-submits the credential through the typed app command; it is not a normal
-setting. The backend's `AuthStep::SessionCredential` is a separate contract
-from OAuth or a browser redirect. The adapter first validates the credential
+submits login inputs through typed app commands; they are not normal
+settings. The experimental password exchange uses Discord's unsupported
+account-login endpoint and supports an authenticator TOTP challenge. It keeps
+the MFA ticket in memory and passes a resulting token to the same credential
+validation path. CAPTCHA and other MFA methods are not implemented. The
+backend's `AuthStep::SessionCredential` remains a separate contract from OAuth
+or a browser redirect. The adapter first validates the credential
 with `GET /users/@me`, rejects bot accounts, and checks that the account
 matches the account already bound to the database. Only after that check does
 it save the credential through the OS keyring implementation and start the
@@ -69,12 +74,12 @@ per source. A snapshot from one source retires only that source's memberships;
 a shared canonical guild or channel remains active while another source still
 retains it.
 
-The input is masked in Settings and exists as an in-memory UI draft only until
-submission. The draft is moved into `Secret<String>` before it enters the
-bridge. `Secret` redacts its debug output and does not implement serialization;
-the Settings draft, bridge command, and account credential are not written to
-the TOML config or ordinary app settings. Use a credential you supply as the
-account owner. The example config contains no credential.
+The password is masked in Settings and removed from its UI draft on submission.
+Email, password, TOTP code, and optional session credential enter the bridge in
+`Secret<String>` wrappers. `Secret` redacts its debug output and does not
+implement serialization. Only a validated session credential is persisted to
+the OS keyring; login inputs are not written to the TOML config, ordinary app
+settings, or SQLite. The example config contains no credential.
 
 ## Build and run
 
@@ -87,11 +92,12 @@ cargo build -p litecord-desktop --features "gui,discord-user-session" --offline
 cargo run -p litecord-desktop --features "gui,discord-user-session" --offline -- --config config/litecord.account.example.toml gui
 ```
 
-Open **Settings**, enter the account-owner-supplied session credential in the
-masked field, then choose **Connect**. The account identity, connection state,
-and source are shown in the card. The UI labels this path experimental and
-read-only. The same config may be selected with `--backend user-session` if a
-CLI override is preferred.
+Open **Settings**, enter your Discord email or verified phone and password,
+then choose **Sign in to Discord**. If prompted, enter the authenticator code.
+The previous session-credential field remains under **Advanced**. The account
+identity, connection state, and source are shown in the card. This path is
+experimental and has not been verified against a real account. The same config
+may be selected with `--backend user-session` if a CLI override is preferred.
 
 The `discord-user-session` feature also enables the optional network stack and
 the platform OS-keyring implementation. If keyring access is unavailable,

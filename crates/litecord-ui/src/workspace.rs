@@ -62,6 +62,10 @@ pub struct Workspace {
     pub omni_model_query: String,
     /// In-memory input for the experimental Discord user-session connection.
     pub discord_session_draft: String,
+    pub discord_email_draft: String,
+    pub discord_password_draft: String,
+    pub discord_totp_draft: String,
+    pub discord_totp_required: bool,
     pub automation_form: crate::omni_ui::AutomationForm,
     /// Tasks screen: new-task form and comment drafts.
     pub task_title_draft: String,
@@ -147,6 +151,10 @@ impl Workspace {
             omni_models_requested_for: None,
             omni_model_query: String::new(),
             discord_session_draft: String::new(),
+            discord_email_draft: String::new(),
+            discord_password_draft: String::new(),
+            discord_totp_draft: String::new(),
+            discord_totp_required: false,
             automation_form: crate::omni_ui::AutomationForm::default(),
             task_title_draft: String::new(),
             task_priority_draft: litecord_types::tasks::TaskPriority::default(),
@@ -276,6 +284,14 @@ impl Workspace {
                 self.notice = Some(error);
                 self.saving_layout = false;
             } else {
+                if let Some(step) = c.discord_login_step {
+                    self.discord_totp_required =
+                        step == litecord_core::ports::AccountLoginStep::TotpRequired;
+                    if !self.discord_totp_required {
+                        self.discord_email_draft.clear();
+                        self.discord_totp_draft.clear();
+                    }
+                }
                 if c.relationship_changed.is_some_and(|id| {
                     self.relationship_confirmation
                         .as_ref()

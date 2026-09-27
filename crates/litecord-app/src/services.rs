@@ -1147,6 +1147,22 @@ impl LitecordApp {
         Ok(self.inner.backend.authenticate_session(credential).await?)
     }
 
+    pub async fn login_with_password(
+        &self,
+        login: litecord_core::secrets::Secret<String>,
+        password: litecord_core::secrets::Secret<String>,
+    ) -> Result<litecord_core::ports::AccountLoginStep> {
+        Ok(self
+            .inner
+            .backend
+            .login_with_password(login, password)
+            .await?)
+    }
+
+    pub async fn complete_totp(&self, code: litecord_core::secrets::Secret<String>) -> Result<()> {
+        Ok(self.inner.backend.complete_totp(code).await?)
+    }
+
     /// Sign out of Discord. Local memory is kept (it is the user's data);
     /// hydration pauses until the next sign-in.
     pub async fn sign_out(&self) -> Result<()> {
