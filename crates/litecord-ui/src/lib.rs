@@ -2,13 +2,16 @@
 mod attention;
 mod bridge;
 mod context_ui;
-mod icons;
+mod friends_ui;
+mod home_ui;
+mod kit;
 mod layout_editor;
 mod local_screens;
 mod memory_ui;
 mod messages_ui;
 mod omni_ui;
 mod overlays;
+mod ph;
 #[cfg(test)]
 mod render_tests;
 mod screens;

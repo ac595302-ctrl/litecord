@@ -1,6 +1,6 @@
 use crate::{
     bridge::{Bridge, Command, Selection, Snapshot},
-    layout_editor, theme,
+    kit, layout_editor, ph, theme,
 };
 use eframe::egui::{self, Align2, FontId, Rect, Sense, Stroke, Ui};
 use litecord_app::{view::UiEffect, LitecordApp};
@@ -18,6 +18,8 @@ pub struct Workspace {
     pub drafts: BTreeMap<ConversationId, String>,
     pub filter: String,
     pub conversation_tab: usize,
+    /// Home "Recent activity" filter chip.
+    pub home_activity_filter: usize,
     pub friends_tab: usize,
     pub notice: Option<String>,
     pub busy: bool,
@@ -92,6 +94,9 @@ impl std::fmt::Debug for Workspace {
 
 impl Workspace {
     pub fn new(app: LitecordApp, runtime: tokio::runtime::Handle, ctx: egui::Context) -> Self {
+        // Fonts and style must exist before the first frame: the UI uses
+        // named font families (Inter weights, Phosphor icons).
+        theme::apply(&ctx);
         let bridge = Bridge::new(app, runtime, ctx);
         let selection = bridge.selection.borrow().clone();
         Self {
@@ -101,6 +106,7 @@ impl Workspace {
             drafts: BTreeMap::new(),
             filter: String::new(),
             conversation_tab: 0,
+            home_activity_filter: 0,
             friends_tab: 0,
             notice: None,
             busy: false,
@@ -227,7 +233,7 @@ impl Workspace {
                         self.navigate(Destination::Servers);
                     }
                     NavTarget::AgentInbox => self.navigate(Destination::Inbox),
-                    NavTarget::Memory => self.navigate(Destination::Memory),
+                    NavTarget::Memory => self.navigate(Destination::Omni),
                     NavTarget::Tasks => self.navigate(Destination::Tasks),
                     NavTarget::Settings { section } => {
                         self.settings_section = section;
@@ -337,135 +343,171 @@ impl Workspace {
         }
     }
     fn header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(
-                egui::RichText::new("Litecord")
-                    .size(15.0)
-                    .strong()
-                    .color(theme::TEXT),
+        let full = ui.max_rect();
+        // Centered global search (A01): 36px tall, up to 436px wide.
+        let search_width = (full.width() - 2.0 * 250.0).clamp(180.0, 436.0);
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(full.center().x, full.center().y),
+            egui::vec2(search_width, 36.0),
+        );
+        let search = ui.interact(rect, ui.id().with("global_search"), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            painter.rect(
+                rect,
+                9.0,
+                if search.hovered() {
+                    theme::lerp(theme::FIELD, theme::HOVER, 0.5)
+                } else {
+                    theme::FIELD
+                },
+                Stroke::new(1.0_f32, theme::BORDER),
+                egui::StrokeKind::Inside,
             );
-            ui.add_space(8.0);
-            if self.edit_original.is_some() {
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new(egui::RichText::new("Apply layout").color(theme::SHELL))
-                            .fill(theme::PRIMARY_TEXT),
-                    )
-                    .clicked()
-                {
-                    self.apply_edit();
-                }
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    self.cancel_edit();
-                }
-            }
-            // Centered global search (A01). Layout controls and status keep
-            // their space on the right; the field shrinks on narrow windows.
-            let full = ui.max_rect();
-            let search_width = (full.width() - 2.0 * 330.0).clamp(160.0, 420.0);
-            let rect = egui::Rect::from_center_size(
-                egui::pos2(full.center().x, full.center().y),
-                egui::vec2(search_width, 28.0),
+            kit::icon_o(
+                painter,
+                rect.left_center() + egui::vec2(22.0, 0.0),
+                ph::MAGNIFYING_GLASS,
+                18.0,
+                theme::SECONDARY,
             );
-            let search = ui.interact(rect, ui.id().with("global_search"), Sense::click());
-            if ui.is_rect_visible(rect) {
-                let painter = ui.painter();
-                painter.rect(
-                    rect,
-                    8.0,
-                    if search.hovered() {
-                        theme::RAISED
-                    } else {
-                        theme::WORKSPACE
-                    },
-                    Stroke::new(1.0_f32, theme::BORDER),
-                    egui::StrokeKind::Inside,
-                );
-                crate::icons::glyph(
-                    painter,
-                    rect.left_center() + egui::vec2(16.0, 0.0),
-                    14.0,
-                    crate::icons::Glyph::Search,
-                    theme::MUTED,
-                );
-                painter.text(
-                    rect.left_center() + egui::vec2(30.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    "Search",
-                    FontId::proportional(13.0),
-                    theme::MUTED,
-                );
-                painter.text(
-                    rect.right_center() - egui::vec2(10.0, 0.0),
-                    Align2::RIGHT_CENTER,
-                    "Ctrl+K",
-                    FontId::proportional(11.0),
-                    theme::MUTED,
-                );
-            }
-            let search = search.on_hover_text("Search people, messages and commands (Ctrl/Cmd+K)");
-            search.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search or run a command")
-            });
-            if search.clicked() {
-                self.palette_open = true;
-                self.palette_focus_requested = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (badge, running) = self.snapshot.as_ref().map_or((0, false), |s| {
-                    (
-                        s.omni.requests.len() + s.omni.checkins.len(),
-                        s.omni.sessions.iter().any(|x| x.running),
-                    )
-                });
-                let label = match (badge, running) {
-                    (0, false) => "Omni".to_owned(),
-                    (0, true) => "Omni · working".to_owned(),
-                    (n, _) => format!("Omni · {n}"),
-                };
-                let omni = ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(label).color(if self.omni_open {
-                            theme::SHELL
-                        } else {
-                            theme::OMNI
-                        }))
-                        .fill(if self.omni_open {
-                            theme::OMNI
-                        } else {
-                            theme::OMNI.gamma_multiply(0.12)
-                        })
-                        .stroke(Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.5))),
-                    )
-                    .on_hover_text("Ask Omni (Ctrl+J)");
-                if omni.clicked() {
-                    self.omni_open = !self.omni_open;
-                }
-                if ui
-                    .button("Layouts")
-                    .on_hover_text(format!("Layout profile: {}", self.profile.name))
-                    .clicked()
-                {
-                    self.profile_manager = !self.profile_manager;
-                }
-                ui.add_space(6.0);
-                if let Some(s) = self.snapshot.clone() {
-                    if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::Demo {
-                        theme::chip(ui, "Demo data", theme::WARNING);
-                    }
-                    if let Some(bot) = &s.diagnostics.bot {
-                        connection_status(ui, &bot.session, "Bot");
-                    }
-                    connection_status(ui, &s.diagnostics.session, "Discord");
-                }
-            });
+            painter.text(
+                rect.left_center() + egui::vec2(42.0, 0.0),
+                Align2::LEFT_CENTER,
+                "Search",
+                theme::regular(15.0),
+                theme::SECONDARY,
+            );
+            painter.text(
+                rect.right_center() - egui::vec2(12.0, 0.0),
+                Align2::RIGHT_CENTER,
+                "Ctrl K",
+                theme::regular(12.0),
+                theme::FAINT,
+            );
+        }
+        let search = search.on_hover_text("Search people, messages and commands (Ctrl/Cmd+K)");
+        search.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search or run a command")
         });
+        if search.clicked() {
+            self.palette_open = true;
+            self.palette_focus_requested = true;
+        }
+        // Left: connection state (and layout edit controls while editing).
+        let left =
+            egui::Rect::from_min_max(full.min, egui::pos2(rect.left() - 12.0, full.bottom()));
+        let mut lui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(left)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        lui.spacing_mut().item_spacing.x = 10.0;
+        if self.edit_original.is_some() {
+            if kit::button_ex(
+                &mut lui,
+                kit::Kind::Primary,
+                Some(ph::CHECK),
+                "Apply layout",
+                32.0,
+                !self.busy,
+            )
+            .clicked()
+            {
+                self.apply_edit();
+            }
+            if kit::button_ex(
+                &mut lui,
+                kit::Kind::Secondary,
+                None,
+                "Cancel",
+                32.0,
+                !self.busy,
+            )
+            .clicked()
+            {
+                self.cancel_edit();
+            }
+        } else if let Some(s) = self.snapshot.clone() {
+            connection_status(&mut lui, &s.diagnostics.session, "Discord");
+            if let Some(bot) = &s.diagnostics.bot {
+                connection_status(&mut lui, &bot.session, "Bot");
+            }
+            if s.diagnostics.backend_mode == litecord_types::capability::BackendMode::Demo {
+                kit::status_pill(&mut lui, None, "Demo data", theme::WARNING)
+                    .on_hover_text("Synthetic demo data; nothing here comes from Discord.");
+            }
+        }
+        // Right: Omni, layouts, account.
+        let right = egui::Rect::from_min_max(egui::pos2(rect.right() + 12.0, full.top()), full.max);
+        let mut rui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        rui.spacing_mut().item_spacing.x = 6.0;
+        if kit::icon_button_ex(
+            &mut rui,
+            ph::USER_CIRCLE,
+            "Account and settings",
+            36.0,
+            theme::SECONDARY,
+            true,
+        )
+        .clicked()
+        {
+            self.settings_section = None;
+            self.navigate(Destination::Settings);
+        }
+        if kit::icon_button_ex(
+            &mut rui,
+            ph::SIDEBAR_SIMPLE,
+            &format!("Layouts · {}", self.profile.name),
+            36.0,
+            theme::SECONDARY,
+            true,
+        )
+        .clicked()
+        {
+            self.profile_manager = !self.profile_manager;
+        }
+        let (badge, running) = self.snapshot.as_ref().map_or((0, false), |s| {
+            (
+                s.omni.requests.len() + s.omni.checkins.len(),
+                s.omni.sessions.iter().any(|x| x.running),
+            )
+        });
+        let omni = kit::icon_button_ex(
+            &mut rui,
+            ph::SPARKLE,
+            if running {
+                "Omni is working (Ctrl+J)"
+            } else {
+                "Ask Omni (Ctrl+J)"
+            },
+            36.0,
+            theme::OMNI,
+            true,
+        );
+        if self.omni_open {
+            rui.painter().rect_stroke(
+                omni.rect,
+                8.0,
+                Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if badge > 0 {
+            kit::badge(
+                rui.painter(),
+                omni.rect.right_top() + egui::vec2(-4.0, 6.0),
+                badge,
+                theme::PRIORITY,
+            );
+        }
+        if omni.clicked() {
+            self.omni_open = !self.omni_open;
+        }
     }
     fn render_tree(&mut self, ui: &mut Ui, tree: &LayoutNode, rect: Rect, shell: bool) {
         match tree {
@@ -497,29 +539,27 @@ impl Workspace {
                     self.docking_preview(ui, shell, id, panel, rect);
                     return;
                 }
-                let fill = if matches!(panel.as_str(), "primary_navigation" | "user_controls") {
-                    theme::SHELL
-                } else if matches!(
-                    panel.as_str(),
-                    "conversation_list" | "contextual_sidebar" | "channel_list"
-                ) {
-                    theme::SIDEBAR
-                } else {
-                    theme::WORKSPACE
+                let fill = match panel.as_str() {
+                    "primary_navigation" | "user_controls" => theme::RAIL,
+                    "conversation_list" | "contextual_sidebar" | "channel_list" | "server_list" => {
+                        theme::SIDEBAR
+                    }
+                    "context_inspector" => theme::INSPECTOR,
+                    _ => theme::WORKSPACE,
                 };
                 theme::surface(ui, rect, fill);
-                ui.painter().line_segment(
-                    [rect.right_top(), rect.right_bottom()],
-                    Stroke::new(1.0_f32, theme::BORDER),
-                );
-                let mut content = rect.shrink2(egui::vec2(
-                    if panel == "primary_navigation" {
-                        4.0
-                    } else {
-                        16.0
-                    },
-                    12.0,
-                ));
+                // Panels draw their own chrome edge to edge (chat header,
+                // voice stage); the rest get the mock's gutters.
+                let pad = match panel.as_str() {
+                    "primary_navigation" | "user_controls" | "chat" | "voice_room"
+                    | "server_content" => egui::vec2(0.0, 0.0),
+                    "conversation_list" | "contextual_sidebar" | "channel_list" => {
+                        egui::vec2(18.0, 14.0)
+                    }
+                    "context_inspector" => egui::vec2(22.0, 18.0),
+                    _ => egui::vec2(22.0, 14.0),
+                };
+                let mut content = rect.shrink2(pad);
                 if self.edit_original.is_some() {
                     let handle = Rect::from_min_size(rect.min, egui::vec2(rect.width(), 28.0));
                     let response =
@@ -558,6 +598,8 @@ impl Workspace {
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
                 child.set_clip_rect(rect.intersect(ui.clip_rect()));
+                // Presence rings and cut-outs match the panel surface.
+                child.visuals_mut().panel_fill = fill;
                 self.panel(
                     &mut child,
                     panel,
@@ -574,7 +616,8 @@ impl Workspace {
                 } else {
                     rect.height()
                 };
-                let gap = 4.0;
+                // 1px hairline between panels; the drag target is wider.
+                let gap = 1.0;
                 let weights: Vec<_> = children.iter().map(|c| c.weight).collect();
                 let minima: Vec<_> = children
                     .iter()
@@ -621,15 +664,28 @@ impl Workspace {
                                 egui::vec2(rect.width(), gap),
                             )
                         };
+                        let target = if horizontal {
+                            splitter.expand2(egui::vec2(3.0, 0.0))
+                        } else {
+                            splitter.expand2(egui::vec2(0.0, 3.0))
+                        };
                         let response =
-                            ui.interact(splitter, ui.id().with((shell, id, i)), Sense::drag());
+                            ui.interact(target, ui.id().with((shell, id, i)), Sense::drag());
                         if response.hovered() || response.dragged() {
                             ui.ctx().set_cursor_icon(if horizontal {
                                 egui::CursorIcon::ResizeHorizontal
                             } else {
                                 egui::CursorIcon::ResizeVertical
                             });
-                            ui.painter().rect_filled(splitter, 0.0, theme::PRIMARY);
+                            ui.painter().rect_filled(
+                                if horizontal {
+                                    splitter.expand2(egui::vec2(1.0, 0.0))
+                                } else {
+                                    splitter.expand2(egui::vec2(0.0, 1.0))
+                                },
+                                0.0,
+                                theme::PRIMARY,
+                            );
                         }
                         // No new geometry mutation while a save is in flight.
                         if response.dragged() && !a.below_minimum && !self.layout_busy() {
@@ -705,39 +761,73 @@ impl Workspace {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         egui::Panel::top("global_header")
-            .exact_size(44.0)
+            .exact_size(54.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::SHELL)
-                    .inner_margin(egui::Margin::symmetric(16, 6)),
+                    .fill(theme::TITLEBAR)
+                    .inner_margin(egui::Margin::symmetric(18, 0)),
             )
-            .show_inside(root, |ui| self.header(ui));
-        if let Some(notice) = self.notice.clone() {
-            egui::Panel::bottom("notice").show_inside(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(notice);
-                    if ui.small_button("Dismiss").clicked() {
-                        self.notice = None;
-                    }
-                });
+            .show_inside(root, |ui| {
+                let r = ui.max_rect().expand2(egui::vec2(18.0, 0.0));
+                ui.painter().rect_filled(
+                    Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 1.0), r.max),
+                    0.0,
+                    theme::DIVIDER,
+                );
+                self.header(ui)
             });
+        if let Some(notice) = self.notice.clone() {
+            egui::Panel::bottom("notice")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::lerp(theme::CARD, theme::PRIMARY, 0.08))
+                        .stroke(Stroke::new(1.0_f32, theme::BORDER))
+                        .inner_margin(egui::Margin::symmetric(18, 8)),
+                )
+                .show_inside(root, |ui| {
+                    ui.horizontal(|ui| {
+                        kit::icon(
+                            ui.painter(),
+                            ui.cursor().min + egui::vec2(9.0, 11.0),
+                            ph::INFO,
+                            16.0,
+                            theme::PRIMARY_TEXT,
+                        );
+                        ui.add_space(24.0);
+                        kit::label(ui, notice, theme::regular(14.0), theme::TEXT);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if kit::button_ex(
+                                ui,
+                                kit::Kind::Ghost,
+                                Some(ph::X),
+                                "Dismiss",
+                                28.0,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.notice = None;
+                            }
+                        });
+                    });
+                });
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::J)) {
             self.omni_open = !self.omni_open;
         }
         if self.omni_open {
             egui::Panel::right("omni_panel")
-                .exact_size(400.0)
+                .exact_size(420.0)
                 .frame(
                     egui::Frame::new()
                         .fill(theme::SIDEBAR)
-                        .stroke(Stroke::new(1.0_f32, theme::BORDER))
-                        .inner_margin(egui::Margin::symmetric(14, 10)),
+                        .stroke(Stroke::new(1.0_f32, theme::DIVIDER))
+                        .inner_margin(egui::Margin::symmetric(18, 14)),
                 )
                 .show_inside(root, |ui| self.omni_panel(ui));
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::SHELL))
+            .frame(egui::Frame::new().fill(theme::DIVIDER))
             .show_inside(root, |ui| {
                 let tree = self.profile.shell.project(self.selection.destination);
                 if let Some(t) = tree {
@@ -805,18 +895,18 @@ fn connection_status(ui: &mut Ui, state: &litecord_types::social::SessionState, 
         S::LoggedOut => (theme::MUTED, "Signed out"),
         S::Error { .. } => (theme::PRIORITY, "Error"),
     };
-    let r = ui
-        .with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-            ui.painter().circle_filled(rect.center(), 4.0, color);
-            ui.label(
-                egui::RichText::new(format!("{who} · {text}"))
-                    .size(12.0)
-                    .color(theme::SECONDARY),
-            );
-        })
-        .response;
+    let label = format!("{who} · {text}");
+    let w = kit::text_width(ui.painter(), &label, theme::regular(13.0)) + 16.0;
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 24.0), Sense::hover());
+    let painter = ui.painter();
+    painter.circle_filled(rect.left_center() + egui::vec2(4.0, 0.0), 4.0, color);
+    painter.text(
+        rect.left_center() + egui::vec2(14.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        theme::regular(13.0),
+        theme::SECONDARY,
+    );
     if let S::Error { message } = state {
         r.on_hover_text(message.as_str());
     }

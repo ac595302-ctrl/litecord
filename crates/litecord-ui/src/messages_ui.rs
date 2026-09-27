@@ -6,21 +6,25 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{self, Align2, FontId, Galley, Rect, RichText, Sense, Stroke, Ui};
+use eframe::egui::{self, Align2, Galley, Rect, Sense, Stroke, Ui};
 use litecord_app::view::{ConversationViewModel, MessageRow};
 use litecord_types::provenance::DiscordIdentity;
 use litecord_types::social::MessageExtra;
 use litecord_types::Timestamp;
 
 use crate::bridge::Command;
-use crate::theme;
 use crate::workspace::Workspace;
+use crate::{kit, ph, theme};
 
-const AVATAR: f32 = 34.0;
-const GUTTER: f32 = 50.0;
-const HEADER_LINE: f32 = 22.0;
-const ATTACHMENT: f32 = 40.0;
-const DAY_SEPARATOR: f32 = 30.0;
+const AVATAR: f32 = 44.0;
+/// Left inset of the message column inside the chat panel.
+const INSET: f32 = 22.0;
+/// Text column offset from the row's left edge (avatar + gap).
+const GUTTER: f32 = AVATAR + 16.0;
+const HEADER_LINE: f32 = 26.0;
+const BODY_LINE: f32 = 23.0;
+const ATTACHMENT: f32 = 66.0;
+const DAY_SEPARATOR: f32 = 40.0;
 /// Consecutive messages from one author within this window are grouped.
 const GROUP_MS: i64 = 5 * 60_000;
 
@@ -37,10 +41,13 @@ impl Workspace {
             ui.spinner();
             return;
         };
-        let Some(chat) = &s.chat else {
-            theme::page_header(ui, "Messages", None);
-            theme::empty_state(
-                ui,
+        let Some(chat) = s.chat.clone() else {
+            let mut inner =
+                ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect().shrink(22.0)));
+            kit::page_title(&mut inner, "Messages", None);
+            kit::empty(
+                &mut inner,
+                Some(ph::CHAT_CIRCLE),
                 "No conversation selected",
                 "Choose a conversation on the left to read and reply.",
             );
@@ -49,101 +56,264 @@ impl Workspace {
         if s.selection.conversation != self.selection.conversation
             || s.selection.before != self.selection.before
         {
-            ui.spinner();
-            ui.label(theme::meta("Loading conversation…"));
+            let mut inner =
+                ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect().shrink(22.0)));
+            inner.spinner();
+            inner.label(theme::meta("Loading conversation…"));
             return;
         }
         let private = self.private();
+        let id = chat.conversation_id;
+        egui::Panel::top(egui::Id::new(("chat_header", id)))
+            .exact_size(76.0)
+            .frame(egui::Frame::NONE)
+            .show_inside(ui, |ui| self.chat_header(ui, &s, &chat, private));
+        egui::Panel::bottom(egui::Id::new(("chat_composer", id)))
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                left: 22,
+                right: 22,
+                top: 6,
+                bottom: 12,
+            }))
+            .show_inside(ui, |ui| self.composer(ui, &chat));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show_inside(ui, |ui| {
+                if chat.has_more || self.selection.before.is_some() {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(INSET);
+                        if chat.has_more
+                            && kit::button_ex(ui, kit::Kind::Secondary, Some(ph::ARROW_UP_RIGHT), "Load older messages", 28.0, true)
+                                .clicked()
+                        {
+                            self.selection.before = chat.messages.first().map(|m| m.sent_at);
+                            self.request();
+                        }
+                        if self.selection.before.is_some()
+                            && kit::button_ex(ui, kit::Kind::Ghost, None, "Jump to latest", 28.0, true)
+                                .clicked()
+                        {
+                            self.selection.before = None;
+                            self.request();
+                        }
+                    });
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt(("messages", id, self.selection.before))
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(self.selection.before.is_none())
+                    .show_viewport(ui, |ui, viewport| {
+                        let width = ui.available_width();
+                        let top = ui.cursor().min;
+                        let layouts = measure(ui, &chat, width, private);
+                        let mut y = 10.0;
+                        for (row, layout) in chat.messages.iter().zip(layouts) {
+                            let h = layout.height;
+                            if y + h >= viewport.min.y && y <= viewport.max.y {
+                                let rect = Rect::from_min_size(
+                                    top + egui::vec2(0.0, y),
+                                    egui::vec2(width, h),
+                                );
+                                self.paint_row(ui, rect, &chat, row, layout, private);
+                            }
+                            y += h;
+                        }
+                        ui.allocate_space(egui::vec2(width, y + 10.0));
+                        if chat.messages.is_empty() {
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(INSET);
+                                ui.vertical(|ui| {
+                                    kit::empty(
+                                        ui,
+                                        Some(ph::CHAT_CIRCLE_DOTS),
+                                        "No messages cached yet",
+                                        "Recent history loads in the background when Discord provides it.",
+                                    )
+                                });
+                            });
+                        }
+                    });
+            });
+    }
+
+    /// A01 chat header: avatar, title and status, icon actions on the right.
+    fn chat_header(
+        &mut self,
+        ui: &mut Ui,
+        s: &crate::bridge::Snapshot,
+        chat: &ConversationViewModel,
+        private: bool,
+    ) {
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(
+            Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - 1.0),
+                rect.right_bottom(),
+            ),
+            0.0,
+            theme::DIVIDER,
+        );
+        let title = self.display(&chat.title);
+        let group = s
+            .conversations
+            .conversations
+            .iter()
+            .find(|r| r.conversation_id == chat.conversation_id)
+            .map(|r| r.kind);
         let presence = s
             .contact
             .as_ref()
             .map(|c| theme::Presence::from_status(c.presence.status.as_str()))
             .unwrap_or(theme::Presence::None);
-        ui.horizontal(|ui| {
-            theme::avatar_presence(ui, &self.display(&chat.title), 36.0, presence);
-            ui.vertical(|ui| {
-                ui.label(RichText::new(self.display(&chat.title)).size(16.0).strong());
-                let status = s.contact.as_ref().map_or_else(
-                    || "Conversation".to_owned(),
-                    |c| match (&c.presence.activity, private) {
-                        (Some(a), false) => format!("{} · {}", presence.label(), a.name),
-                        _ => presence.label().to_owned(),
-                    },
-                );
-                ui.label(theme::meta(status));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::icons::icon_button(
-                    ui,
-                    crate::icons::Glyph::External,
-                    "Open in Discord",
-                    true,
-                )
-                .clicked()
-                {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(
-                        chat.capabilities.open_in_discord_url.clone(),
-                    ));
+        let avatar_c = egui::pos2(rect.left() + INSET + 24.0, rect.center().y);
+        match group {
+            Some(litecord_types::social::ConversationKind::GroupDm) => {
+                kit::paint_group(ui.painter(), avatar_c, 48.0, ph::USERS, theme::SECONDARY)
+            }
+            Some(litecord_types::social::ConversationKind::GuildChannel) => {
+                kit::paint_group(ui.painter(), avatar_c, 48.0, ph::HASH, theme::SECONDARY)
+            }
+            _ => theme::paint_avatar(
+                ui.painter(),
+                avatar_c,
+                48.0,
+                &title,
+                presence,
+                theme::WORKSPACE,
+            ),
+        }
+        let status = s.contact.as_ref().map_or_else(
+            || match group {
+                Some(litecord_types::social::ConversationKind::GuildChannel) => {
+                    "Server channel".to_owned()
                 }
-                if crate::icons::icon_button(
-                    ui,
-                    crate::icons::Glyph::Sparkle,
-                    "Ask Omni about this conversation",
-                    true,
-                )
-                .clicked()
-                {
-                    self.omni_open = true;
-                    self.omni_draft =
-                        format!("Catch me up on my conversation with {}.", chat.title);
+                Some(litecord_types::social::ConversationKind::GroupDm) => {
+                    "Group conversation".to_owned()
                 }
-                if chat.capabilities.send_identity == Some(DiscordIdentity::ApplicationBot) {
-                    theme::chip(ui, "Posting as your bot", theme::WARNING);
-                }
-            });
-        });
-        ui.separator();
-        ui.horizontal(|ui| {
-            if chat.has_more && ui.small_button("Load older messages").clicked() {
+                _ => "Conversation".to_owned(),
+            },
+            |c| match (&c.presence.activity, private) {
+                (Some(a), false) => format!("{} · {}", presence.title(), a.name),
+                _ => presence.title().to_owned(),
+            },
+        );
+        // Right-side actions first so the title can elide before them.
+        let mut actions = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    egui::pos2(rect.center().x, rect.top()),
+                    egui::pos2(rect.right() - INSET + 6.0, rect.bottom()),
+                ))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        actions.spacing_mut().item_spacing.x = 8.0;
+        let more = kit::icon_button_ex(
+            &mut actions,
+            ph::DOTS_THREE,
+            "More",
+            38.0,
+            theme::SECONDARY,
+            true,
+        );
+        egui::Popup::menu(&more).show(|ui| {
+            ui.set_min_width(220.0);
+            if ui.button("Open in Discord").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    chat.capabilities.open_in_discord_url.clone(),
+                ));
+            }
+            if ui.button("Ask Omni to catch me up").clicked() {
+                self.omni_open = true;
+                self.omni_draft = format!("Catch me up on my conversation with {}.", chat.title);
+            }
+            if chat.has_more && ui.button("Load older messages").clicked() {
                 self.selection.before = chat.messages.first().map(|m| m.sent_at);
                 self.request();
             }
-            if self.selection.before.is_some() && ui.small_button("Jump to latest").clicked() {
-                self.selection.before = None;
-                self.request();
-            }
         });
-        let composer = 78.0;
-        let height = (ui.available_height() - composer).max(80.0);
-        egui::ScrollArea::vertical()
-            .id_salt(("messages", chat.conversation_id, self.selection.before))
-            .max_height(height)
-            .auto_shrink([false, false])
-            .stick_to_bottom(self.selection.before.is_none())
-            .show_viewport(ui, |ui, viewport| {
-                let width = ui.available_width();
-                let top = ui.cursor().min;
-                let layouts = measure(ui, chat, width, private);
-                let mut y = 0.0;
-                for (row, layout) in chat.messages.iter().zip(layouts) {
-                    let h = layout.height;
-                    if y + h >= viewport.min.y && y <= viewport.max.y {
-                        let rect =
-                            Rect::from_min_size(top + egui::vec2(0.0, y), egui::vec2(width, h));
-                        self.paint_row(ui, rect, chat, row, layout, private);
-                    }
-                    y += h;
-                }
-                ui.allocate_space(egui::vec2(width, y.max(1.0)));
-                if chat.messages.is_empty() {
-                    theme::empty_state(
-                        ui,
-                        "No messages cached yet",
-                        "Recent history loads in the background when Discord provides it.",
-                    );
-                }
-            });
-        self.composer(ui, chat);
+        if kit::icon_button_ex(
+            &mut actions,
+            ph::MAGNIFYING_GLASS,
+            "Search (Ctrl+K)",
+            38.0,
+            theme::SECONDARY,
+            true,
+        )
+        .clicked()
+        {
+            self.palette_open = true;
+            self.palette_focus_requested = true;
+        }
+        if kit::icon_button_ex(
+            &mut actions,
+            ph::SPARKLE,
+            "Ask Omni about this conversation",
+            38.0,
+            theme::OMNI,
+            true,
+        )
+        .clicked()
+        {
+            self.omni_open = true;
+            self.omni_draft = format!("Catch me up on my conversation with {}.", chat.title);
+        }
+        // Calls are not part of Litecord's supported surface: they open in
+        // Discord, and say so.
+        if kit::icon_button_ex(
+            &mut actions,
+            ph::VIDEO_CAMERA,
+            "Video calls open in Discord",
+            38.0,
+            theme::SECONDARY,
+            true,
+        )
+        .clicked()
+            || kit::icon_button_ex(
+                &mut actions,
+                ph::PHONE,
+                "Voice calls open in Discord",
+                38.0,
+                theme::SECONDARY,
+                true,
+            )
+            .clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                chat.capabilities.open_in_discord_url.clone(),
+            ));
+        }
+        if chat.capabilities.send_identity == Some(DiscordIdentity::ApplicationBot) {
+            kit::status_pill(
+                &mut actions,
+                Some(ph::ROBOT),
+                "Posting as your bot",
+                theme::WARNING,
+            );
+        }
+        let used = actions.min_rect().left();
+        let text_x = avatar_c.x + 38.0;
+        let text_w = (used - text_x - 12.0).max(40.0);
+        let painter = ui.painter();
+        kit::text_at(
+            painter,
+            egui::pos2(text_x, rect.center().y - 10.0),
+            Align2::LEFT_CENTER,
+            &title,
+            theme::semibold(18.0),
+            theme::TEXT,
+            text_w,
+        );
+        kit::text_at(
+            painter,
+            egui::pos2(text_x, rect.center().y + 13.0),
+            Align2::LEFT_CENTER,
+            &status,
+            theme::regular(14.0),
+            theme::SECONDARY,
+            text_w,
+        );
     }
 
     fn paint_row(
@@ -159,97 +329,114 @@ impl Workspace {
         if let Some(day) = &layout.day {
             let y = rect.top() + DAY_SEPARATOR / 2.0;
             let painter = ui.painter();
+            let text = painter.layout_no_wrap(day.clone(), theme::medium(12.0), theme::MUTED);
+            let w = text.size().x + 24.0;
+            let l = rect.left() + INSET;
+            let r = rect.right() - INSET;
+            let cx = rect.center().x;
             painter.line_segment(
-                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                Stroke::new(1.0_f32, theme::BORDER),
+                [egui::pos2(l, y), egui::pos2(cx - w * 0.5 - 6.0, y)],
+                Stroke::new(1.0_f32, theme::DIVIDER),
             );
-            let text =
-                painter.layout_no_wrap(day.clone(), FontId::proportional(12.0), theme::MUTED);
-            let pill = Rect::from_center_size(
-                egui::pos2(rect.center().x, y),
-                text.size() + egui::vec2(16.0, 6.0),
+            painter.line_segment(
+                [egui::pos2(cx + w * 0.5 + 6.0, y), egui::pos2(r, y)],
+                Stroke::new(1.0_f32, theme::DIVIDER),
             );
-            painter.rect_filled(pill, 8.0, theme::WORKSPACE);
-            painter.galley(pill.min + egui::vec2(8.0, 3.0), text, theme::MUTED);
+            painter.galley(
+                egui::pos2(cx - text.size().x * 0.5, y - text.size().y * 0.5),
+                text,
+                theme::MUTED,
+            );
             body.min.y += DAY_SEPARATOR;
         }
-        let response = ui.interact(body, ui.id().with(row.message_id), Sense::click());
+        let row_rect = Rect::from_min_max(
+            egui::pos2(body.left() + 8.0, body.top()),
+            egui::pos2(body.right() - 8.0, body.bottom()),
+        );
+        let response = ui.interact(row_rect, ui.id().with(row.message_id), Sense::click());
         if response.hovered() || row.render.highlighted {
             let fill = if row.render.highlighted {
                 theme::WARNING.gamma_multiply(0.08)
             } else {
-                theme::HOVER.gamma_multiply(0.6)
+                theme::lerp(theme::WORKSPACE, theme::HOVER, 0.45)
             };
-            ui.painter().rect_filled(body, 4.0, fill);
+            ui.painter().rect_filled(row_rect, 8.0, fill);
         }
         let name = if private {
             "Hidden user".to_owned()
+        } else if row.is_mine {
+            "You".to_owned()
         } else {
             row.render.author_display.clone()
         };
-        let text_x = body.left() + GUTTER;
-        let mut y = body.top() + 4.0;
+        let left = body.left() + INSET;
+        let text_x = left + GUTTER;
+        let mut y = body.top() + if layout.continuation { 2.0 } else { 12.0 };
+        let painter = ui.painter();
         if !layout.continuation {
-            let mut avatar = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                egui::pos2(body.left() + 6.0, body.top() + 6.0),
-                egui::vec2(AVATAR, AVATAR),
-            )));
-            theme::avatar(&mut avatar, &name, AVATAR, false);
-            // Name is elided so it can never run into the timestamp.
-            let time = clock(row.sent_at) + if row.edited { " · edited" } else { "" };
-            let time_galley =
-                ui.painter()
-                    .layout_no_wrap(time, FontId::proportional(11.0), theme::MUTED);
-            let max_name = (body.right() - text_x - time_galley.size().x - 16.0).max(24.0);
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                name,
-                FontId::proportional(14.0),
-                if row.is_mine {
-                    theme::PRIMARY_TEXT
+            theme::paint_avatar(
+                painter,
+                egui::pos2(left + AVATAR * 0.5, y + AVATAR * 0.5),
+                AVATAR,
+                if row.is_mine && !private {
+                    &row.render.author_display
                 } else {
-                    theme::TEXT
+                    &name
                 },
+                theme::Presence::None,
+                theme::WORKSPACE,
             );
-            job.wrap = egui::text::TextWrapping::truncate_at_width(max_name);
-            let name_galley = ui.painter().layout_job(job);
-            let name_width = name_galley.size().x;
-            ui.painter()
-                .galley(egui::pos2(text_x, y), name_galley, theme::TEXT);
-            ui.painter().galley(
-                egui::pos2(text_x + name_width + 8.0, y + 2.0),
-                time_galley,
-                theme::MUTED,
+            let time = clock(row.sent_at) + if row.edited { " · edited" } else { "" };
+            let time_w = kit::text_width(painter, &time, theme::regular(13.0));
+            let max_name = (body.right() - INSET - text_x - time_w - 14.0).max(24.0);
+            let name_rect = kit::text_at(
+                painter,
+                egui::pos2(text_x, y + 10.0),
+                Align2::LEFT_CENTER,
+                &name,
+                theme::semibold(16.0),
+                theme::TEXT,
+                max_name,
+            );
+            painter.text(
+                egui::pos2(name_rect.right() + 10.0, y + 11.0),
+                Align2::LEFT_CENTER,
+                time,
+                theme::regular(13.0),
+                theme::FAINT,
             );
             y += HEADER_LINE;
         } else if response.hovered() {
-            ui.painter().text(
-                egui::pos2(body.left() + 8.0, y + 1.0),
-                Align2::LEFT_TOP,
+            painter.text(
+                egui::pos2(left + AVATAR * 0.5, y + BODY_LINE * 0.5),
+                Align2::CENTER_CENTER,
                 short_clock(row.sent_at),
-                FontId::proportional(10.0),
-                theme::MUTED,
+                theme::regular(11.0),
+                theme::FAINT,
             );
         }
         let text_height = layout.galley.size().y;
-        ui.painter()
-            .galley(egui::pos2(text_x, y), layout.galley, theme::SECONDARY);
-        y += text_height + 4.0;
+        painter.galley(egui::pos2(text_x, y), layout.galley, theme::BODY);
+        y += text_height + 6.0;
         if !private {
             for extra in &row.extras {
                 let card = Rect::from_min_size(
                     egui::pos2(text_x, y),
-                    egui::vec2((body.right() - text_x - 8.0).min(420.0), ATTACHMENT - 6.0),
+                    egui::vec2(
+                        (body.right() - INSET - text_x).min(460.0),
+                        ATTACHMENT - 10.0,
+                    ),
                 );
                 self.extra_card(ui, card, extra, &message_url(chat, row));
                 y += ATTACHMENT;
             }
         }
         if row.bookmarked {
-            ui.painter().text(
-                egui::pos2(body.right() - 8.0, body.top() + 4.0),
-                Align2::RIGHT_TOP,
-                "Bookmarked",
-                FontId::proportional(10.0),
+            kit::icon(
+                ui.painter(),
+                egui::pos2(body.right() - INSET - 8.0, body.top() + 22.0),
+                ph::BOOKMARK_SIMPLE,
+                15.0,
                 theme::OMNI,
             );
         }
@@ -267,37 +454,56 @@ impl Workspace {
             Sense::click(),
         );
         let painter = ui.painter();
-        painter.rect(
-            rect,
-            6.0,
-            if response.hovered() {
-                theme::HOVER
-            } else {
-                theme::RAISED
-            },
-            Stroke::new(1.0_f32, theme::BORDER),
-            egui::StrokeKind::Inside,
+        kit::paint_card(painter, rect, response.hovered());
+        let tile = Rect::from_center_size(
+            egui::pos2(rect.left() + 30.0, rect.center().y),
+            egui::vec2(38.0, 38.0),
         );
-        painter.text(
-            rect.left_center() + egui::vec2(10.0, -7.0),
+        let (glyph, tint) = match extra {
+            MessageExtra::Attachment { content_type, .. }
+                if content_type
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with("image/")) =>
+            {
+                (ph::IMAGE, kit::PURPLE)
+            }
+            MessageExtra::Attachment { .. } => (ph::FILE_TEXT, kit::BLUE),
+            MessageExtra::Embed { .. } => (ph::LINK, kit::TEAL),
+            MessageExtra::VoiceMessage => (ph::WAVEFORM, kit::GREEN),
+            MessageExtra::Poll => (ph::LIST_BULLETS, kit::ORANGE),
+            _ => (ph::ARROW_SQUARE_OUT, kit::GREY),
+        };
+        kit::paint_tile(painter, tile, glyph, tint, 9.0);
+        let tx = tile.right() + 14.0;
+        let tw = (rect.right() - tx - 50.0).max(30.0);
+        kit::text_at(
+            painter,
+            egui::pos2(tx, rect.center().y - 9.0),
             Align2::LEFT_CENTER,
-            title,
-            FontId::proportional(13.0),
+            &title,
+            theme::medium(15.0),
             theme::TEXT,
+            tw,
         );
-        painter.text(
-            rect.left_center() + egui::vec2(10.0, 8.0),
+        kit::text_at(
+            painter,
+            egui::pos2(tx, rect.center().y + 11.0),
             Align2::LEFT_CENTER,
-            detail,
-            FontId::proportional(11.0),
+            &detail,
+            theme::regular(13.0),
             theme::MUTED,
+            tw,
         );
-        painter.text(
-            rect.right_center() - egui::vec2(10.0, 0.0),
-            Align2::RIGHT_CENTER,
-            "Open in Discord",
-            FontId::proportional(11.0),
-            theme::PRIMARY_TEXT,
+        kit::icon_o(
+            painter,
+            egui::pos2(rect.right() - 26.0, rect.center().y),
+            ph::ARROW_SQUARE_OUT,
+            18.0,
+            if response.hovered() {
+                theme::PRIMARY_TEXT
+            } else {
+                theme::SECONDARY
+            },
         );
         if response
             .on_hover_text("Not downloaded by Litecord; opens the message in Discord")
@@ -306,7 +512,6 @@ impl Workspace {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
     }
-
     fn message_menu(
         &mut self,
         response: &egui::Response,
@@ -392,7 +597,7 @@ impl Workspace {
         let hint = match (private, can_send_here) {
             (true, _) => "Message (privacy mode)".to_owned(),
             (false, false) => "Sending is not available here".to_owned(),
-            (false, true) => format!("Message {title}"),
+            (false, true) => format!("Message {title}…"),
         };
         let busy = self.busy;
         let reply_to = self
@@ -401,55 +606,88 @@ impl Workspace {
             .filter(|r| r.0 == id && chat.capabilities.can_reply)
             .map(|r| (r.1, r.2.clone()));
         if let Some((_, author)) = &reply_to {
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                crate::icons::glyph(
-                    ui.painter(),
-                    rect.center(),
-                    14.0,
-                    crate::icons::Glyph::Reply,
-                    theme::PRIMARY_TEXT,
-                );
-                let who = if private {
-                    "a message"
-                } else {
-                    author.as_str()
-                };
-                ui.label(theme::meta(format!("Replying to {who}")));
-                if crate::icons::icon_button(ui, crate::icons::Glyph::Close, "Cancel reply", true)
-                    .clicked()
-                {
-                    self.replying = None;
-                }
-            });
+            let (bar, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
+            let painter = ui.painter();
+            kit::icon(
+                painter,
+                bar.left_center() + egui::vec2(10.0, 0.0),
+                ph::ARROW_BEND_UP_LEFT,
+                15.0,
+                theme::PRIMARY_TEXT,
+            );
+            let who = if private {
+                "a message"
+            } else {
+                author.as_str()
+            };
+            kit::text_at(
+                painter,
+                bar.left_center() + egui::vec2(26.0, 0.0),
+                Align2::LEFT_CENTER,
+                &format!("Replying to {who}"),
+                theme::regular(13.0),
+                theme::SECONDARY,
+                bar.width() - 70.0,
+            );
+            let close = Rect::from_center_size(
+                bar.right_center() - egui::vec2(14.0, 0.0),
+                egui::vec2(26.0, 26.0),
+            );
+            let resp = ui.interact(close, ui.id().with("cancel_reply"), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(close, 6.0, theme::HOVER);
+            }
+            kit::icon(ui.painter(), close.center(), ph::X, 13.0, theme::SECONDARY);
+            if resp.on_hover_text("Cancel reply").clicked() {
+                self.replying = None;
+            }
         }
         let mut submit = false;
         let mut clicked = false;
+        let mut omni = false;
         let draft_len;
         {
             let draft = self.drafts.entry(id).or_default();
             draft_len = draft.trim().chars().count();
             egui::Frame::new()
-                .fill(theme::RAISED)
+                .fill(theme::FIELD)
                 .stroke(Stroke::new(1.0_f32, theme::BORDER))
-                .corner_radius(10)
+                .corner_radius(12)
                 .inner_margin(egui::Margin {
-                    left: 12,
-                    right: 6,
-                    top: 6,
-                    bottom: 6,
+                    left: 8,
+                    right: 8,
+                    top: 7,
+                    bottom: 7,
                 })
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let w = ui.available_width() - 36.0;
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let plus = kit::disc_button(
+                            ui,
+                            ph::PLUS,
+                            "Attachments are sent from Discord",
+                            32.0,
+                        );
+                        if plus.clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                chat.capabilities.open_in_discord_url.clone(),
+                            ));
+                        }
+                        let w = ui.available_width() - 84.0;
                         let response = ui.add_enabled(
                             !busy && can_send_here,
                             egui::TextEdit::multiline(draft)
                                 .frame(egui::Frame::NONE)
+                                .font(theme::regular(16.0))
+                                .text_color(theme::TEXT)
                                 .password(private)
                                 .id_salt(("composer", id))
-                                .hint_text(hint)
+                                .hint_text(
+                                    egui::RichText::new(hint)
+                                        .font(theme::regular(16.0))
+                                        .color(theme::MUTED),
+                                )
                                 .desired_rows(1)
                                 .desired_width(w),
                         );
@@ -457,15 +695,34 @@ impl Workspace {
                         submit = response.has_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                         let ready = !busy && can_send_here && draft_len > 0 && draft_len <= 2000;
-                        clicked = crate::icons::icon_button(
+                        omni = kit::icon_button_ex(
                             ui,
-                            crate::icons::Glyph::Send,
+                            ph::SPARKLE,
+                            "Ask Omni to draft a reply",
+                            34.0,
+                            theme::OMNI,
+                            true,
+                        )
+                        .clicked();
+                        clicked = kit::icon_button_ex(
+                            ui,
+                            ph::PAPER_PLANE_RIGHT,
                             "Send (Enter)",
+                            34.0,
+                            if ready {
+                                theme::PRIMARY_TEXT
+                            } else {
+                                theme::MUTED
+                            },
                             ready,
                         )
                         .clicked();
                     });
                 });
+        }
+        if omni {
+            self.omni_open = true;
+            self.omni_draft = format!("Draft a reply for my conversation with {title}.");
         }
         let text = self
             .drafts
@@ -473,22 +730,35 @@ impl Workspace {
             .map(|d| d.trim_end_matches('\n').to_owned())
             .unwrap_or_default();
         let count = text.chars().count();
+        // The sending identity is always shown; bot and user are never
+        // interchangeable.
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let who = match identity {
-                Some(DiscordIdentity::ApplicationBot) => "Sending as your bot",
-                Some(DiscordIdentity::UserSocialSdk) => "Sending as you",
-                Some(DiscordIdentity::UserSession) => "User session (read only)",
-                None => "Read only here · use Open in Discord to reply",
+            let (glyph, who) = match identity {
+                Some(DiscordIdentity::ApplicationBot) => (ph::ROBOT, "Sending as your bot"),
+                Some(DiscordIdentity::UserSocialSdk) => (ph::USER, "Sending as you"),
+                Some(DiscordIdentity::UserSession) => (ph::LOCK_SIMPLE, "User session (read only)"),
+                None => (ph::LOCK_SIMPLE, "Read only here · Open in Discord to reply"),
             };
-            ui.label(theme::meta(who));
+            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+            kit::icon(ui.painter(), r.center(), glyph, 12.0, theme::FAINT);
+            ui.label(
+                egui::RichText::new(who)
+                    .font(theme::regular(12.0))
+                    .color(theme::FAINT),
+            );
             if count > 1800 {
-                ui.label(RichText::new(format!("{count}/2000")).size(12.0).color(
-                    if count > 2000 {
-                        theme::PRIORITY
-                    } else {
-                        theme::MUTED
-                    },
-                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{count}/2000"))
+                            .font(theme::regular(12.0))
+                            .color(if count > 2000 {
+                                theme::PRIORITY
+                            } else {
+                                theme::MUTED
+                            }),
+                    );
+                });
             }
         });
         let can_send = !busy && can_send_here && !text.trim().is_empty() && count <= 2000;
@@ -512,6 +782,7 @@ impl Workspace {
 fn measure(ui: &Ui, chat: &ConversationViewModel, width: f32, private: bool) -> Vec<Layout> {
     let mut out = Vec::with_capacity(chat.messages.len());
     let mut prev: Option<&MessageRow> = None;
+    let text_w = (width - INSET * 2.0 - GUTTER).max(40.0);
     for row in &chat.messages {
         let day = day_label(row.sent_at);
         let new_day = prev.is_none_or(|p| day_label(p.sent_at) != day);
@@ -525,17 +796,22 @@ fn measure(ui: &Ui, chat: &ConversationViewModel, width: f32, private: bool) -> 
         } else {
             row.render.content.clone()
         };
-        let galley = ui.painter().layout(
+        let mut job = egui::text::LayoutJob::single_section(
             text,
-            FontId::proportional(14.0),
-            theme::SECONDARY,
-            (width - GUTTER - 12.0).max(40.0),
+            egui::TextFormat {
+                font_id: theme::regular(16.0),
+                color: theme::BODY,
+                line_height: Some(BODY_LINE),
+                ..Default::default()
+            },
         );
+        job.wrap.max_width = text_w;
+        let galley = ui.painter().layout_job(job);
         let extras = if private { 0 } else { row.extras.len() };
-        let mut height = galley.size().y + 10.0 + extras as f32 * ATTACHMENT;
+        let mut height = galley.size().y + 8.0 + extras as f32 * ATTACHMENT;
         if !continuation {
-            height += HEADER_LINE + 6.0;
-            height = height.max(AVATAR + 14.0);
+            height += HEADER_LINE + 14.0;
+            height = height.max(AVATAR + 22.0);
         }
         if new_day {
             height += DAY_SEPARATOR;
@@ -601,44 +877,75 @@ fn message_url(chat: &ConversationViewModel, row: &MessageRow) -> String {
     )
 }
 
-fn clock(t: Timestamp) -> String {
-    let minutes = (t.as_millis() / 60_000).rem_euclid(1440);
-    format!("{:02}:{:02} UTC", minutes / 60, minutes % 60)
+/// Offset of the local time zone from UTC at `t`, in milliseconds.
+pub(crate) fn local_offset_ms(t: Timestamp) -> i64 {
+    use chrono::{Offset, TimeZone};
+    chrono::DateTime::from_timestamp_millis(t.as_millis())
+        .map(|utc| {
+            i64::from(
+                chrono::Local
+                    .offset_from_utc_datetime(&utc.naive_utc())
+                    .fix()
+                    .local_minus_utc(),
+            ) * 1000
+        })
+        .unwrap_or(0)
+}
+
+/// "10:14 AM" in local time.
+pub(crate) fn clock(t: Timestamp) -> String {
+    clock_at(t, local_offset_ms(t))
+}
+
+fn clock_at(t: Timestamp, offset_ms: i64) -> String {
+    let minutes = ((t.as_millis() + offset_ms) / 60_000).rem_euclid(1440);
+    let (h, m) = (minutes / 60, minutes % 60);
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    format!("{h12}:{m:02} {}", if h < 12 { "AM" } else { "PM" })
 }
 
 fn short_clock(t: Timestamp) -> String {
-    let minutes = (t.as_millis() / 60_000).rem_euclid(1440);
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+    clock(t)
 }
 
-/// Compact list time (A01): "10:24" today, "Yesterday", weekday within a
-/// week, else "24 Sep". UTC, like the rest of the timeline.
+/// Local hour of day (0–23), for greetings.
+pub(crate) fn local_hour(t: Timestamp) -> i64 {
+    ((t.as_millis() + local_offset_ms(t)) / 3_600_000).rem_euclid(24)
+}
+
+/// Compact list time (A01): "10:24 AM" today, "Yesterday", weekday within
+/// a week, else "Sep 4". Local time.
 pub(crate) fn list_time(t: Timestamp, now: Timestamp) -> String {
-    let day = |x: Timestamp| x.as_millis().div_euclid(86_400_000);
+    list_time_at(t, now, local_offset_ms(now))
+}
+
+fn list_time_at(t: Timestamp, now: Timestamp, offset_ms: i64) -> String {
+    let day = |x: Timestamp| (x.as_millis() + offset_ms).div_euclid(86_400_000);
     let diff = day(now) - day(t);
     match diff {
-        0 => short_clock(t),
+        i64::MIN..=0 => clock_at(t, offset_ms),
         1 => "Yesterday".into(),
-        2..=6 => day_label(t)
+        2..=6 => day_label_at(t, offset_ms)
             .split(',')
             .next()
             .unwrap_or_default()
             .to_owned(),
         _ => {
-            let label = day_label(t);
+            let label = day_label_at(t, offset_ms);
             let mut parts = label.split(' ').skip(1);
-            format!(
-                "{} {}",
-                parts.next().unwrap_or_default(),
-                parts.next().unwrap_or_default()
-            )
+            let d = parts.next().unwrap_or_default().to_owned();
+            format!("{} {d}", parts.next().unwrap_or_default())
         }
     }
 }
 
-/// UTC calendar day, e.g. "Thu, 24 Sep 2026".
+/// Local calendar day, e.g. "Thu, 24 Sep 2026".
 pub(crate) fn day_label(t: Timestamp) -> String {
-    let days = t.as_millis().div_euclid(86_400_000);
+    day_label_at(t, local_offset_ms(t))
+}
+
+fn day_label_at(t: Timestamp, offset_ms: i64) -> String {
+    let days = (t.as_millis() + offset_ms).div_euclid(86_400_000);
     // Civil-from-days (Howard Hinnant), valid for the proleptic Gregorian calendar.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -665,14 +972,17 @@ mod tests {
 
     #[test]
     fn day_labels_are_utc_calendar_days() {
-        assert_eq!(day_label(Timestamp::from_millis(0)), "Thu, 1 Jan 1970");
+        assert_eq!(
+            day_label_at(Timestamp::from_millis(0), 0),
+            "Thu, 1 Jan 1970"
+        );
         // 2026-09-24T15:00:00Z
         assert_eq!(
-            day_label(Timestamp::from_millis(1_790_262_000_000)),
+            day_label_at(Timestamp::from_millis(1_790_262_000_000), 0),
             "Thu, 24 Sep 2026"
         );
         assert_eq!(
-            day_label(Timestamp::from_millis(951_782_400_000)),
+            day_label_at(Timestamp::from_millis(951_782_400_000), 0),
             "Tue, 29 Feb 2000"
         );
     }
@@ -681,26 +991,49 @@ mod tests {
     fn list_times_are_compact() {
         let now = Timestamp::from_millis(1_790_262_000_000); // Thu 24 Sep 15:00
         assert_eq!(
-            list_time(Timestamp::from_millis(1_790_262_000_000 - 3_600_000), now),
-            "14:00"
+            list_time_at(
+                Timestamp::from_millis(1_790_262_000_000 - 3_600_000),
+                now,
+                0
+            ),
+            "2:00 PM"
         );
         assert_eq!(
-            list_time(Timestamp::from_millis(1_790_262_000_000 - 86_400_000), now),
+            list_time_at(
+                Timestamp::from_millis(1_790_262_000_000 - 86_400_000),
+                now,
+                0
+            ),
             "Yesterday"
         );
         assert_eq!(
-            list_time(
+            list_time_at(
                 Timestamp::from_millis(1_790_262_000_000 - 3 * 86_400_000),
-                now
+                now,
+                0
             ),
             "Mon"
         );
         assert_eq!(
-            list_time(
+            list_time_at(
                 Timestamp::from_millis(1_790_262_000_000 - 20 * 86_400_000),
-                now
+                now,
+                0
             ),
-            "4 Sep"
+            "Sep 4"
+        );
+    }
+
+    #[test]
+    fn clock_is_twelve_hour_and_offset_aware() {
+        let t = Timestamp::from_millis(1_790_262_000_000); // 15:00 UTC
+        assert_eq!(clock_at(t, 0), "3:00 PM");
+        assert_eq!(clock_at(t, -5 * 3_600_000), "10:00 AM");
+        assert_eq!(clock_at(Timestamp::from_millis(0), 0), "12:00 AM");
+        // The day rolls over with the offset too.
+        assert_eq!(
+            day_label_at(Timestamp::from_millis(1_790_262_000_000), 10 * 3_600_000),
+            "Fri, 25 Sep 2026"
         );
     }
 

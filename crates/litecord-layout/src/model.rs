@@ -16,7 +16,10 @@ pub enum Destination {
     Servers,
     Voice,
     Inbox,
-    Memory,
+    /// Omni: the assistant and the unified memory it works from. Saved
+    /// layouts from before the rename still load (`memory`).
+    #[serde(alias = "memory")]
+    Omni,
     Tasks,
     Settings,
 }
@@ -29,7 +32,7 @@ impl Destination {
         Self::Servers,
         Self::Voice,
         Self::Inbox,
-        Self::Memory,
+        Self::Omni,
         Self::Tasks,
         Self::Settings,
     ];
@@ -42,7 +45,7 @@ impl Destination {
             Self::Servers => "Servers",
             Self::Voice => "Voice",
             Self::Inbox => "Inbox",
-            Self::Memory => "Memory",
+            Self::Omni => "Omni",
             Self::Tasks => "Tasks",
             Self::Settings => "Settings",
         }
@@ -56,7 +59,7 @@ impl Destination {
             Self::Servers => "server_content",
             Self::Voice => "voice_room",
             Self::Inbox => "agent_inbox",
-            Self::Memory => "memory",
+            Self::Omni => "memory",
             Self::Tasks => "tasks",
             Self::Settings => "settings",
         }
@@ -256,7 +259,7 @@ pub fn default_shell() -> LayoutNode {
         Axis::Horizontal,
         vec![
             (
-                88.0,
+                SHELL_WEIGHTS[0],
                 LayoutNode::split(
                     "rail",
                     Axis::Vertical,
@@ -273,7 +276,7 @@ pub fn default_shell() -> LayoutNode {
                 ),
             ),
             (
-                1498.0,
+                SHELL_WEIGHTS[1],
                 LayoutNode::panel("outlet", "workspace", Placement::Center),
             ),
         ],
@@ -287,19 +290,73 @@ pub fn default_workspace(destination: Destination) -> LayoutNode {
         _ => "contextual_sidebar",
     };
     let main = destination.main_panel();
+    let [side, center, inspector] = workspace_weights(destination);
     LayoutNode::split(
         "destination_root",
         Axis::Horizontal,
         vec![
+            (side, LayoutNode::panel("context", sidebar, Placement::Left)),
+            (center, LayoutNode::panel("main", main, Placement::Center)),
             (
-                280.0,
-                LayoutNode::panel("context", sidebar, Placement::Left),
-            ),
-            (918.0, LayoutNode::panel("main", main, Placement::Center)),
-            (
-                300.0,
+                inspector,
                 LayoutNode::panel("inspector", "context_inspector", Placement::Right),
             ),
         ],
     )
+}
+
+/// Default rail/workspace split (the mock's ~100px rail at 1586px).
+const SHELL_WEIGHTS: [f32; 2] = [100.0, 1486.0];
+/// Defaults shipped before the mock-aligned layout; profiles still carrying
+/// them exactly were never resized and are upgraded on load.
+const LEGACY_SHELL_WEIGHTS: [f32; 2] = [88.0, 1498.0];
+const LEGACY_WORKSPACE_WEIGHTS: [f32; 3] = [280.0, 918.0, 300.0];
+
+/// Sidebar / main / inspector weights per destination (mock proportions).
+fn workspace_weights(destination: Destination) -> [f32; 3] {
+    match destination {
+        Destination::Messages => [360.0, 776.0, 350.0],
+        _ => [296.0, 840.0, 350.0],
+    }
+}
+
+impl crate::LayoutProfile {
+    /// Move splits that still hold the previous built-in defaults to the
+    /// current ones. Anything the user resized is left alone.
+    pub fn upgrade_untouched_defaults(&mut self) {
+        set_weights_if(
+            &mut self.shell,
+            "shell",
+            &LEGACY_SHELL_WEIGHTS,
+            &SHELL_WEIGHTS,
+        );
+        for (destination, tree) in self.destinations.iter_mut() {
+            set_weights_if(
+                tree,
+                "destination_root",
+                &LEGACY_WORKSPACE_WEIGHTS,
+                &workspace_weights(*destination),
+            );
+        }
+    }
+}
+
+fn set_weights_if(node: &mut LayoutNode, split_id: &str, from: &[f32], to: &[f32]) {
+    if let LayoutNode::Split { id, children, .. } = node {
+        if id == split_id
+            && children.len() == from.len()
+            && children
+                .iter()
+                .zip(from)
+                .all(|(c, w)| (c.weight - w).abs() < 1e-3)
+        {
+            for (c, w) in children.iter_mut().zip(to) {
+                c.weight = *w;
+            }
+            return;
+        }
+        for c in children {
+            set_weights_if(&mut c.node, split_id, from, to);
+        }
+    }
 }

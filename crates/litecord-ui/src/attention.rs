@@ -8,181 +8,6 @@ use litecord_types::{
 };
 
 impl Workspace {
-    pub fn home_screen(&mut self, ui: &mut Ui) {
-        let Some(snapshot) = self.snapshot.clone() else {
-            ui.spinner();
-            return;
-        };
-        let identity = self.display(&snapshot.account.display_name);
-        egui::ScrollArea::vertical()
-            .id_salt("home_screen")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(format!("Welcome back, {identity}"))
-                        .size(20.0)
-                        .color(theme::TEXT),
-                );
-                ui.add_space(8.0);
-                self.home_omni_card(ui, &snapshot);
-                ui.add_space(12.0);
-                let replies: Vec<_> = snapshot
-                    .inbox
-                    .needs_attention
-                    .iter()
-                    .filter_map(|i| match i {
-                        InboxItem::PendingReply {
-                            conversation_id,
-                            from,
-                            preview,
-                            ..
-                        } => Some((*conversation_id, from.clone(), preview.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                ui.horizontal_wrapped(|ui| {
-                    let tiles = [
-                        ("Waiting on you", replies.len(), Destination::Inbox),
-                        (
-                            "Friends online",
-                            snapshot.friends.online.len(),
-                            Destination::Friends,
-                        ),
-                        ("Open tasks", snapshot.tasks.open.len(), Destination::Tasks),
-                        (
-                            "To review",
-                            snapshot.inbox.pending_actions.len()
-                                + snapshot.tasks.candidates.len()
-                                + snapshot
-                                    .memory
-                                    .counts_by_status
-                                    .iter()
-                                    .find(|(s, _)| {
-                                        *s == litecord_types::memory::MemoryStatus::Candidate
-                                    })
-                                    .map_or(0, |(_, n)| *n as usize),
-                            Destination::Memory,
-                        ),
-                    ];
-                    for (label, count, dest) in tiles {
-                        if metric_card(ui, label, count).clicked() {
-                            self.navigate(dest);
-                        }
-                    }
-                });
-                ui.add_space(14.0);
-                let half = ((ui.available_width() - 16.0) / 2.0).max(240.0);
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(half);
-                        theme::section_label(ui, "Waiting on you");
-                        if replies.is_empty() {
-                            ui.label(theme::meta("You're all caught up."));
-                        }
-                        for (conv, from, preview) in replies.iter().take(5) {
-                            if attention_row(
-                                ui,
-                                "Reply",
-                                &self.display(from),
-                                &self.display(preview),
-                                "Open",
-                            ) {
-                                self.navigate(Destination::Messages);
-                                self.open_conversation(*conv);
-                            }
-                        }
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(half);
-                        theme::section_label(ui, "Recent conversations");
-                        for c in snapshot.conversations.conversations.iter().take(5) {
-                            let title = self.display(&c.title);
-                            let r = ui
-                                .horizontal(|ui| {
-                                    theme::avatar_presence(
-                                        ui,
-                                        &title,
-                                        30.0,
-                                        c.recipient_status.map_or(theme::Presence::None, |p| {
-                                            theme::Presence::from_status(p.as_str())
-                                        }),
-                                    );
-                                    ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new(&title).color(theme::TEXT));
-                                        ui.add(
-                                            egui::Label::new(theme::meta(
-                                                self.display(
-                                                    c.last_message_preview
-                                                        .as_deref()
-                                                        .unwrap_or("No messages cached yet"),
-                                                ),
-                                            ))
-                                            .truncate(),
-                                        );
-                                    });
-                                })
-                                .response
-                                .interact(egui::Sense::click());
-                            if r.clicked() {
-                                self.navigate(Destination::Messages);
-                                self.open_conversation(c.conversation_id);
-                            }
-                            ui.add_space(4.0);
-                        }
-                    });
-                });
-            });
-    }
-
-    fn home_omni_card(&mut self, ui: &mut Ui, snapshot: &crate::bridge::Snapshot) {
-        use litecord_app::harness::LoginState;
-        let status = &snapshot.omni.status;
-        egui::Frame::new()
-            .fill(theme::OMNI.gamma_multiply(0.07))
-            .stroke(egui::Stroke::new(1.0_f32, theme::OMNI.gamma_multiply(0.35)))
-            .corner_radius(8)
-            .inner_margin(12)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Omni").color(theme::OMNI).strong());
-                    let ready =
-                        matches!(status.login, LoginState::Ready { .. } | LoginState::Stopped)
-                            && status.unavailable.is_none();
-                    if ready {
-                        let w = (ui.available_width() - 80.0).max(120.0);
-                        let r = ui.add(
-                            egui::TextEdit::singleline(&mut self.omni_draft)
-                                .desired_width(w)
-                                .hint_text("Ask about your people, messages and tasks…"),
-                        );
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let text = self.omni_draft.trim().to_owned();
-                        if (ui
-                            .add_enabled(!text.is_empty() && !self.busy, egui::Button::new("Ask"))
-                            .clicked()
-                            || enter && !text.is_empty())
-                            && !self.busy
-                        {
-                            self.send(Command::Omni(crate::bridge::OmniCommand::Send(None, text)));
-                            self.omni_draft.clear();
-                            self.omni_open = true;
-                        }
-                    } else {
-                        let msg = if status.selected.is_none() {
-                            "Connect Codex or OpenCode to ask questions about your conversations."
-                        } else {
-                            "Sign in to your agent harness to start asking."
-                        };
-                        ui.label(egui::RichText::new(msg).color(theme::SECONDARY));
-                        if ui.button("Set up Omni").clicked() {
-                            self.omni_open = true;
-                        }
-                    }
-                });
-            });
-    }
     pub fn inbox_screen(&mut self, ui: &mut Ui) {
         let Some(snapshot) = self.snapshot.clone() else {
             ui.spinner();
@@ -321,7 +146,7 @@ impl Workspace {
                                     "Saved in Memory.",
                                     "Open memory",
                                 ) {
-                                    self.navigate(Destination::Memory);
+                                    self.navigate(Destination::Omni);
                                 }
                             }
                         }
@@ -485,7 +310,7 @@ impl Workspace {
             }
             Some(2) => {
                 self.memory_status_filter = Some(litecord_types::memory::MemoryStatus::Candidate);
-                self.navigate(Destination::Memory);
+                self.navigate(Destination::Omni);
             }
             Some(_) => {
                 self.omni_open = true;
@@ -677,41 +502,6 @@ impl Workspace {
             });
         }
     }
-}
-
-fn metric_card(ui: &mut Ui, label: &str, count: usize) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(170.0, 60.0), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        painter.rect(
-            rect,
-            8.0,
-            if response.hovered() {
-                theme::HOVER
-            } else {
-                theme::RAISED
-            },
-            egui::Stroke::new(1.0_f32, theme::BORDER),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            rect.left_top() + egui::vec2(12.0, 8.0),
-            egui::Align2::LEFT_TOP,
-            count.to_string(),
-            egui::FontId::proportional(22.0),
-            theme::TEXT,
-        );
-        painter.text(
-            rect.left_bottom() + egui::vec2(12.0, -8.0),
-            egui::Align2::LEFT_BOTTOM,
-            label,
-            egui::FontId::proportional(12.0),
-            theme::SECONDARY,
-        );
-    }
-    let text = format!("{label}: {count}");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &text));
-    response
 }
 
 /// One compact attention row: category chip, title, one-line body, action.

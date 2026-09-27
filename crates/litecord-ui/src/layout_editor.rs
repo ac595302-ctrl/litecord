@@ -565,9 +565,9 @@ mod tests {
             .is_err());
         apply_resize(&mut profile, d, &resize).unwrap();
         let w = weights(&profile.destinations[&d]);
-        assert_eq!(w[2], 300.0);
+        assert_eq!(w[2], 350.0);
         assert!((w[0] / w[1] - 0.5).abs() < 1e-4);
-        assert!((w[0] + w[1] - (280.0 + 918.0)).abs() < 1e-2);
+        assert!((w[0] + w[1] - (296.0 + 840.0)).abs() < 1e-2);
     }
 
     #[test]
@@ -765,7 +765,7 @@ mod tests {
         let stored = app.layout_profiles_view().unwrap().profiles;
         let tree = &stored.active().unwrap().destinations[&ws.selection.destination];
         let w = weights(tree);
-        assert_eq!(w[2], 300.0, "hidden inspector keeps its weight");
+        assert_eq!(w[2], 350.0, "hidden inspector keeps its weight");
         assert!((w[0] / w[1] - 200.0 / 300.0).abs() < 1e-3);
     }
 }

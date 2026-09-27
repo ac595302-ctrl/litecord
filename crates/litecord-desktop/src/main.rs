@@ -253,6 +253,9 @@ async fn gui(
 
 #[cfg(feature = "screenshots")]
 fn litecord_layout_destination(name: &str) -> Option<litecord_ui::Destination> {
+    if name.eq_ignore_ascii_case("memory") {
+        return Some(litecord_ui::Destination::Omni);
+    }
     litecord_ui::Destination::ALL
         .into_iter()
         .find(|d| d.label().eq_ignore_ascii_case(name))

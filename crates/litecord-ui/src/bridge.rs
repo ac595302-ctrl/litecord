@@ -256,15 +256,15 @@ impl Bridge {
 fn needs(d: Destination, what: &str) -> bool {
     use Destination as D;
     match what {
-        "conversations" => matches!(d, D::Messages | D::Friends | D::Home | D::Memory | D::Tasks),
+        "conversations" => matches!(d, D::Messages | D::Friends | D::Home | D::Omni | D::Tasks),
         "chat" => d == D::Messages,
         "contact" => matches!(d, D::Messages | D::Friends),
-        "friends" => matches!(d, D::Friends | D::Home | D::Memory | D::Settings),
-        "inbox" => matches!(d, D::Home | D::Inbox),
+        "friends" => matches!(d, D::Friends | D::Home | D::Omni | D::Settings),
+        "inbox" => matches!(d, D::Home | D::Inbox | D::Friends),
         "tasks" => matches!(d, D::Tasks | D::Home | D::Inbox),
-        "memory" => matches!(d, D::Memory | D::Home | D::Inbox),
+        "memory" => matches!(d, D::Omni | D::Home | D::Inbox),
         "settings" => d == D::Settings,
-        "guilds" => d == D::Servers,
+        "guilds" => matches!(d, D::Servers | D::Home | D::Friends),
         "voice" => d == D::Voice,
         "history" => matches!(d, D::Messages | D::Settings),
         _ => true,

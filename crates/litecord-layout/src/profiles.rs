@@ -124,9 +124,12 @@ impl LayoutProfiles {
         if value.to_string().len() > MAX_DOCUMENT_BYTES {
             return Err(LayoutError("layout document is too large".into()));
         }
-        let profiles: Self = serde_json::from_value(value.clone())
+        let mut profiles: Self = serde_json::from_value(value.clone())
             .map_err(|_| LayoutError("invalid layout document".into()))?;
         profiles.validate()?;
+        for p in &mut profiles.profiles {
+            p.upgrade_untouched_defaults();
+        }
         Ok(profiles)
     }
 
@@ -251,5 +254,68 @@ impl LayoutEditSession {
     pub fn apply(self) -> LayoutResult<LayoutProfile> {
         self.draft.validate()?;
         Ok(self.draft)
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    fn weights(n: &LayoutNode) -> Vec<f32> {
+        match n {
+            LayoutNode::Split { children, .. } => children.iter().map(|c| c.weight).collect(),
+            _ => vec![],
+        }
+    }
+
+    fn set(n: &mut LayoutNode, to: &[f32]) {
+        if let LayoutNode::Split { children, .. } = n {
+            for (c, w) in children.iter_mut().zip(to) {
+                c.weight = *w;
+            }
+        }
+    }
+
+    #[test]
+    fn untouched_legacy_defaults_upgrade_but_resized_splits_stay() {
+        let mut profiles = LayoutProfiles::default();
+        let p = &mut profiles.profiles[0];
+        set(&mut p.shell, &[88.0, 1498.0]);
+        for tree in p.destinations.values_mut() {
+            set(tree, &[280.0, 918.0, 300.0]);
+        }
+        // The user resized Tasks; it must keep their weights.
+        set(
+            p.destinations.get_mut(&Destination::Tasks).unwrap(),
+            &[333.0, 918.0, 300.0],
+        );
+        let loaded = LayoutProfiles::from_json(&serde_json::to_value(&profiles).unwrap()).unwrap();
+        let p = &loaded.profiles[0];
+        assert_eq!(weights(&p.shell), vec![100.0, 1486.0]);
+        assert_eq!(
+            weights(&p.destinations[&Destination::Home]),
+            vec![296.0, 840.0, 350.0]
+        );
+        assert_eq!(
+            weights(&p.destinations[&Destination::Messages]),
+            vec![360.0, 776.0, 350.0]
+        );
+        assert_eq!(
+            weights(&p.destinations[&Destination::Tasks]),
+            vec![333.0, 918.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn memory_destination_key_still_loads_as_omni() {
+        let profiles = LayoutProfiles::default();
+        let text = serde_json::to_string(&profiles)
+            .unwrap()
+            .replace("\"omni\"", "\"memory\"");
+        assert!(text.contains("\"memory\""));
+        let loaded = LayoutProfiles::from_json(&serde_json::from_str(&text).unwrap()).unwrap();
+        assert!(loaded.profiles[0]
+            .destinations
+            .contains_key(&Destination::Omni));
     }
 }

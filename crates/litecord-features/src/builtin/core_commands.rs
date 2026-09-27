@@ -64,12 +64,10 @@ impl Feature for CoreCommands {
                 .keywords(["tasks", "todo"]),
         )?;
         reg.register(
-            Command::new("nav.memory", "Go to Memory", |_| {
-                navigate(NavTarget::Memory)
-            })
-            .description("Open unified memory.")
-            .category("Navigation")
-            .keywords(["memory", "notes"]),
+            Command::new("nav.memory", "Go to Omni", |_| navigate(NavTarget::Memory))
+                .description("Open Omni: your assistant and the memory it works from.")
+                .category("Navigation")
+                .keywords(["omni", "memory", "notes", "assistant", "ai"]),
         )?;
         reg.register(
             Command::new("nav.diagnostics", "Go to Diagnostics", |_| {
@@ -189,7 +187,7 @@ impl Feature for CoreCommands {
             },
             NavContribution {
                 id: "nav.memory".to_string(),
-                label: "Memory".to_string(),
+                label: "Omni".to_string(),
                 target: NavTarget::Memory,
                 order: 30,
             },

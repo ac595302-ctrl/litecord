@@ -23,7 +23,7 @@ const ALL_DESTINATIONS: &[Destination] = &[
     Destination::Servers,
     Destination::Voice,
     Destination::Inbox,
-    Destination::Memory,
+    Destination::Omni,
     Destination::Tasks,
     Destination::Settings,
 ];
@@ -147,10 +147,10 @@ static PANELS: [PanelDescriptor; 17] = [
     },
     PanelDescriptor {
         id: "memory",
-        label: "Memory",
+        label: "Omni",
         minimum_width: 300.0,
         minimum_height: 220.0,
-        destinations: &[Destination::Memory],
+        destinations: &[Destination::Omni],
         orientations: VERTICAL,
     },
     PanelDescriptor {
@@ -243,7 +243,7 @@ mod tests {
             Destination::Servers,
             Destination::Voice,
             Destination::Inbox,
-            Destination::Memory,
+            Destination::Omni,
             Destination::Tasks,
             Destination::Settings,
         ];

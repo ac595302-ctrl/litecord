@@ -110,9 +110,9 @@ async fn every_destination_renders_wide_and_narrow_without_changing_saved_layout
     theme::apply(&ctx);
 
     let style = ctx.global_style();
-    assert_eq!(style.visuals.panel_fill, theme::SHELL);
+    assert_eq!(style.visuals.panel_fill, theme::WORKSPACE);
     assert_eq!(style.visuals.widgets.inactive.bg_fill, theme::RAISED);
-    assert_eq!(style.visuals.hyperlink_color, theme::PRIMARY);
+    assert_eq!(style.visuals.hyperlink_color, theme::PRIMARY_TEXT);
 
     let mut workspace = Workspace::new(app.clone(), tokio::runtime::Handle::current(), ctx.clone());
     workspace.profile = saved_before.active().unwrap().clone();

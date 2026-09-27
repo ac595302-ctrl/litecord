@@ -1,12 +1,7 @@
-use crate::{bridge::Command, icons, theme, workspace::Workspace};
-use eframe::egui::{self, Align2, FontId, Rect, Sense, Ui};
-use litecord_app::view::FriendRow;
+use crate::{bridge::Command, kit, ph, theme, workspace::Workspace};
+use eframe::egui::{self, Align2, Rect, Sense, Ui};
 use litecord_layout::{Destination, Orientation};
-use litecord_types::{
-    actions::RelationshipAction,
-    capability::Capability,
-    social::{ConversationKind, RelationshipKind},
-};
+use litecord_types::{actions::RelationshipAction, social::ConversationKind};
 
 impl Workspace {
     pub fn panel(&mut self, ui: &mut Ui, panel: &str, orientation: Orientation) {
@@ -15,7 +10,7 @@ impl Workspace {
             "user_controls" => self.account(ui, orientation),
             "conversation_list" => self.conversations(ui),
             "chat" => self.chat(ui),
-            "friends" => self.friends(ui),
+            "friends" => self.friends_screen(ui),
             "context_inspector" => self.destination_inspector_v2(ui),
             "home" => self.home_screen(ui),
             "agent_inbox" => self.inbox_screen(ui),
@@ -34,161 +29,209 @@ impl Workspace {
         }
     }
     fn navigation(&mut self, ui: &mut Ui, orientation: Orientation) {
-        let horizontal = orientation == Orientation::Horizontal;
-        egui::ScrollArea::both()
-            .id_salt("nav_scroll")
-            .show(ui, |ui| {
-                let layout = if horizontal {
-                    egui::Layout::left_to_right(egui::Align::Center)
-                } else {
-                    egui::Layout::top_down(egui::Align::Center)
-                };
-                ui.with_layout(layout, |ui| {
-                    let (logo, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(logo.shrink(4.0), 10.0, theme::PRIMARY);
-                    ui.painter().text(
-                        logo.center(),
-                        Align2::CENTER_CENTER,
-                        "L",
-                        FontId::proportional(24.0),
-                        theme::TEXT,
-                    );
-                    ui.add_space(12.0);
-                    for d in Destination::ALL {
-                        let size = if horizontal {
-                            egui::vec2(76.0, 60.0)
-                        } else {
-                            egui::vec2(ui.available_width().max(40.0), 62.0)
-                        };
-                        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                        if self.selection.destination == d || response.hovered() {
-                            ui.painter()
-                                .rect_filled(rect.shrink(2.0), 6.0, theme::SELECTED);
-                        }
-                        if self.selection.destination == d {
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    rect.left_top() + egui::vec2(0.0, 10.0),
-                                    egui::vec2(3.0, 42.0),
-                                ),
-                                2.0,
-                                theme::PRIMARY,
-                            );
-                        }
-                        icons::paint(
-                            ui.painter(),
-                            egui::pos2(rect.center().x, rect.top() + 20.0),
-                            20.0,
-                            d,
-                            if self.selection.destination == d {
-                                theme::PRIMARY
-                            } else {
-                                theme::MUTED
-                            },
-                        );
-                        ui.painter().text(
-                            egui::pos2(rect.center().x, rect.top() + 45.0),
-                            Align2::CENTER_CENTER,
-                            d.label(),
-                            FontId::proportional(11.0),
-                            theme::SECONDARY,
-                        );
-                        response.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::WidgetType::SelectableLabel,
-                                true,
-                                self.selection.destination == d,
-                                d.label(),
-                            )
-                        });
-                        if response.clicked() {
-                            self.navigate(d);
-                        }
-                        if d == Destination::Servers {
-                            self.server_flyout(ui, &response);
-                        }
-                    }
-                });
-            });
+        let area = ui.max_rect();
+        let (attention, omni_attention) = self.snapshot.as_ref().map_or((0, 0), |s| {
+            (
+                s.inbox.needs_attention.len() + s.inbox.pending_actions.len(),
+                s.omni.requests.len() + s.omni.checkins.len(),
+            )
+        });
+        if orientation == Orientation::Horizontal {
+            // Docked along the top/bottom: icons with labels in a row.
+            let w = (area.width() / (Destination::ALL.len() as f32 + 1.0)).clamp(56.0, 96.0);
+            let logo = Rect::from_center_size(
+                egui::pos2(area.left() + w * 0.5, area.center().y),
+                egui::vec2(36.0, 36.0),
+            );
+            paint_logo(ui.painter(), logo);
+            for (i, d) in Destination::ALL.into_iter().enumerate() {
+                let r = Rect::from_min_size(
+                    egui::pos2(area.left() + w * (i as f32 + 1.0), area.top()),
+                    egui::vec2(w, area.height()),
+                );
+                self.rail_item(ui, r, d, attention, omni_attention);
+            }
+            return;
+        }
+        let logo = Rect::from_center_size(
+            egui::pos2(area.center().x, area.top() + 42.0),
+            egui::vec2(48.0, 48.0),
+        );
+        paint_logo(ui.painter(), logo);
+        let top = area.top() + 84.0;
+        let step = ((area.bottom() - top - 4.0) / Destination::ALL.len() as f32).clamp(52.0, 78.0);
+        for (i, d) in Destination::ALL.into_iter().enumerate() {
+            let r = Rect::from_min_size(
+                egui::pos2(area.left(), top + step * i as f32),
+                egui::vec2(area.width(), step),
+            );
+            self.rail_item(ui, r, d, attention, omni_attention);
+        }
     }
+
+    /// One destination on the rail: filled icon over a label, a soft plate
+    /// and a blue edge bar when selected (A01).
+    fn rail_item(
+        &mut self,
+        ui: &mut Ui,
+        r: Rect,
+        d: Destination,
+        attention: usize,
+        omni_attention: usize,
+    ) {
+        let response = ui.interact(r, ui.id().with(("rail", d)), Sense::click());
+        let selected = self.selection.destination == d;
+        let painter = ui.painter();
+        let plate = Rect::from_center_size(
+            r.center(),
+            egui::vec2(
+                (r.width() - 16.0).clamp(40.0, 84.0),
+                (r.height() - 10.0).min(66.0),
+            ),
+        );
+        if selected {
+            painter.rect_filled(plate, 11.0, theme::SELECTED_SOFT);
+            painter.rect_filled(
+                Rect::from_center_size(
+                    egui::pos2(r.left() + 2.0, plate.center().y),
+                    egui::vec2(4.0, (plate.height() - 10.0).max(20.0)),
+                ),
+                2.0,
+                theme::PRIMARY,
+            );
+        } else if response.hovered() {
+            painter.rect_filled(plate, 11.0, theme::lerp(theme::RAIL, theme::HOVER, 0.6));
+        }
+        let compact = r.height() < 64.0;
+        let icon_c = egui::pos2(
+            r.center().x,
+            plate.center().y - if compact { 8.0 } else { 11.0 },
+        );
+        kit::icon(
+            painter,
+            icon_c,
+            rail_glyph(d),
+            if compact { 22.0 } else { 25.0 },
+            if selected {
+                egui::Color32::from_rgb(98, 150, 255)
+            } else {
+                egui::Color32::from_rgb(152, 161, 184)
+            },
+        );
+        painter.text(
+            egui::pos2(
+                r.center().x,
+                plate.center().y + if compact { 13.0 } else { 16.0 },
+            ),
+            Align2::CENTER_CENTER,
+            d.label(),
+            if selected {
+                theme::medium(if compact { 12.0 } else { 14.0 })
+            } else {
+                theme::regular(if compact { 12.0 } else { 14.0 })
+            },
+            if selected {
+                theme::TEXT
+            } else {
+                egui::Color32::from_rgb(184, 194, 212)
+            },
+        );
+        let dot = match d {
+            Destination::Inbox if attention > 0 => Some(theme::PRIMARY),
+            Destination::Omni if omni_attention > 0 => Some(theme::OMNI),
+            _ => None,
+        };
+        if let Some(color) = dot {
+            painter.circle_filled(icon_c + egui::vec2(17.0, -11.0), 4.0, color);
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, d.label())
+        });
+        if response.clicked() {
+            self.navigate(d);
+        }
+        if d == Destination::Servers {
+            self.server_flyout(ui, &response);
+        }
+    }
+
     fn account(&mut self, ui: &mut Ui, orientation: Orientation) {
         let Some(s) = self.snapshot.clone() else {
             return;
         };
         let name = self.display(&s.account.display_name);
-        ui.with_layout(
-            if orientation == Orientation::Horizontal {
-                egui::Layout::left_to_right(egui::Align::Center)
+        let area = ui.max_rect();
+        let size = if orientation == Orientation::Horizontal {
+            (area.height() - 12.0).clamp(28.0, 44.0)
+        } else {
+            (area.width() - 44.0).clamp(36.0, 56.0)
+        };
+        let c = if orientation == Orientation::Horizontal {
+            egui::pos2(area.left() + size * 0.5 + 12.0, area.center().y)
+        } else {
+            egui::pos2(area.center().x, area.bottom() - size * 0.5 - 18.0)
+        };
+        let r = Rect::from_center_size(c, egui::vec2(size, size));
+        let response = ui.interact(r, ui.id().with("account_avatar"), Sense::click());
+        theme::paint_avatar(
+            ui.painter(),
+            c,
+            size,
+            &name,
+            if s.diagnostics.session.is_online() {
+                theme::Presence::Online
             } else {
-                egui::Layout::top_down(egui::Align::Center)
+                theme::Presence::Offline
             },
-            |ui| {
-                let avatar = theme::avatar(ui, &name, 40.0, s.diagnostics.session.is_online());
-                avatar.context_menu(|ui| {
-                    ui.label(&name);
-                    if ui.button("Settings").clicked() {
-                        self.navigate(Destination::Settings);
-                        ui.close();
-                    }
-                });
-                if ui.available_width() > 140.0 {
-                    ui.label(name);
-                }
-            },
+            theme::RAIL,
         );
+        let label = format!("{name} · account");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+        let response = response.on_hover_text(name.clone());
+        if response.clicked() {
+            self.settings_section = None;
+            self.navigate(Destination::Settings);
+        }
+        response.context_menu(|ui| {
+            ui.label(&name);
+            if ui.button("Settings").clicked() {
+                self.navigate(Destination::Settings);
+                ui.close();
+            }
+        });
     }
     fn conversations(&mut self, ui: &mut Ui) {
         let Some(s) = self.snapshot.clone() else {
             ui.spinner();
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Messages")
-                    .size(18.0)
-                    .color(theme::TEXT),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::icon_button(
-                    ui,
-                    icons::Glyph::Compose,
-                    "New message: pick a friend",
-                    true,
-                )
-                .clicked()
-                {
-                    self.navigate(Destination::Friends);
-                }
-            });
-        });
-        ui.add_space(4.0);
-        theme::search_field(ui, &mut self.filter, "Search conversations…");
-        ui.add_space(4.0);
+        if kit::sidebar_title(
+            ui,
+            "Messages",
+            Some((ph::NOTE_PENCIL, "New message: pick a friend")),
+        ) {
+            self.navigate(Destination::Friends);
+        }
+        ui.add_space(6.0);
+        kit::search(ui, &mut self.filter, "Search conversations...");
+        ui.add_space(10.0);
         let waiting = s
             .conversations
             .conversations
             .iter()
             .filter(|r| r.awaiting_reply)
             .count();
-        // Wraps rather than widening the panel when it is narrow.
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(2.0, 4.0);
-            for (i, (label, badge)) in [
+        kit::pill_row(
+            ui,
+            &[
                 ("All", None),
                 ("Unread", Some(waiting)),
                 ("Groups", None),
                 ("DMs", None),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if theme::pill(ui, label, badge, self.conversation_tab == i).clicked() {
-                    self.conversation_tab = i;
-                }
-            }
-        });
-        ui.add_space(4.0);
+            ],
+            &mut self.conversation_tab,
+        );
+        ui.add_space(8.0);
         let filter = self.filter.to_lowercase();
         let rows: Vec<_> = s
             .conversations
@@ -203,101 +246,94 @@ impl Workspace {
             })
             .collect();
         if rows.is_empty() {
-            theme::empty_state(ui, "Nothing here", "No conversations match this filter.");
+            kit::empty(
+                ui,
+                Some(ph::CHAT_CIRCLE),
+                "Nothing here",
+                "No conversations match this filter.",
+            );
         }
         let now = litecord_types::Timestamp::now();
+        let private = self.private();
         egui::ScrollArea::vertical()
             .id_salt("conversation_scroll")
             .auto_shrink([false, false])
-            .show_rows(ui, 58.0, rows.len(), |ui, range| {
+            .show_rows(ui, 70.0, rows.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 for index in range {
                     let r = rows[index];
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 58.0),
-                        Sense::click(),
-                    );
                     let selected = Some(r.conversation_id) == self.selection.conversation;
-                    let painter = ui.painter().clone();
-                    let card = rect.shrink2(egui::vec2(0.0, 2.0));
-                    if selected {
-                        painter.rect_filled(card, 8.0, theme::SELECTED);
-                    } else if response.hovered() {
-                        painter.rect_filled(card, 8.0, theme::HOVER);
-                    }
+                    let (rect, response) = kit::row(ui, 70.0, selected);
                     let title = self.display(&r.title);
-                    let mut avatar =
-                        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                            card.min + egui::vec2(8.0, 7.0),
-                            egui::vec2(40.0, 40.0),
-                        )));
-                    theme::avatar_presence(
-                        &mut avatar,
-                        &title,
-                        40.0,
-                        r.recipient_status.map_or(theme::Presence::None, |p| {
-                            theme::Presence::from_status(p.as_str())
-                        }),
-                    );
-                    let x = card.left() + 58.0;
+                    let painter = ui.painter();
+                    let c = egui::pos2(rect.left() + 12.0 + 24.0, rect.center().y);
+                    let ring = if selected {
+                        theme::SELECTED
+                    } else {
+                        theme::SIDEBAR
+                    };
+                    match r.kind {
+                        ConversationKind::GroupDm => {
+                            kit::paint_group(painter, c, 48.0, ph::USERS, theme::SECONDARY)
+                        }
+                        ConversationKind::GuildChannel => {
+                            kit::paint_group(painter, c, 48.0, ph::HASH, theme::SECONDARY)
+                        }
+                        _ => theme::paint_avatar(
+                            painter,
+                            c,
+                            48.0,
+                            &title,
+                            r.recipient_status.map_or(theme::Presence::None, |p| {
+                                theme::Presence::from_status(p.as_str())
+                            }),
+                            ring,
+                        ),
+                    }
+                    let x = rect.left() + 74.0;
                     let time = r
                         .last_activity_at
-                        .map(|t| crate::messages_ui::list_time(t, now));
-                    let time_w = time.as_ref().map_or(0.0, |t| {
-                        painter
-                            .layout_no_wrap(t.clone(), FontId::proportional(11.0), theme::MUTED)
-                            .size()
-                            .x
-                    });
-                    let text_w = (card.right() - x - time_w - 16.0).max(40.0);
-                    let elide = |text: String, size: f32, color, width: f32| {
-                        let mut job = egui::text::LayoutJob::simple_singleline(
-                            text,
-                            FontId::proportional(size),
-                            color,
-                        );
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
-                        painter.layout_job(job)
-                    };
-                    painter.galley(
-                        egui::pos2(x, card.top() + 9.0),
-                        elide(
-                            title.clone(),
-                            14.0,
-                            if r.awaiting_reply {
-                                theme::TEXT
-                            } else {
-                                theme::SECONDARY
-                            },
-                            text_w,
-                        ),
+                        .map(|t| crate::messages_ui::list_time(t, now))
+                        .unwrap_or_default();
+                    let time_w = kit::text_width(painter, &time, theme::regular(13.0));
+                    let top_y = rect.center().y - 11.0;
+                    let bottom_y = rect.center().y + 12.0;
+                    kit::text_at(
+                        painter,
+                        egui::pos2(x, top_y),
+                        Align2::LEFT_CENTER,
+                        &title,
+                        theme::medium(15.5),
                         theme::TEXT,
+                        rect.right() - x - time_w - 22.0,
                     );
-                    if let Some(t) = time {
-                        painter.text(
-                            egui::pos2(card.right() - 8.0, card.top() + 11.0),
-                            Align2::RIGHT_TOP,
-                            t,
-                            FontId::proportional(11.0),
-                            if r.awaiting_reply {
-                                theme::PRIMARY_TEXT
-                            } else {
-                                theme::MUTED
-                            },
-                        );
-                    }
-                    let preview = self.display(
-                        r.last_message_preview
-                            .as_deref()
-                            .unwrap_or("No messages cached yet"),
-                    );
-                    painter.galley(
-                        egui::pos2(x, card.top() + 30.0),
-                        elide(preview, 12.0, theme::MUTED, text_w - 14.0),
+                    painter.text(
+                        egui::pos2(rect.right() - 12.0, top_y + 1.0),
+                        Align2::RIGHT_CENTER,
+                        time,
+                        theme::regular(13.0),
                         theme::MUTED,
                     );
+                    let preview = if private {
+                        "Hidden in privacy mode".to_owned()
+                    } else {
+                        r.last_message_preview
+                            .clone()
+                            .unwrap_or_else(|| "No messages cached yet".to_owned())
+                    };
+                    kit::text_at(
+                        painter,
+                        egui::pos2(x, bottom_y),
+                        Align2::LEFT_CENTER,
+                        &preview,
+                        theme::regular(14.0),
+                        theme::SECONDARY,
+                        rect.right() - x - 40.0,
+                    );
                     if r.awaiting_reply {
-                        painter.circle_filled(
-                            egui::pos2(card.right() - 14.0, card.top() + 38.0),
+                        kit::dot(
+                            painter,
+                            egui::pos2(rect.right() - 20.0, bottom_y),
                             5.0,
                             theme::PRIMARY,
                         );
@@ -322,203 +358,6 @@ impl Workspace {
     }
     fn chat(&mut self, ui: &mut Ui) {
         self.chat_view(ui);
-    }
-    fn friends(&mut self, ui: &mut Ui) {
-        // Filters live in the contextual sidebar; the heading names the view.
-        let view =
-            ["Online", "All friends", "Pending requests", "Blocked"][self.friends_tab.min(3)];
-        theme::page_header(ui, "Friends", Some(view));
-        let Some(s) = self.snapshot.clone() else {
-            ui.spinner();
-            return;
-        };
-        let rows: Vec<&FriendRow> = match self.friends_tab {
-            0 => s.friends.online.iter().collect(),
-            1 => s.friends.online.iter().chain(&s.friends.offline).collect(),
-            2 => s
-                .friends
-                .pending_incoming
-                .iter()
-                .chain(&s.friends.pending_outgoing)
-                .collect(),
-            _ => s.friends.blocked.iter().collect(),
-        };
-        theme::section_label(ui, &format!("{} contacts", rows.len()));
-        if rows.is_empty() {
-            theme::empty_state(
-                ui,
-                "Nobody here",
-                "Contacts in this view appear as Discord reports them.",
-            );
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("friends_scroll")
-            .show_rows(ui, 72.0, rows.len(), |ui, range| {
-                for i in range {
-                    let r = rows[i];
-                    let selected = self.selection.contact == Some(r.user_id);
-                    egui::Frame::new()
-                        .fill(if selected {
-                            theme::SELECTED
-                        } else {
-                            theme::WORKSPACE
-                        })
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            if selected {
-                                theme::PRIMARY.gamma_multiply(0.6)
-                            } else {
-                                theme::BORDER
-                            },
-                        ))
-                        .corner_radius(6)
-                        .inner_margin(8)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let name =
-                                    self.display(r.alias.as_deref().unwrap_or(&r.display_name));
-                                let presence = if r.relationship == RelationshipKind::Friend {
-                                    theme::Presence::from_status(r.status.as_str())
-                                } else {
-                                    theme::Presence::None
-                                };
-                                theme::avatar_presence(ui, &name, 40.0, presence);
-                                ui.vertical(|ui| {
-                                    if ui
-                                        .selectable_label(
-                                            self.selection.contact == Some(r.user_id),
-                                            egui::RichText::new(name).strong(),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.selection.contact = Some(r.user_id);
-                                        self.note_draft = None;
-                                        self.request();
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(
-                                            if matches!(
-                                                r.relationship,
-                                                RelationshipKind::PendingIncoming
-                                                    | RelationshipKind::PendingOutgoing
-                                            ) {
-                                                if r.relationship
-                                                    == RelationshipKind::PendingIncoming
-                                                {
-                                                    "Incoming request"
-                                                } else {
-                                                    "Outgoing request"
-                                                }
-                                            } else {
-                                                presence_text(r.status.as_str())
-                                            },
-                                        )
-                                        .size(12.0)
-                                        .color(theme::MUTED),
-                                    );
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let enabled = !self.busy
-                                            && !self.private()
-                                            && s.diagnostics.session.is_online();
-                                        let requests = enabled
-                                            && s.diagnostics
-                                                .capabilities
-                                                .is_usable(Capability::FriendRequests);
-                                        let blocking = enabled
-                                            && s.diagnostics
-                                                .capabilities
-                                                .is_usable(Capability::Blocking);
-                                        if r.relationship == RelationshipKind::PendingIncoming {
-                                            if ui
-                                                .add_enabled(requests, egui::Button::new("Decline"))
-                                                .clicked()
-                                            {
-                                                self.relationship_confirmation = Some((
-                                                    r.user_id,
-                                                    RelationshipAction::RejectFriendRequest,
-                                                    r.display_name.clone(),
-                                                ));
-                                            }
-                                            if ui
-                                                .add_enabled(
-                                                    requests,
-                                                    egui::Button::new("Accept")
-                                                        .fill(theme::PRIMARY),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.send(Command::Relationship(
-                                                    r.user_id,
-                                                    RelationshipAction::AcceptFriendRequest,
-                                                ));
-                                            }
-                                        } else if r.relationship == RelationshipKind::Blocked {
-                                            if ui
-                                                .add_enabled(blocking, egui::Button::new("Unblock"))
-                                                .clicked()
-                                            {
-                                                self.relationship_confirmation = Some((
-                                                    r.user_id,
-                                                    RelationshipAction::Unblock,
-                                                    r.display_name.clone(),
-                                                ));
-                                            }
-                                        } else {
-                                            ui.menu_button("More", |ui| {
-                                                if ui
-                                                    .add_enabled(
-                                                        blocking,
-                                                        egui::Button::new("Block user"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.relationship_confirmation = Some((
-                                                        r.user_id,
-                                                        RelationshipAction::Block,
-                                                        r.display_name.clone(),
-                                                    ));
-                                                    ui.close();
-                                                }
-                                                if r.relationship == RelationshipKind::Friend
-                                                    && ui
-                                                        .add_enabled(
-                                                            requests,
-                                                            egui::Button::new("Remove friend"),
-                                                        )
-                                                        .clicked()
-                                                {
-                                                    self.relationship_confirmation = Some((
-                                                        r.user_id,
-                                                        RelationshipAction::RemoveFriend,
-                                                        r.display_name.clone(),
-                                                    ));
-                                                    ui.close();
-                                                }
-                                            });
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                r.dm_conversation_id.is_some(),
-                                                egui::Button::new("Message"),
-                                            )
-                                            .on_disabled_hover_text(
-                                                "No cached DM exists for this contact",
-                                            )
-                                            .clicked()
-                                        {
-                                            if let Some(id) = r.dm_conversation_id {
-                                                self.open_conversation(id);
-                                            }
-                                        }
-                                    },
-                                );
-                            });
-                        });
-                }
-            });
     }
     pub fn relationship_dialog(&mut self, ctx: &egui::Context) {
         if self.private() {
@@ -821,13 +660,46 @@ impl Workspace {
     }
 }
 
-/// Readable presence text for lists.
-fn presence_text(status: &str) -> &'static str {
-    match status {
-        "online" => "Online",
-        "idle" => "Idle",
-        "dnd" => "Do not disturb",
-        "offline" | "invisible" => "Offline",
-        _ => "",
+/// Filled Phosphor glyph for a destination.
+pub(crate) fn rail_glyph(d: Destination) -> &'static str {
+    match d {
+        Destination::Home => ph::HOUSE,
+        Destination::Messages => ph::CHAT_CIRCLE,
+        Destination::Friends => ph::USERS,
+        Destination::Servers => ph::SQUARES_FOUR,
+        Destination::Voice => ph::WAVEFORM,
+        Destination::Inbox => ph::ENVELOPE_SIMPLE,
+        Destination::Omni => ph::SPARKLE,
+        Destination::Tasks => ph::CHECK_SQUARE,
+        Destination::Settings => ph::GEAR_SIX,
     }
+}
+
+/// The Litecord mark: a blue gradient tile with an open white ring.
+pub(crate) fn paint_logo(painter: &egui::Painter, rect: Rect) {
+    theme::gradient_rect(
+        painter,
+        rect,
+        rect.width() * 0.26,
+        egui::Color32::from_rgb(38, 148, 255),
+        egui::Color32::from_rgb(60, 88, 246),
+    );
+    let c = rect.center();
+    let r = rect.width() * 0.25;
+    let stroke = egui::Stroke::new(rect.width() * 0.105, egui::Color32::WHITE);
+    let points: Vec<egui::Pos2> = (0..=40)
+        .map(|i| {
+            let a = (-50.0_f32 + i as f32 * 290.0 / 40.0).to_radians();
+            c + egui::vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
+    painter.circle_filled(
+        c + egui::vec2(
+            (-62.0_f32).to_radians().cos(),
+            (-62.0_f32).to_radians().sin(),
+        ) * r,
+        stroke.width * 0.5,
+        egui::Color32::WHITE,
+    );
 }
