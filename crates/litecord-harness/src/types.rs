@@ -32,6 +32,15 @@ impl HarnessKind {
         }
     }
 
+    /// How to install the harness, for a "not installed" hint.
+    pub fn install_hint(self) -> &'static str {
+        match self {
+            Self::Codex => "npm install -g @openai/codex",
+            Self::OpenCode => "npm install -g opencode-ai (or see opencode.ai)",
+            Self::Fake => "",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "codex" => Some(Self::Codex),
@@ -90,14 +99,106 @@ pub enum LoginKind {
 }
 
 /// One way to sign in to the harness.
+///
+/// UIs group options by [`provider`](Self::provider) (showing
+/// [`provider_label`](Self::provider_label) as the heading and
+/// [`method_label`](Self::method_label) per entry), list `featured` groups
+/// first and put the rest behind "More providers". [`label`](Self::label)
+/// is the combined one-line text for simple lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginOption {
     /// Driver-scoped id passed back to `begin_login_with` / `login_api_key`.
     pub id: String,
-    /// e.g. "ChatGPT account", "OpenAI API key", "Anthropic (Claude Pro/Max)".
+    /// One-line label, e.g. "Sign in with ChatGPT" or
+    /// "Anthropic · API key".
     pub label: String,
     pub kind: LoginKind,
+    /// Grouping key: the model provider this signs in to (`openai`,
+    /// `anthropic`, `github-copilot`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Display name of `provider` ("OpenAI", "GitHub Copilot").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_label: Option<String>,
+    /// The method alone, for use under a provider heading
+    /// ("ChatGPT Pro/Plus (browser)", "API key").
+    #[serde(default)]
+    pub method_label: String,
+    /// Worth showing without "More providers".
+    #[serde(default)]
+    pub featured: bool,
+    /// The provider already has working credentials.
+    #[serde(default)]
+    pub connected: bool,
+    /// Extra fields the method asks for (e.g. a GitHub Enterprise URL).
+    /// Values go in the `inputs` map of `begin_login_with_inputs` /
+    /// `login_api_key_with`; the harness applies its own defaults when a
+    /// field is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<LoginPrompt>,
 }
+
+impl LoginOption {
+    /// An option with no grouping or prompts; `method_label` = `label`.
+    pub fn new(id: impl Into<String>, label: impl Into<String>, kind: LoginKind) -> Self {
+        let label = label.into();
+        Self {
+            id: id.into(),
+            method_label: label.clone(),
+            label,
+            kind,
+            provider: None,
+            provider_label: None,
+            featured: false,
+            connected: false,
+            prompts: Vec::new(),
+        }
+    }
+}
+
+/// An extra input a sign-in method asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginPrompt {
+    /// Key in the `inputs` map.
+    pub key: String,
+    /// Question shown to the user.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// Non-empty for a choice; the value sent is `LoginChoice::value`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<LoginChoice>,
+    /// Only ask when another input has (or lacks) a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<LoginPromptCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginChoice {
+    pub label: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Show a prompt only if `inputs[key] == value` (or `!=` when `equals` is
+/// false).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginPromptCondition {
+    pub key: String,
+    pub equals: bool,
+    pub value: String,
+}
+
+impl LoginPromptCondition {
+    pub fn applies(&self, inputs: &LoginInputs) -> bool {
+        let matches = inputs.get(&self.key).map(String::as_str) == Some(self.value.as_str());
+        matches == self.equals
+    }
+}
+
+/// Values for [`LoginOption::prompts`], keyed by [`LoginPrompt::key`].
+pub type LoginInputs = std::collections::BTreeMap<String, String>;
 
 /// What Omni may touch in a session (see docs/AGENT_HARNESS.md §5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -310,6 +411,17 @@ pub enum HarnessError {
     Timeout,
     #[error("unsupported by this harness: {0}")]
     Unsupported(&'static str),
+}
+
+/// Removes every occurrence of `secret` from `text` (used on harness error
+/// messages that could echo an API key back).
+pub fn redact(text: &str, secret: &str) -> String {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(secret, "[redacted]")
+    }
 }
 
 pub type HarnessResult<T> = Result<T, HarnessError>;

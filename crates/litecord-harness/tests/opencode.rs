@@ -215,11 +215,11 @@ fn ev(kind: &str, props: Value) -> Value {
 }
 
 #[tokio::test]
-async fn login_state_signed_out_then_ready() {
+async fn login_state_signed_out_then_ready_then_signed_out() {
     let connected = Arc::new(Mutex::new(false));
     let c = connected.clone();
-    let fake = serve(move |req| match req.path.as_str() {
-        "/provider" => {
+    let fake = serve(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider") => {
             if *c.lock().unwrap() {
                 (
                     200,
@@ -229,9 +229,15 @@ async fn login_state_signed_out_then_ready() {
                 (200, r#"{"all":[],"default":{},"connected":[]}"#.into())
             }
         }
+        ("DELETE", "/auth/anthropic") => {
+            *c.lock().unwrap() = false;
+            (200, "true".into())
+        }
+        ("POST", "/instance/dispose") => (200, "true".into()),
         _ => (404, "{}".into()),
     });
     let d = fake.driver();
+    let mut rx = d.subscribe();
     assert_eq!(d.kind(), HarnessKind::OpenCode);
     assert_eq!(d.login_state().await.unwrap(), LoginState::SignedOut);
     *connected.lock().unwrap() = true;
@@ -241,11 +247,12 @@ async fn login_state_signed_out_then_ready() {
             account: Some("anthropic".into())
         }
     );
+    d.logout().await.unwrap();
+    assert!(fake.find("DELETE", "/auth/anthropic").is_some());
+    assert!(fake.find("POST", "/instance/dispose").is_some());
     assert_eq!(
-        d.logout().await,
-        Err(HarnessError::Unsupported(
-            "sign out with `opencode auth logout`"
-        ))
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::SignedOut)
     );
     d.shutdown().await;
 }
@@ -791,7 +798,7 @@ async fn code_sign_in_flow() {
     assert_eq!(
         next(&mut rx).await,
         HarnessEvent::Login(LoginState::Ready {
-            account: Some("anthropic".into())
+            account: Some("anthropic, openai".into())
         })
     );
     // The pending sign-in is consumed.
@@ -920,5 +927,383 @@ async fn doc_check_reads_openapi() {
     });
     let d = fake.driver();
     assert_eq!(d.doc_check().await.unwrap(), ["/event"]);
+    d.shutdown().await;
+}
+
+// ---- Sign-in against payloads shaped like opencode 1.18.32 ----------------
+
+/// A trimmed `GET /provider/auth` from opencode 1.18.32.
+const REAL_AUTH_METHODS: &str = r#"{
+  "openai": [
+    {"type": "oauth", "label": "ChatGPT Pro/Plus (browser)"},
+    {"type": "oauth", "label": "ChatGPT Pro/Plus (headless)"},
+    {"type": "api", "label": "Manually enter API Key"}
+  ],
+  "github-copilot": [
+    {"type": "oauth", "label": "Login with GitHub Copilot", "prompts": [
+      {"type": "select", "key": "deploymentType", "message": "Select GitHub deployment type",
+       "options": [
+         {"label": "GitHub.com", "value": "github.com", "hint": "Public"},
+         {"label": "GitHub Enterprise", "value": "enterprise", "hint": "Data residency or self-hosted"}
+       ]},
+      {"type": "text", "key": "enterpriseUrl", "message": "Enter your GitHub Enterprise URL or domain",
+       "placeholder": "company.ghe.com or https://company.ghe.com",
+       "when": {"key": "deploymentType", "op": "eq", "value": "enterprise"}}
+    ]}
+  ],
+  "azure": [
+    {"type": "api", "label": "API key", "prompts": [
+      {"type": "text", "key": "resourceName", "message": "Enter Azure Resource Name", "placeholder": "e.g. my-models"}
+    ]}
+  ]
+}"#;
+
+/// A trimmed `GET /provider` from opencode 1.18.32, after an OpenAI key was
+/// stored. It carries the stored key, which must never leak.
+const REAL_PROVIDERS: &str = r#"{
+  "all": [
+    {"id": "zeta-ai", "name": "Zeta AI", "source": "custom", "env": ["ZETA_API_KEY"], "options": {}, "models": {}},
+    {"id": "anthropic", "name": "Anthropic", "source": "env", "env": ["ANTHROPIC_API_KEY"], "options": {}, "models": {}},
+    {"id": "opencode", "name": "OpenCode Zen", "source": "custom", "env": ["OPENCODE_API_KEY"], "options": {"apiKey": "public"}, "models": {}},
+    {"id": "openai", "name": "OpenAI", "source": "api", "env": ["OPENAI_API_KEY"], "key": "sk-LEAKED-KEY", "options": {}, "models": {}},
+    {"id": "github-copilot", "name": "GitHub Copilot", "source": "custom", "env": [], "options": {}, "models": {}},
+    {"id": "azure", "name": "Azure", "source": "custom", "env": [], "options": {}, "models": {}},
+    {"id": "alpha", "name": "alpha labs", "source": "custom", "env": [], "options": {}, "models": {}}
+  ],
+  "default": {},
+  "connected": ["opencode", "openai", "anthropic"]
+}"#;
+
+#[tokio::test]
+async fn every_provider_is_offered_grouped_and_ranked() {
+    let fake = serve(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, REAL_AUTH_METHODS.into()),
+        ("GET", "/provider") => (200, REAL_PROVIDERS.into()),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let opts = d.login_options().await.unwrap();
+    assert!(!format!("{opts:?}").contains("LEAKED"));
+    let got: Vec<(&str, &str, LoginKind, bool, bool)> = opts
+        .iter()
+        .map(|o| {
+            (
+                o.id.as_str(),
+                o.method_label.as_str(),
+                o.kind,
+                o.featured,
+                o.connected,
+            )
+        })
+        .collect();
+    use LoginKind::{ApiKey, Browser};
+    assert_eq!(
+        got,
+        [
+            (
+                "openai:0",
+                "ChatGPT Pro/Plus (browser)",
+                Browser,
+                true,
+                true
+            ),
+            (
+                "openai:1",
+                "ChatGPT Pro/Plus (headless)",
+                Browser,
+                true,
+                true
+            ),
+            ("openai:2", "Manually enter API Key", ApiKey, true, true),
+            // No plugin method: an API key, as `opencode auth login` offers.
+            ("anthropic:api", "API key", ApiKey, true, true),
+            (
+                "github-copilot:0",
+                "Login with GitHub Copilot",
+                Browser,
+                true,
+                false
+            ),
+            ("opencode:api", "API key", ApiKey, true, true),
+            // The rest, by display name.
+            ("alpha:api", "API key", ApiKey, false, false),
+            ("azure:0", "API key", ApiKey, false, false),
+            ("zeta-ai:api", "API key", ApiKey, false, false),
+        ]
+    );
+    let copilot = &opts[4];
+    assert_eq!(copilot.provider.as_deref(), Some("github-copilot"));
+    assert_eq!(copilot.provider_label.as_deref(), Some("GitHub Copilot"));
+    assert_eq!(copilot.label, "GitHub Copilot · Login with GitHub Copilot");
+    assert_eq!(copilot.prompts.len(), 2);
+    assert_eq!(copilot.prompts[0].key, "deploymentType");
+    assert_eq!(copilot.prompts[0].choices.len(), 2);
+    assert_eq!(copilot.prompts[0].choices[1].value, "enterprise");
+    let when = copilot.prompts[1].when.as_ref().unwrap();
+    let mut inputs = LoginInputs::new();
+    assert!(!when.applies(&inputs));
+    inputs.insert("deploymentType".into(), "enterprise".into());
+    assert!(when.applies(&inputs));
+    assert_eq!(opts[7].prompts[0].key, "resourceName");
+    assert_eq!(opts[7].provider_label.as_deref(), Some("Azure"));
+
+    // The account label names stored credentials first, never the key.
+    let state = d.login_state().await.unwrap();
+    assert_eq!(
+        state,
+        LoginState::Ready {
+            account: Some("OpenAI, Anthropic +1 more".into())
+        }
+    );
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_the_free_provider_is_labelled_as_such() {
+    let fake = serve(|req| {
+        match req.path.as_str() {
+        "/provider" => (
+            200,
+            r#"{"all":[{"id":"opencode","name":"OpenCode Zen","source":"custom"}],"connected":["opencode"]}"#
+                .into(),
+        ),
+        _ => (404, "{}".into()),
+    }
+    });
+    let d = fake.driver();
+    assert_eq!(
+        d.login_state().await.unwrap(),
+        LoginState::Ready {
+            account: Some("OpenCode Zen (free models)".into())
+        }
+    );
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn api_key_for_a_provider_without_plugin_methods_reloads_providers() {
+    let stored = Arc::new(Mutex::new(false));
+    let s = stored.clone();
+    let fake = serve(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("PUT", "/auth/anthropic") => {
+            *s.lock().unwrap() = true;
+            (200, "true".into())
+        }
+        ("PUT", "/auth/azure") => (
+            400,
+            r#"{"name":"BadRequest","data":{"message":"rejected key sk-ant-SECRET-1"}}"#.into(),
+        ),
+        ("POST", "/instance/dispose") => (200, "true".into()),
+        ("GET", "/provider") => {
+            let connected = if *s.lock().unwrap() {
+                r#"["opencode","anthropic"]"#
+            } else {
+                r#"["opencode"]"#
+            };
+            (
+                200,
+                format!(
+                    r#"{{"all":[{{"id":"anthropic","name":"Anthropic","source":"api"}},{{"id":"opencode","name":"OpenCode Zen","source":"custom"}}],"connected":{connected}}}"#
+                ),
+            )
+        }
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    d.login_api_key("anthropic:api", " sk-ant-SECRET-1\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.find("PUT", "/auth/anthropic").unwrap().body,
+        json!({ "type": "api", "key": "sk-ant-SECRET-1" })
+    );
+    // OpenCode only sees the new provider after a reload.
+    assert!(fake.find("POST", "/instance/dispose").is_some());
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("Anthropic, OpenCode Zen (free models)".into())
+        })
+    );
+
+    // Prompt values go along as metadata; server errors are shown without
+    // the key.
+    let mut inputs = LoginInputs::new();
+    inputs.insert("resourceName".into(), "my-models".into());
+    let err = d
+        .login_api_key_with("azure:0", "sk-ant-SECRET-1", &inputs)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        fake.find("PUT", "/auth/azure").unwrap().body,
+        json!({ "type": "api", "key": "sk-ant-SECRET-1", "metadata": { "resourceName": "my-models" } })
+    );
+    let text = format!("{err} {err:?}");
+    assert!(text.contains("rejected key [redacted]"), "{text}");
+    assert!(!text.contains("SECRET"), "{text}");
+    // An API-key option is not a browser sign-in.
+    assert!(matches!(
+        d.begin_login_with("anthropic:api").await,
+        Err(HarnessError::Unsupported(_))
+    ));
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn browser_sign_in_sends_prompt_inputs() {
+    let fake = serve(|req| {
+        match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, REAL_AUTH_METHODS.into()),
+        ("POST", "/provider/github-copilot/oauth/authorize") => (
+            200,
+            r#"{"url":"https://example.invalid/device","method":"auto","instructions":"Enter code: ABCD-1234"}"#
+                .into(),
+        ),
+        // The long-poll never finishes in this test.
+        ("POST", "/provider/github-copilot/oauth/callback") => {
+            std::thread::sleep(Duration::from_secs(3));
+            (200, "true".into())
+        }
+        _ => (404, "{}".into()),
+    }
+    });
+    let d = fake.driver();
+    let mut inputs = LoginInputs::new();
+    inputs.insert("deploymentType".into(), "github.com".into());
+    let state = d
+        .begin_login_with_inputs("github-copilot:0", &inputs)
+        .await
+        .unwrap();
+    assert_eq!(
+        state,
+        LoginState::SigningIn {
+            url: Some("https://example.invalid/device".into()),
+            instructions: Some("Enter code: ABCD-1234".into()),
+            needs_code: false,
+        }
+    );
+    assert_eq!(
+        fake.find("POST", "/provider/github-copilot/oauth/authorize")
+            .unwrap()
+            .body,
+        json!({ "method": 0, "inputs": { "deploymentType": "github.com" } })
+    );
+    d.shutdown().await;
+}
+
+/// An abandoned browser sign-in must not report late, and a new attempt
+/// replaces the old one.
+#[tokio::test]
+async fn restarted_and_cancelled_browser_sign_ins_do_not_report_stale_results() {
+    let calls = Arc::new(Mutex::new(0u32));
+    let c = calls.clone();
+    let fake = serve(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider/auth") => (200, REAL_AUTH_METHODS.into()),
+        ("POST", "/provider/openai/oauth/authorize") => (
+            200,
+            r#"{"url":"https://example.invalid/auth","method":"auto","instructions":""}"#.into(),
+        ),
+        ("POST", "/provider/openai/oauth/callback") => {
+            let n = {
+                let mut n = c.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            if n == 1 {
+                // The first, abandoned attempt fails late.
+                std::thread::sleep(Duration::from_millis(400));
+                (
+                    400,
+                    r#"{"name":"ProviderAuthOauthCallbackFailed","data":{}}"#.into(),
+                )
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+                (200, "true".into())
+            }
+        }
+        ("POST", "/instance/dispose") => (200, "true".into()),
+        ("GET", "/provider") => (
+            200,
+            r#"{"all":[{"id":"openai","name":"OpenAI","source":"api"}],"connected":["openai"]}"#
+                .into(),
+        ),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    d.begin_login_with("openai:0").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    d.begin_login_with("openai:0").await.unwrap();
+    assert_eq!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready {
+            account: Some("OpenAI".into())
+        })
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+
+    // Cancelling a pending browser sign-in stops waiting for it; OpenCode
+    // cannot free its callback port, so the driver asks for a restart.
+    *calls.lock().unwrap() = 0;
+    d.begin_login_with("openai:0").await.unwrap();
+    assert!(matches!(
+        d.cancel_login().await,
+        Err(HarnessError::Unsupported(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    // Nothing pending any more: cancelling again is a no-op.
+    d.cancel_login().await.unwrap();
+    d.shutdown().await;
+}
+
+#[tokio::test]
+async fn sign_out_keeps_env_credentials_and_reports_the_rest() {
+    let fake = serve(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/provider") => (200, REAL_PROVIDERS.into()),
+        ("DELETE", _) => (200, "true".into()),
+        ("POST", "/instance/dispose") => (200, "true".into()),
+        _ => (404, "{}".into()),
+    });
+    let d = fake.driver();
+    let mut rx = d.subscribe();
+    d.logout().await.unwrap();
+    let deleted: Vec<String> = fake
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .map(|r| r.path.clone())
+        .collect();
+    // Anthropic comes from the environment and is left alone.
+    assert_eq!(deleted, ["/auth/opencode", "/auth/openai"]);
+    assert!(matches!(
+        next(&mut rx).await,
+        HarnessEvent::Login(LoginState::Ready { .. })
+    ));
+
+    d.logout_provider("openai").await.unwrap();
+    assert_eq!(
+        fake.reqs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE" && r.path == "/auth/openai")
+            .count(),
+        2
+    );
+    assert!(matches!(
+        d.logout_provider("a/b").await,
+        Err(HarnessError::Protocol(_))
+    ));
     d.shutdown().await;
 }
