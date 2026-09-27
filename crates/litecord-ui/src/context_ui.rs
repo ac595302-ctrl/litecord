@@ -5,7 +5,7 @@
 use eframe::egui::{self, RichText, Ui};
 use litecord_app::view::InboxItem;
 use litecord_layout::Destination;
-use litecord_types::memory::{MemoryKind, MemoryStatus};
+use litecord_types::memory::MemoryKind;
 use litecord_types::notes::UserNote;
 use litecord_types::trust::AgentVisibility;
 use litecord_types::Timestamp;
@@ -24,7 +24,7 @@ impl Workspace {
             Destination::Voice => self.voice_sidebar(ui),
             Destination::Home => self.home_sidebar(ui),
             Destination::Inbox => self.inbox_sidebar(ui),
-            Destination::Omni => self.memory_sidebar(ui),
+            Destination::Omni => self.omni_sidebar(ui),
             Destination::Tasks => self.tasks_sidebar(ui),
             Destination::Friends => self.friends_sidebar(ui),
             Destination::Settings => self.settings_sidebar(ui),
@@ -34,264 +34,18 @@ impl Workspace {
         }
     }
 
-    fn inbox_sidebar(&mut self, ui: &mut Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        ui.label(RichText::new("Inbox").size(18.0));
-        ui.add_space(6.0);
-        let items = visible_attention(&s.inbox.needs_attention);
-        let replies = items
-            .iter()
-            .filter(|i| {
-                matches!(
-                    i,
-                    InboxItem::PendingReply { .. } | InboxItem::ReminderDue { .. }
-                )
-            })
-            .count();
-        let suggestions = items.len() - replies;
-        let counts = [
-            items.len()
-                + s.inbox.pending_actions.len()
-                + s.omni.checkins.len()
-                + s.omni.requests.len(),
-            replies,
-            s.inbox.pending_actions.len() + s.omni.requests.len(),
-            s.omni.checkins.len(),
-            suggestions,
-        ];
-        for (i, label) in INBOX_FILTERS.into_iter().enumerate() {
-            if theme::nav_row(ui, label, Some(counts[i]), self.inbox_filter == i).clicked() {
-                self.inbox_filter = i;
-            }
-        }
-        ui.add_space(12.0);
-        theme::section_label(ui, "Check-ins");
-        let on = s.omni.heartbeat_enabled;
-        ui.label(theme::meta(if on {
-            "Omni checks in on its own when something changes."
-        } else {
-            "Scheduled check-ins are off."
-        }));
-        ui.horizontal(|ui| {
-            if ui
-                .small_button(if on { "Turn off" } else { "Turn on" })
-                .clicked()
-            {
-                self.send(Command::Omni(crate::bridge::OmniCommand::Heartbeats(!on)));
-            }
-            if ui.small_button("Check now").clicked() {
-                self.send(Command::Omni(crate::bridge::OmniCommand::CheckNow));
-            }
-        });
-    }
-
-    fn memory_sidebar(&mut self, ui: &mut Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        ui.label(RichText::new("Memory").size(18.0));
-        ui.add_space(6.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut self.memory_search)
-                .hint_text("Filter memories…")
-                .desired_width(f32::INFINITY),
-        );
-        ui.add_space(6.0);
-        theme::section_label(ui, "Status");
-        let count = |st: MemoryStatus| {
-            s.memory
-                .counts_by_status
-                .iter()
-                .find(|(x, _)| *x == st)
-                .map_or(0, |(_, n)| *n as usize)
-        };
-        let statuses: [(&str, Option<MemoryStatus>); 3] = [
-            ("All", None),
-            ("To review", Some(MemoryStatus::Candidate)),
-            ("Confirmed", Some(MemoryStatus::UserConfirmed)),
-        ];
-        for (label, st) in statuses {
-            let n = st.map_or(s.memory.memories.len(), count);
-            if theme::nav_row(ui, label, Some(n), self.memory_status_filter == st).clicked() {
-                self.memory_status_filter = st;
-            }
-        }
-        ui.add_space(8.0);
-        theme::section_label(ui, "Kind");
-        if theme::nav_row(ui, "Everything", None, self.memory_kind_filter.is_none()).clicked() {
-            self.memory_kind_filter = None;
-        }
-        for kind in [
-            MemoryKind::Commitment,
-            MemoryKind::PendingReply,
-            MemoryKind::ImportantDate,
-            MemoryKind::Observation,
-            MemoryKind::Summary,
-            MemoryKind::Fact,
-            MemoryKind::Preference,
-            MemoryKind::Note,
-        ] {
-            let n = s.memory.memories.iter().filter(|m| m.kind == kind).count();
-            if n == 0 && self.memory_kind_filter != Some(kind) {
-                continue;
-            }
-            if theme::nav_row(
-                ui,
-                kind_label(kind),
-                Some(n),
-                self.memory_kind_filter == Some(kind),
-            )
-            .clicked()
-            {
-                self.memory_kind_filter = Some(kind);
-            }
-        }
-    }
-
-    fn settings_sidebar(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Settings").size(18.0));
-        ui.add_space(6.0);
-        if theme::nav_row(ui, "All settings", None, self.settings_section.is_none()).clicked() {
-            self.settings_section = None;
-        }
-        if theme::nav_row(
-            ui,
-            "Omni",
-            None,
-            self.settings_section.as_deref() == Some("Omni"),
-        )
-        .clicked()
-        {
-            self.settings_section = Some("Omni".into());
-        }
-        if let Some(s) = self.snapshot.clone() {
-            for (section, _) in &s.settings.sections {
-                if theme::nav_row(
-                    ui,
-                    section,
-                    None,
-                    self.settings_section.as_ref() == Some(section),
-                )
-                .clicked()
-                {
-                    self.settings_section = Some(section.clone());
-                }
-            }
-        }
-    }
-
     // ---- inspectors ----
 
     pub(crate) fn destination_inspector_v2(&mut self, ui: &mut Ui) {
         match self.selection.destination {
             Destination::Home => self.home_inspector(ui),
+            Destination::Inbox => self.inbox_inspector(ui),
             Destination::Messages | Destination::Friends => self.contact_inspector(ui),
-            Destination::Omni => self.memory_inspector(ui),
+            Destination::Omni => self.omni_inspector(ui),
             Destination::Tasks => self.task_inspector(ui),
-            Destination::Voice => {
-                theme::section_label(ui, "Room");
-                ui.label(theme::meta(
-                    "Voice controls stay inside the room when you move this panel.",
-                ));
-            }
-            Destination::Settings => {
-                self.runtime_summary(ui);
-                ui.add_space(8.0);
-                self.history_summary(ui);
-                ui.add_space(8.0);
-                self.omni_summary(ui);
-            }
-            _ => self.omni_summary(ui),
-        }
-    }
-
-    /// Settings inspector: live resource figures (Stage A budgets).
-    fn runtime_summary(&mut self, ui: &mut Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        let m = &s.diagnostics.metrics;
-        let kib = |b: u64| format!("{:.0} KiB", b as f64 / 1024.0);
-        section_heading(ui, "Runtime", None);
-        let rows = [
-            (
-                "Memory in use",
-                m.rss_bytes.map_or_else(
-                    || "unknown".to_owned(),
-                    |b| format!("{:.1} MiB", b as f64 / 1_048_576.0),
-                ),
-            ),
-            (
-                "Event queue",
-                format!(
-                    "{} events · {}",
-                    m.event_queue_depth,
-                    kib(m.event_queue_bytes)
-                ),
-            ),
-            ("Open conversation", kib(m.hot_cache_bytes)),
-            (
-                "Sync queue",
-                format!(
-                    "{} pending · {} active",
-                    m.hydration_queue_depth, m.hydration_active
-                ),
-            ),
-            ("Revision", s.diagnostics.revision.to_string()),
-        ];
-        egui::Grid::new("runtime_grid")
-            .num_columns(2)
-            .spacing([12.0, 4.0])
-            .show(ui, |ui| {
-                for (k, v) in rows {
-                    ui.label(theme::meta(k));
-                    ui.label(RichText::new(v).size(13.0).color(theme::SECONDARY));
-                    ui.end_row();
-                }
-            });
-    }
-
-    /// Compact Omni status + latest check-ins, for Home/Inbox/Servers.
-    fn omni_summary(&mut self, ui: &mut Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        ui.label(RichText::new("Omni").size(16.0).color(theme::OMNI));
-        let status = match (&s.omni.status.selected, &s.omni.status.login) {
-            (None, _) => "No agent harness connected".to_owned(),
-            (
-                Some(k),
-                litecord_app::harness::LoginState::Ready { .. }
-                | litecord_app::harness::LoginState::Stopped,
-            ) => {
-                format!("Ready on {}", k.label())
-            }
-            (Some(k), _) => format!("{} · sign-in needed", k.label()),
-        };
-        ui.label(theme::meta(status));
-        if ui.button("Open Omni").clicked() {
-            self.omni_open = true;
-        }
-        ui.add_space(8.0);
-        theme::section_label(ui, "Latest check-ins");
-        if s.omni.checkins.is_empty() {
-            ui.label(theme::meta(if s.omni.heartbeat_enabled {
-                "Nothing needs you right now."
-            } else {
-                "Check-ins are off. Turn them on in Inbox or in Omni settings."
-            }));
-        }
-        for c in s.omni.checkins.iter().take(3) {
-            egui::Frame::new()
-                .fill(theme::OMNI.gamma_multiply(0.06))
-                .corner_radius(6)
-                .inner_margin(8)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(self.display(&c.text)).size(13.0));
-                });
+            Destination::Voice => self.voice_inspector(ui),
+            Destination::Servers => self.server_inspector(ui),
+            Destination::Settings => self.settings_inspector(ui),
         }
     }
 
@@ -670,51 +424,6 @@ impl Workspace {
             }
         }
     }
-
-    /// Settings inspector: every conversation selected for history sync,
-    /// with database size against its quota.
-    fn history_summary(&mut self, ui: &mut Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        let h = &s.history;
-        section_heading(ui, "History sync", None);
-        let mib = |b: u64| b as f64 / 1_048_576.0;
-        if h.quota_bytes == 0 {
-            ui.label(theme::meta(format!(
-                "Off · database {:.1} MiB. Set retention.max_database_mb to enable.",
-                mib(h.db_bytes)
-            )));
-            return;
-        }
-        let used = (h.db_bytes as f32 / h.quota_bytes as f32).clamp(0.0, 1.0);
-        ui.add(egui::ProgressBar::new(used).desired_height(6.0));
-        ui.label(theme::meta(format!(
-            "Database {:.1} of {:.0} MiB",
-            mib(h.db_bytes),
-            mib(h.quota_bytes)
-        )));
-        if h.rows.is_empty() {
-            ui.label(theme::meta(
-                "No conversations selected. Use Sync full history in a chat's details.",
-            ));
-        }
-        for r in h.rows.iter().take(12) {
-            let state = if r.complete {
-                "complete".to_owned()
-            } else if !r.enabled {
-                "stopped".to_owned()
-            } else if let Some(p) = &r.paused_reason {
-                format!("paused: {p}")
-            } else {
-                "syncing".to_owned()
-            };
-            ui.horizontal(|ui| {
-                ui.add(egui::Label::new(self.display(&r.title)).truncate());
-                ui.label(theme::meta(format!("{} msgs · {state}", r.messages)));
-            });
-        }
-    }
 }
 
 /// Attention items as the Inbox shows them: a commitment that already
@@ -776,25 +485,6 @@ pub(crate) fn disclosure(
     let t = text.to_owned();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &t));
     response
-}
-
-/// Section title with an optional right-aligned "See all" style action.
-pub(crate) fn section_heading(ui: &mut Ui, title: &str, action: Option<&str>) -> bool {
-    let mut clicked = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(14.0).color(theme::TEXT).strong());
-        if let Some(a) = action {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                clicked = ui
-                    .add(
-                        egui::Label::new(RichText::new(a).size(12.0).color(theme::PRIMARY_TEXT))
-                            .sense(egui::Sense::click()),
-                    )
-                    .clicked();
-            });
-        }
-    });
-    clicked
 }
 
 /// Distinct http(s) links in the loaded messages, newest first.

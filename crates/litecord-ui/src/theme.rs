@@ -265,16 +265,6 @@ impl Presence {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Online => "online",
-            Self::Idle => "idle",
-            Self::Dnd => "do not disturb",
-            Self::Offline => "offline",
-            Self::None => "",
-        }
-    }
-
     /// Capitalized label for rows ("Online", "Idle").
     pub fn title(self) -> &'static str {
         match self {
@@ -335,57 +325,6 @@ const AVATAR_HUES: [(Color32, Color32); 8] = [
 
 fn avatar_hues(label: &str) -> (Color32, Color32) {
     AVATAR_HUES[(stable_hash(label.trim()) as usize) % AVATAR_HUES.len()]
-}
-
-/// Text avatar with a deterministic color; `online` shows a presence dot.
-pub fn avatar(ui: &mut Ui, label: &str, size: f32, online: bool) -> egui::Response {
-    avatar_presence(
-        ui,
-        label,
-        size,
-        if online {
-            Presence::Online
-        } else {
-            Presence::None
-        },
-    )
-}
-
-/// Text avatar with a status-aware presence marker.
-pub fn avatar_presence(ui: &mut Ui, label: &str, size: f32, presence: Presence) -> egui::Response {
-    let display_name = if label.trim().is_empty() {
-        "Unknown user"
-    } else {
-        label.trim()
-    };
-    let size = size.max(1.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let ring = ui.visuals().panel_fill;
-        paint_avatar(
-            ui.painter(),
-            rect.center(),
-            size,
-            display_name,
-            presence,
-            ring,
-        );
-    }
-    let presence_text = presence.label();
-    let accessible_label = if presence_text.is_empty() {
-        format!("Avatar for {display_name}")
-    } else {
-        format!("Avatar for {display_name}, {presence_text}")
-    };
-    let response = response.on_hover_text(if presence_text.is_empty() {
-        display_name.to_owned()
-    } else {
-        format!("{display_name} · {presence_text}")
-    });
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Image, true, accessible_label.clone())
-    });
-    response
 }
 
 /// Paint a gradient initials avatar centered at `center`. `ring` is the
@@ -625,17 +564,7 @@ pub fn meta(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).font(regular(13.0)).color(MUTED)
 }
 
-/// Title for a destination's center panel plus an optional subtitle.
-pub fn page_header(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
-    crate::kit::page_title(ui, title, subtitle);
-}
-
 /// Honest empty state: what's missing and what to do about it.
 pub fn empty_state(ui: &mut Ui, title: &str, body: &str) {
     crate::kit::empty(ui, None, title, body);
-}
-
-/// A selectable sidebar/filter row with an optional trailing count.
-pub fn nav_row(ui: &mut Ui, label: &str, count: Option<usize>, selected: bool) -> egui::Response {
-    crate::kit::side_item(ui, None, label, count, selected)
 }

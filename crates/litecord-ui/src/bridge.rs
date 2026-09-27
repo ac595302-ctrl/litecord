@@ -257,7 +257,7 @@ fn needs(d: Destination, what: &str) -> bool {
     use Destination as D;
     match what {
         "conversations" => matches!(d, D::Messages | D::Friends | D::Home | D::Omni | D::Tasks),
-        "chat" => d == D::Messages,
+        "chat" => matches!(d, D::Messages | D::Servers),
         "contact" => matches!(d, D::Messages | D::Friends),
         "friends" => matches!(d, D::Friends | D::Home | D::Omni | D::Settings),
         "inbox" => matches!(d, D::Home | D::Inbox | D::Friends),

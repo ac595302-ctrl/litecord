@@ -64,10 +64,17 @@ pub struct Workspace {
     pub task_title_draft: String,
     pub task_priority_draft: litecord_types::tasks::TaskPriority,
     pub task_comment_draft: String,
+    /// Tasks screen: sidebar view, priority filter, tab and week-strip day.
+    pub task_view: usize,
+    pub task_priority_filter: Option<litecord_types::tasks::TaskPriority>,
+    pub task_tab: usize,
+    pub task_day: Option<i64>,
     /// Memory screen filters.
     pub memory_kind_filter: Option<litecord_types::memory::MemoryKind>,
     pub memory_status_filter: Option<litecord_types::memory::MemoryStatus>,
     pub memory_search: String,
+    /// Omni screen: show only memories about this person or conversation.
+    pub memory_entity_filter: Option<litecord_types::entity::EntityId>,
     /// Inbox filter (0 = all).
     pub inbox_filter: usize,
     pub relationship_confirmation:
@@ -146,9 +153,14 @@ impl Workspace {
             task_title_draft: String::new(),
             task_priority_draft: litecord_types::tasks::TaskPriority::default(),
             task_comment_draft: String::new(),
+            task_view: 0,
+            task_priority_filter: None,
+            task_tab: 0,
+            task_day: None,
             memory_kind_filter: None,
             memory_status_filter: None,
             memory_search: String::new(),
+            memory_entity_filter: None,
             inbox_filter: 0,
             relationship_confirmation: None,
             #[cfg(feature = "screenshots")]

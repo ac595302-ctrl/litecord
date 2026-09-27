@@ -15,7 +15,7 @@ impl Workspace {
             "home" => self.home_screen(ui),
             "agent_inbox" => self.inbox_screen(ui),
             "tasks" => self.tasks_screen(ui),
-            "memory" => self.memory_screen_v2(ui),
+            "memory" => self.omni_screen(ui),
             "settings" => self.settings_screen(ui),
             "server_list" => self.server_list(ui, orientation),
             "channel_list" => self.channels(ui),

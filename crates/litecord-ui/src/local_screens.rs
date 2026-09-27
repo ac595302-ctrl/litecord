@@ -3,7 +3,7 @@
 //! These panels never read the database or feature registry directly. They
 //! render the latest bridge snapshot and send explicit commands for changes.
 
-use crate::{bridge::Command, theme, workspace::Workspace};
+use crate::{bridge::Command, kit, ph, theme, workspace::Workspace};
 use eframe::egui::{self, Ui};
 use litecord_app::view::{SettingRow, SettingsViewModel};
 use litecord_features::feature::{FeatureInfo, SettingKind};
@@ -18,92 +18,708 @@ impl Workspace {
         self.render_tasks_screen(ui);
     }
 
-    /// Render recent memory with provenance and explicit candidate review.
-    /// Render settings described by the compiled feature schema and backend
-    /// diagnostics reported by the current snapshot.
+    /// Settings (mock A12): account, Omni, feature sections, data and
+    /// diagnostics as cards; the sidebar picks one section or all.
     pub fn settings_screen(&mut self, ui: &mut Ui) {
         let Some(snapshot) = self.snapshot.clone() else {
             ui.spinner();
             ui.label("Loading settings…");
             return;
         };
-
         let settings = snapshot.settings.clone();
         let private = self.private();
+        let section = self.settings_section.clone();
+        let show = |name: &str| section.as_deref().is_none_or(|s| s == name);
         egui::ScrollArea::vertical()
             .id_salt("settings_screen")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading("Settings");
-                ui.label(
-                    egui::RichText::new("Customize your experience and manage your account.")
-                        .color(theme::MUTED),
+                ui.spacing_mut().item_spacing.y = 10.0;
+                kit::page_title(
+                    ui,
+                    "Settings",
+                    Some("Customize your experience and manage your account."),
                 );
-                ui.add_space(12.0);
-
-                if snapshot.diagnostics.backend_mode == BackendMode::UserSession {
+                if snapshot.diagnostics.backend_mode == BackendMode::UserSession && show("Account")
+                {
                     discord_session_connection(
                         self,
                         ui,
                         &snapshot.account,
                         &snapshot.diagnostics.session,
                     );
-                    ui.add_space(12.0);
                 }
-
-                if self.settings_section.as_deref().is_none_or(|s| s == "Omni") {
-                    self.omni_settings(ui, &snapshot.omni);
-                    ui.add_space(12.0);
+                if show("Account") {
+                    self.account_card(ui, &snapshot);
                 }
-                if self.settings_section.as_deref() == Some("Omni") {
-                    return;
+                if show("Omni") {
+                    settings_card(
+                        ui,
+                        "Omni",
+                        Some("Your assistant, powered by your own Codex or OpenCode account."),
+                        |ui| {
+                            self.omni_settings(ui, &snapshot.omni);
+                        },
+                    );
                 }
-                if settings.sections.is_empty() {
-                    quiet_empty(ui, "No settings are registered in this build.");
-                }
-
-                for (section, rows) in &settings.sections {
-                    if self
-                        .settings_section
-                        .as_ref()
-                        .is_some_and(|selected| selected != section)
-                    {
+                for (name, rows) in &settings.sections {
+                    if !show(name) {
                         continue;
                     }
-                    theme::section_label(ui, section);
-                    egui::Frame::new()
-                        .fill(theme::SIDEBAR)
-                        .inner_margin(egui::Margin::same(10))
-                        .corner_radius(egui::CornerRadius::same(8))
-                        .show(ui, |ui| {
-                            if section.eq_ignore_ascii_case("Plugins") {
-                                for feature in &settings.features {
-                                    feature_row(self, ui, feature);
-                                }
+                    settings_card(ui, name, section_subtitle(name), |ui| {
+                        if name.eq_ignore_ascii_case("Plugins") {
+                            for feature in &settings.features {
+                                feature_row(self, ui, feature);
                             }
-
-                            let mut displayed = 0;
-                            for row in rows {
-                                // The feature registry generates these schema
-                                // entries for the same metadata shown above.
-                                if is_feature_enabled_key(&row.descriptor.key) {
-                                    continue;
-                                }
-                                setting_row(self, ui, row, private);
-                                displayed += 1;
+                        }
+                        let mut displayed = 0;
+                        for row in rows {
+                            // The feature registry generates these schema
+                            // entries for the same metadata shown above.
+                            if is_feature_enabled_key(&row.descriptor.key) {
+                                continue;
                             }
-
-                            if displayed == 0
-                                && (!section.eq_ignore_ascii_case("Plugins")
-                                    || settings.features.is_empty())
-                            {
-                                quiet_empty(ui, "No settings in this section.");
-                            }
-                        });
-                    ui.add_space(12.0);
+                            setting_row(self, ui, row, private);
+                            displayed += 1;
+                        }
+                        if displayed == 0
+                            && (!name.eq_ignore_ascii_case("Plugins")
+                                || settings.features.is_empty())
+                        {
+                            quiet_empty(ui, "No settings in this section.");
+                        }
+                    });
                 }
-
-                backend_diagnostics(ui, &settings, &snapshot.diagnostics);
+                if show("Data") {
+                    settings_card(
+                        ui,
+                        "Data & storage",
+                        Some("What Litecord keeps on this computer."),
+                        |ui| {
+                            self.data_rows(ui, &snapshot);
+                        },
+                    );
+                }
+                if show("Diagnostics") {
+                    settings_card(
+                        ui,
+                        "Diagnostics",
+                        Some("What the connected backend reports."),
+                        |ui| {
+                            backend_diagnostics(ui, &settings, &snapshot.diagnostics);
+                        },
+                    );
+                }
+                ui.add_space(12.0);
             });
+    }
+
+    /// A12 "My account": avatar, names, source, and identity rows.
+    fn account_card(&mut self, ui: &mut Ui, s: &crate::bridge::Snapshot) {
+        let name = self.display(&s.account.display_name);
+        settings_card(ui, "My account", None, |ui| {
+            let (r, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 104.0),
+                egui::Sense::hover(),
+            );
+            theme::paint_avatar(
+                ui.painter(),
+                egui::pos2(r.left() + 50.0, r.center().y),
+                96.0,
+                &name,
+                if s.diagnostics.session.is_online() {
+                    theme::Presence::Online
+                } else {
+                    theme::Presence::Offline
+                },
+                theme::CARD,
+            );
+            let x = r.left() + 118.0;
+            let painter = ui.painter();
+            kit::text_at(
+                painter,
+                egui::pos2(x, r.center().y - 22.0),
+                egui::Align2::LEFT_CENTER,
+                &name,
+                theme::semibold(21.0),
+                theme::TEXT,
+                r.width() - 280.0,
+            );
+            let handle = s
+                .account
+                .username
+                .as_deref()
+                .map(|u| format!("@{}", self.display(u)))
+                .unwrap_or_default();
+            kit::text_at(
+                painter,
+                egui::pos2(x, r.center().y + 2.0),
+                egui::Align2::LEFT_CENTER,
+                &handle,
+                theme::regular(16.0),
+                theme::SECONDARY,
+                r.width() - 280.0,
+            );
+            kit::text_at(
+                painter,
+                egui::pos2(x, r.center().y + 26.0),
+                egui::Align2::LEFT_CENTER,
+                account_source_label(s.account.origin),
+                theme::regular(14.0),
+                theme::MUTED,
+                r.width() - 280.0,
+            );
+            let bw =
+                kit::button_width(painter, Some(ph::ARROW_SQUARE_OUT), "Edit in Discord", 34.0);
+            let br = egui::Rect::from_min_size(
+                egui::pos2(r.right() - bw, r.top() + 8.0),
+                egui::vec2(bw, 34.0),
+            );
+            if kit::button_at(
+                ui,
+                br,
+                ui.id().with("edit_profile"),
+                kit::Kind::Secondary,
+                Some(ph::ARROW_SQUARE_OUT),
+                "Edit in Discord",
+                true,
+            )
+            .clicked()
+            {
+                ui.ctx()
+                    .open_url(egui::OpenUrl::new_tab("https://discord.com/channels/@me"));
+            }
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(theme::lerp(theme::CARD, theme::WORKSPACE, 0.5))
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let rows = [
+                        (ph::USER, "Display name", name.clone()),
+                        (ph::AT, "Username", handle.clone()),
+                        (
+                            ph::IDENTIFICATION_CARD,
+                            "User ID",
+                            s.account
+                                .user_id
+                                .map(|u| u.to_string())
+                                .unwrap_or_else(|| "Not signed in".into()),
+                        ),
+                        (
+                            ph::PLUGS_CONNECTED,
+                            "Connected via",
+                            backend_label(s.diagnostics.backend_mode).to_owned(),
+                        ),
+                    ];
+                    for (i, (g, k, v)) in rows.iter().enumerate() {
+                        if i > 0 {
+                            kit::divider(ui);
+                        }
+                        let (row, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 44.0),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter();
+                        kit::icon(
+                            painter,
+                            row.left_center() + egui::vec2(16.0, 0.0),
+                            g,
+                            18.0,
+                            theme::SECONDARY,
+                        );
+                        painter.text(
+                            row.left_center() + egui::vec2(42.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            *k,
+                            theme::medium(14.5),
+                            theme::TEXT,
+                        );
+                        kit::text_at(
+                            painter,
+                            egui::pos2(row.left() + 180.0, row.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &self.display(v),
+                            theme::regular(14.5),
+                            theme::SECONDARY,
+                            row.width() - 200.0,
+                        );
+                    }
+                });
+        });
+    }
+
+    /// Database size against its quota, history sync and runtime figures.
+    fn data_rows(&mut self, ui: &mut Ui, s: &crate::bridge::Snapshot) {
+        let h = &s.history;
+        let mib = |b: u64| b as f64 / 1_048_576.0;
+        if h.quota_bytes > 0 {
+            kit::progress(
+                ui,
+                (h.db_bytes as f32 / h.quota_bytes as f32).clamp(0.0, 1.0),
+                theme::PRIMARY,
+                8.0,
+            );
+            kit::label(
+                ui,
+                format!(
+                    "{:.1} MiB of {:.0} MiB used",
+                    mib(h.db_bytes),
+                    mib(h.quota_bytes)
+                ),
+                theme::regular(14.0),
+                theme::SECONDARY,
+            );
+        } else {
+            kit::label(
+                ui,
+                format!("Database {:.1} MiB · history sync is off", mib(h.db_bytes)),
+                theme::regular(14.0),
+                theme::SECONDARY,
+            );
+        }
+        let m = &s.diagnostics.metrics;
+        let kib = |b: u64| format!("{:.0} KiB", b as f64 / 1024.0);
+        for (k, v) in [
+            (
+                "Memory in use",
+                m.rss_bytes.map_or_else(
+                    || "unknown".to_owned(),
+                    |b| format!("{:.1} MiB", b as f64 / 1_048_576.0),
+                ),
+            ),
+            (
+                "Event queue",
+                format!(
+                    "{} events · {}",
+                    m.event_queue_depth,
+                    kib(m.event_queue_bytes)
+                ),
+            ),
+            ("Open conversation", kib(m.hot_cache_bytes)),
+        ] {
+            let (row, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+            ui.painter().text(
+                row.left_center(),
+                egui::Align2::LEFT_CENTER,
+                k,
+                theme::regular(14.0),
+                theme::SECONDARY,
+            );
+            ui.painter().text(
+                row.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                v,
+                theme::medium(14.0),
+                theme::TEXT,
+            );
+        }
+        ui.add_space(6.0);
+        kit::label(ui, "Full history sync", theme::medium(15.0), theme::TEXT);
+        if h.rows.is_empty() {
+            kit::para(
+                ui,
+                "No conversations selected. Use Sync full history in a chat's details.",
+                theme::regular(13.5),
+                theme::MUTED,
+            );
+        }
+        for r in h.rows.iter().take(12) {
+            let state = if r.complete {
+                "complete".to_owned()
+            } else if !r.enabled {
+                "stopped".to_owned()
+            } else if let Some(p) = &r.paused_reason {
+                format!("paused: {p}")
+            } else {
+                "syncing".to_owned()
+            };
+            let (row, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+            let painter = ui.painter();
+            kit::text_at(
+                painter,
+                row.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &self.display(&r.title),
+                theme::regular(14.0),
+                theme::TEXT,
+                row.width() * 0.5,
+            );
+            painter.text(
+                row.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                format!("{} msgs · {state}", r.messages),
+                theme::regular(13.0),
+                theme::MUTED,
+            );
+        }
+    }
+
+    // ---- Sidebar and inspector ---------------------------------------------------
+
+    pub(crate) fn settings_sidebar(&mut self, ui: &mut Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        ui.add_space(4.0);
+        kit::search(ui, &mut self.filter, "Search settings...");
+        ui.add_space(12.0);
+        let needle = self.filter.trim().to_lowercase();
+        let visible = |label: &str| needle.is_empty() || label.to_lowercase().contains(&needle);
+        egui::ScrollArea::vertical()
+            .id_salt("settings_sidebar")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let item = |ws: &mut Workspace,
+                            ui: &mut Ui,
+                            glyph: &str,
+                            label: &str,
+                            key: Option<&str>| {
+                    if !visible(label) {
+                        return;
+                    }
+                    let selected = ws.settings_section.as_deref() == key;
+                    if kit::side_item(
+                        ui,
+                        Some((
+                            glyph,
+                            if selected {
+                                theme::PRIMARY_TEXT
+                            } else {
+                                theme::SECONDARY
+                            },
+                        )),
+                        label,
+                        None,
+                        selected,
+                    )
+                    .clicked()
+                    {
+                        ws.settings_section = key.map(str::to_owned);
+                    }
+                };
+                item(self, ui, ph::GEAR_SIX, "All settings", None);
+                item(self, ui, ph::USER_CIRCLE, "My account", Some("Account"));
+                kit::group_label(ui, "App settings");
+                for (section, _) in &s.settings.sections {
+                    item(
+                        self,
+                        ui,
+                        section_glyph(section),
+                        section,
+                        Some(section.as_str()),
+                    );
+                }
+                kit::group_label(ui, "Omni");
+                item(self, ui, ph::SPARKLE, "AI (Omni)", Some("Omni"));
+                kit::group_label(ui, "Data");
+                item(self, ui, ph::DATABASE, "Data & storage", Some("Data"));
+                item(self, ui, ph::CPU, "Diagnostics", Some("Diagnostics"));
+            });
+    }
+
+    /// A12 right column: plan, preferences, connected accounts, storage.
+    pub(crate) fn settings_inspector(&mut self, ui: &mut Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .id_salt("settings_inspector")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 10.0;
+                kit::card(ui, |ui| {
+                    let (h, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 30.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        h.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        "Litecord",
+                        theme::semibold(19.0),
+                        theme::TEXT,
+                    );
+                    let pill = egui::Rect::from_min_size(
+                        egui::pos2(h.right() - 64.0, h.top()),
+                        egui::vec2(64.0, 30.0),
+                    );
+                    ui.painter().rect_filled(pill, 8.0, theme::PRIMARY);
+                    ui.painter().text(
+                        pill.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Local",
+                        theme::medium(14.0),
+                        egui::Color32::WHITE,
+                    );
+                    kit::label(
+                        ui,
+                        "Everything stays on this computer.",
+                        theme::regular(14.0),
+                        theme::SECONDARY,
+                    );
+                    ui.add_space(4.0);
+                    for t in [
+                        "Chat, friends and servers",
+                        "Omni assistant (your own harness)",
+                        "Memory and file metadata, stored locally",
+                        "Approval before any Discord change",
+                    ] {
+                        ui.horizontal(|ui| {
+                            let (g, _) = ui
+                                .allocate_exact_size(egui::vec2(20.0, 22.0), egui::Sense::hover());
+                            kit::icon(
+                                ui.painter(),
+                                g.center(),
+                                ph::CHECK_CIRCLE,
+                                17.0,
+                                theme::SUCCESS,
+                            );
+                            kit::label(
+                                ui,
+                                t,
+                                theme::regular(14.0),
+                                theme::lerp(theme::TEXT, theme::SECONDARY, 0.2),
+                            );
+                        });
+                    }
+                });
+                kit::card(ui, |ui| {
+                    kit::label(ui, "App preferences", theme::semibold(17.0), theme::TEXT);
+                    kit::label(
+                        ui,
+                        "Set up notifications, privacy, and more.",
+                        theme::regular(13.5),
+                        theme::MUTED,
+                    );
+                    ui.add_space(2.0);
+                    let names: Vec<String> = s
+                        .settings
+                        .sections
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .take(5)
+                        .collect();
+                    for (i, n) in names.iter().enumerate() {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 34.0),
+                            egui::Sense::hover(),
+                        );
+                        if kit::list_line(
+                            ui,
+                            rect,
+                            ui.id().with(("pref", i)),
+                            section_glyph(n),
+                            theme::SECONDARY,
+                            n,
+                            theme::TEXT,
+                        )
+                        .clicked()
+                        {
+                            self.settings_section = Some(n.clone());
+                        }
+                    }
+                });
+                kit::card(ui, |ui| {
+                    kit::label(ui, "Connected accounts", theme::semibold(17.0), theme::TEXT);
+                    kit::label(
+                        ui,
+                        "Where Litecord's data and Omni come from.",
+                        theme::regular(13.5),
+                        theme::MUTED,
+                    );
+                    ui.add_space(2.0);
+                    let discord = match s.diagnostics.backend_mode {
+                        BackendMode::Demo => ("Demo data", theme::WARNING),
+                        _ if s.diagnostics.session.is_online() => ("Connected", theme::SUCCESS),
+                        _ => ("Not connected", theme::MUTED),
+                    };
+                    let mut rows: Vec<(&str, &str, String, egui::Color32)> =
+                        vec![(ph::DISCORD_LOGO, "Discord", discord.0.to_owned(), discord.1)];
+                    if let Some(bot) = &s.diagnostics.bot {
+                        rows.push((
+                            ph::ROBOT,
+                            "Discord bot",
+                            session_label(&bot.session).to_owned(),
+                            if bot.session.is_online() {
+                                theme::SUCCESS
+                            } else {
+                                theme::MUTED
+                            },
+                        ));
+                    }
+                    for h in &s.omni.status.harnesses {
+                        let selected = s.omni.status.selected == Some(h.kind);
+                        let (text, color) = if !h.installed {
+                            ("Not installed".to_owned(), theme::MUTED)
+                        } else if selected {
+                            match &s.omni.status.login {
+                                litecord_app::harness::LoginState::Ready { .. }
+                                | litecord_app::harness::LoginState::Stopped => {
+                                    ("In use".to_owned(), theme::SUCCESS)
+                                }
+                                _ => ("Sign in needed".to_owned(), theme::WARNING),
+                            }
+                        } else {
+                            ("Installed".to_owned(), theme::SECONDARY)
+                        };
+                        rows.push((
+                            if h.kind.label().contains("Codex") {
+                                ph::OPEN_AI_LOGO
+                            } else {
+                                ph::TERMINAL_WINDOW
+                            },
+                            h.kind.label(),
+                            text,
+                            color,
+                        ));
+                    }
+                    for (i, (g, name, state, color)) in rows.iter().enumerate() {
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 36.0),
+                            egui::Sense::click(),
+                        );
+                        if resp.hovered() {
+                            ui.painter().rect_filled(
+                                rect.expand2(egui::vec2(6.0, 0.0)),
+                                6.0,
+                                theme::lerp(theme::CARD, theme::HOVER, 0.7),
+                            );
+                        }
+                        let painter = ui.painter();
+                        kit::icon(
+                            painter,
+                            rect.left_center() + egui::vec2(12.0, 0.0),
+                            g,
+                            19.0,
+                            theme::TEXT,
+                        );
+                        kit::text_at(
+                            painter,
+                            rect.left_center() + egui::vec2(34.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            name,
+                            theme::medium(14.5),
+                            theme::TEXT,
+                            rect.width() * 0.45,
+                        );
+                        let sw = kit::text_width(painter, state, theme::regular(13.0));
+                        painter.circle_filled(
+                            egui::pos2(rect.right() - sw - 34.0, rect.center().y),
+                            4.5,
+                            *color,
+                        );
+                        painter.text(
+                            egui::pos2(rect.right() - 24.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            state,
+                            theme::regular(13.0),
+                            theme::SECONDARY,
+                        );
+                        kit::chevron(
+                            painter,
+                            rect.right_center() - egui::vec2(6.0, 0.0),
+                            theme::MUTED,
+                        );
+                        if resp.clicked() {
+                            self.settings_section = Some(if i == 0 {
+                                "Account".into()
+                            } else {
+                                "Omni".into()
+                            });
+                        }
+                    }
+                });
+                kit::card(ui, |ui| {
+                    kit::label(ui, "Data & storage", theme::semibold(17.0), theme::TEXT);
+                    kit::label(
+                        ui,
+                        "Manage your data, memory, and history.",
+                        theme::regular(13.5),
+                        theme::MUTED,
+                    );
+                    ui.add_space(4.0);
+                    let h = &s.history;
+                    let mib = |b: u64| b as f64 / 1_048_576.0;
+                    if h.quota_bytes > 0 {
+                        kit::progress(
+                            ui,
+                            (h.db_bytes as f32 / h.quota_bytes as f32).clamp(0.0, 1.0),
+                            theme::PRIMARY,
+                            8.0,
+                        );
+                        kit::label(
+                            ui,
+                            format!(
+                                "{:.1} MiB of {:.0} MiB used",
+                                mib(h.db_bytes),
+                                mib(h.quota_bytes)
+                            ),
+                            theme::regular(13.5),
+                            theme::SECONDARY,
+                        );
+                    } else {
+                        kit::label(
+                            ui,
+                            format!("{:.1} MiB used", mib(h.db_bytes)),
+                            theme::regular(13.5),
+                            theme::SECONDARY,
+                        );
+                    }
+                    if kit::link(ui, "Storage details").clicked() {
+                        self.settings_section = Some("Data".into());
+                    }
+                });
+            });
+    }
+}
+
+/// A settings section card with a title and optional subtitle.
+fn settings_card(ui: &mut Ui, title: &str, subtitle: Option<&str>, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+        .corner_radius(14)
+        .inner_margin(egui::Margin::same(20))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            kit::label(ui, title, theme::semibold(20.0), theme::TEXT);
+            if let Some(sub) = subtitle {
+                kit::label(ui, sub, theme::regular(14.0), theme::SECONDARY);
+            }
+            ui.add_space(6.0);
+            add(ui);
+        });
+}
+
+fn section_subtitle(name: &str) -> Option<&'static str> {
+    match name.to_lowercase().as_str() {
+        "appearance" => Some("Choose how Litecord looks and feels."),
+        "notifications" => Some("Decide what gets your attention."),
+        "privacy" => Some("Control what is shown on screen and shared with Omni."),
+        "plugins" => Some("Built-in features you can turn on or off."),
+        _ => None,
+    }
+}
+
+fn section_glyph(name: &str) -> &'static str {
+    match name.to_lowercase().as_str() {
+        "appearance" => ph::PALETTE,
+        "notifications" => ph::BELL,
+        "privacy" => ph::SHIELD_CHECK,
+        "plugins" => ph::PUZZLE_PIECE,
+        "voice" => ph::MICROPHONE,
+        "chat" | "messages" => ph::CHAT_CIRCLE,
+        "accessibility" => ph::PERSON,
+        "keybinds" | "shortcuts" => ph::KEYBOARD,
+        _ => ph::SLIDERS_HORIZONTAL,
     }
 }
 
@@ -113,49 +729,34 @@ fn discord_session_connection(
     account: &litecord_app::people::AccountViewModel,
     state: &SessionState,
 ) {
-    theme::section_label(ui, "Discord connection");
+    let (fill, stroke) = kit::accent_colors(theme::WARNING);
     egui::Frame::new()
-        .fill(theme::SIDEBAR)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(egui::CornerRadius::same(8))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0_f32, stroke))
+        .corner_radius(14)
+        .inner_margin(egui::Margin::same(20))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Experimental account connection; Discord forbids account automation and may terminate accounts.",
-                )
-                .color(theme::WARNING),
+            ui.set_width(ui.available_width());
+            kit::label(ui, "Discord connection", theme::semibold(20.0), theme::TEXT);
+            kit::para(
+                ui,
+                "Experimental account connection; Discord forbids account automation and may terminate accounts.",
+                theme::regular(14.0),
+                theme::WARNING,
             );
-            ui.label(
-                egui::RichText::new("This account connection is read-only.")
-                    .size(12.0)
-                    .color(theme::MUTED),
-            );
-            ui.add_space(8.0);
-
+            kit::label(ui, "This account connection is read-only.", theme::regular(13.0), theme::MUTED);
+            ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                theme::chip(
-                    ui,
-                    &format!("Account · {}", workspace.display(&account.display_name)),
-                    theme::SECONDARY,
-                );
+                theme::chip(ui, &format!("Account · {}", workspace.display(&account.display_name)), theme::SECONDARY);
                 theme::chip(
                     ui,
                     &format!("State · {}", session_label(state)),
-                    if state.is_online() {
-                        theme::SUCCESS
-                    } else {
-                        theme::MUTED
-                    },
+                    if state.is_online() { theme::SUCCESS } else { theme::MUTED },
                 );
-                theme::chip(
-                    ui,
-                    &format!("Source · {}", account_source_label(account.origin)),
-                    theme::MUTED,
-                );
+                theme::chip(ui, &format!("Source · {}", account_source_label(account.origin)), theme::MUTED);
             });
-
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Session credential").strong());
+            ui.add_space(6.0);
+            kit::label(ui, "Session credential", theme::medium(14.0), theme::TEXT);
             ui.add_enabled(
                 !workspace.busy,
                 egui::TextEdit::singleline(&mut workspace.discord_session_draft)
@@ -163,27 +764,15 @@ fn discord_session_connection(
                     .desired_width(f32::INFINITY)
                     .hint_text("Paste credential"),
             );
-
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let can_connect =
-                    !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
-                if ui
-                    .add_enabled(can_connect, egui::Button::new("Connect"))
-                    .clicked()
-                {
+                let can_connect = !workspace.busy && !workspace.discord_session_draft.trim().is_empty();
+                if kit::button_ex(ui, kit::Kind::Primary, None, "Connect", 32.0, can_connect).clicked() {
                     let credential = std::mem::take(&mut workspace.discord_session_draft);
-                    workspace.send(Command::ConnectSession(
-                        litecord_core::secrets::Secret::new(credential),
-                    ));
+                    workspace.send(Command::ConnectSession(litecord_core::secrets::Secret::new(credential)));
                 }
-
-                let connected =
-                    account.user_id.is_some() || !matches!(state, SessionState::LoggedOut);
-                if ui
-                    .add_enabled(!workspace.busy && connected, egui::Button::new("Log out"))
-                    .clicked()
-                {
+                let connected = account.user_id.is_some() || !matches!(state, SessionState::LoggedOut);
+                if kit::button_ex(ui, kit::Kind::Secondary, None, "Log out", 32.0, !workspace.busy && connected).clicked() {
                     workspace.discord_session_draft.clear();
                     workspace.send(Command::DiscordSignOut);
                 }
@@ -206,30 +795,14 @@ fn account_source_label(origin: Option<Origin>) -> &'static str {
 
 fn feature_row(workspace: &mut Workspace, ui: &mut Ui, feature: &FeatureInfo) {
     let mut enabled = feature.enabled;
-    let mut changed = false;
     let controls_enabled = !workspace.busy;
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(feature.name)
-                    .strong()
-                    .color(theme::TEXT),
-            );
-            ui.label(
-                egui::RichText::new(feature.description)
-                    .size(12.0)
-                    .color(theme::MUTED),
-            );
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            changed = ui
-                .add_enabled(
-                    controls_enabled,
-                    egui::Checkbox::new(&mut enabled, "Enabled"),
-                )
-                .changed();
-        });
-    });
+    let changed = toggle_row(
+        ui,
+        feature.name,
+        feature.description,
+        &mut enabled,
+        controls_enabled,
+    );
     if changed {
         workspace.send(Command::Setting(
             format!("features.{}.enabled", feature.id),
@@ -244,33 +817,25 @@ fn setting_row(workspace: &mut Workspace, ui: &mut Ui, row: &SettingRow, private
     match &row.descriptor.kind {
         SettingKind::Bool { default } => {
             let mut value = row.value.as_bool().unwrap_or(*default);
-            let mut changed = false;
             let controls_enabled = !workspace.busy;
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(&row.descriptor.label).strong());
-                    ui.label(
-                        egui::RichText::new(&row.descriptor.description)
-                            .size(12.0)
-                            .color(theme::MUTED),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    changed = ui
-                        .add_enabled(controls_enabled, egui::Checkbox::new(&mut value, "Enabled"))
-                        .changed();
-                });
-            });
+            let changed = toggle_row(
+                ui,
+                &row.descriptor.label,
+                &row.descriptor.description,
+                &mut value,
+                controls_enabled,
+            );
             if changed {
                 workspace.send(Command::Setting(key.clone(), Value::Bool(value)));
             }
         }
         SettingKind::Text { .. } | SettingKind::StringList { .. } | SettingKind::Number { .. } => {
-            ui.label(egui::RichText::new(&row.descriptor.label).strong());
-            ui.label(
-                egui::RichText::new(&row.descriptor.description)
-                    .size(12.0)
-                    .color(theme::MUTED),
+            kit::label(ui, &row.descriptor.label, theme::medium(15.0), theme::TEXT);
+            kit::para(
+                ui,
+                &row.descriptor.description,
+                theme::regular(13.5),
+                theme::MUTED,
             );
 
             let id = egui::Id::new(("litecord-setting-draft", key.as_str()));
@@ -311,8 +876,7 @@ fn setting_row(workspace: &mut Workspace, ui: &mut Ui, row: &SettingRow, private
                 let changed = value.as_ref().is_some_and(|v| v != &row.value);
                 let controls_enabled = !workspace.busy && changed;
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(controls_enabled, egui::Button::new("Save"))
+                    if kit::button_ex(ui, kit::Kind::Primary, None, "Save", 30.0, controls_enabled)
                         .clicked()
                     {
                         save = true;
@@ -348,13 +912,8 @@ fn backend_diagnostics(
     settings: &SettingsViewModel,
     diagnostics: &litecord_app::view::DiagnosticsViewModel,
 ) {
-    ui.add_space(4.0);
-    theme::section_label(ui, "Backend diagnostics");
-    egui::Frame::new()
-        .fill(theme::SIDEBAR)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(egui::CornerRadius::same(8))
-        .show(ui, |ui| {
+    {
+        {
             ui.horizontal_wrapped(|ui| {
                 theme::chip(
                     ui,
@@ -422,8 +981,48 @@ fn backend_diagnostics(
                     }
                 });
             }
-        });
-    ui.add_space(8.0);
+        }
+    }
+}
+
+/// Label + description on the left, a toggle on the right. Returns whether
+/// the value changed.
+fn toggle_row(
+    ui: &mut Ui,
+    label: &str,
+    description: &str,
+    value: &mut bool,
+    enabled: bool,
+) -> bool {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover());
+    let painter = ui.painter();
+    kit::text_at(
+        painter,
+        egui::pos2(rect.left(), rect.center().y - 10.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        theme::medium(15.0),
+        theme::TEXT,
+        rect.width() - 70.0,
+    );
+    kit::text_at(
+        painter,
+        egui::pos2(rect.left(), rect.center().y + 11.0),
+        egui::Align2::LEFT_CENTER,
+        description,
+        theme::regular(13.5),
+        theme::MUTED,
+        rect.width() - 70.0,
+    );
+    let t = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 48.0, rect.center().y - 13.0),
+        egui::vec2(46.0, 26.0),
+    );
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(t));
+    kit::toggle(&mut child, value, enabled)
+        .on_hover_text(label)
+        .changed()
 }
 
 #[derive(Clone)]
