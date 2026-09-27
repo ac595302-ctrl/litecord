@@ -55,8 +55,15 @@ impl ReactorCtx {
             (Some(bot), true) => bot,
             _ => &self.hydrator,
         };
-        // Warm the most recent conversations' history in the background, so
-        // lists show real previews without opening each conversation.
+        let committed = match reducer::apply(&self.db, &env, &self.reducer) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(kind, error = %e, "reducer failed; event skipped");
+                return Err(litecord_core::bus::IngestCommitError);
+            }
+        };
+        // The message snapshot has a foreign key to its conversation. Queue
+        // history only after the conversation list is committed.
         if let litecord_core::events::DiscordEvent::ConversationsSnapshot { conversations } =
             &env.event
         {
@@ -72,13 +79,6 @@ impl ReactorCtx {
                 );
             }
         }
-        let committed = match reducer::apply(&self.db, &env, &self.reducer) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(kind, error = %e, "reducer failed; event skipped");
-                return Err(litecord_core::bus::IngestCommitError);
-            }
-        };
         self.metrics.events_ingested.inc();
         self.metrics
             .event_queue_depth

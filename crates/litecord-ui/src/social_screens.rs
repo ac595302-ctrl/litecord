@@ -71,7 +71,13 @@ impl Workspace {
                 .guilds
                 .iter()
                 .find(|guild| Some(guild.guild.id) == self.selected_guild)
-                .and_then(|guild| guild.channels.first())
+                .and_then(|guild| {
+                    guild.channels.iter().find(|row| {
+                        row.channel.capabilities.contains(
+                            litecord_types::social::ChannelCapabilities::READABLE,
+                        )
+                    })
+                })
                 .map(|channel| channel.channel.id);
         }
         ui.add_space(16.0);
@@ -88,7 +94,9 @@ impl Workspace {
                         .clicked()
                     {
                         self.selected_channel = Some(row.channel.id);
-                        if s.diagnostics
+                        if row.channel.capabilities.contains(
+                            litecord_types::social::ChannelCapabilities::READABLE,
+                        ) && s.diagnostics
                             .capabilities
                             .is_usable(litecord_types::capability::Capability::GuildMessages)
                         {
@@ -134,7 +142,11 @@ impl Workspace {
         ui.separator();
         ui.add_space(24.0);
         theme::chip(ui, row.channel.access.as_str(), theme::MUTED);
-        if s.diagnostics
+        if !row.channel.capabilities.contains(
+            litecord_types::social::ChannelCapabilities::READABLE,
+        ) {
+            ui.label("This channel does not contain messages. Choose a text channel to read its history.");
+        } else if s.diagnostics
             .capabilities
             .is_usable(litecord_types::capability::Capability::GuildMessages)
         {
