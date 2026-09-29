@@ -172,10 +172,23 @@ fn load_config_from(
     }
     let mut cfg = loader.load()?;
     cfg.data_dir = anchor_data_dir(&cfg, cli.config.as_deref(), explicit_dir, base);
+    if default_account_folder(cli, &cfg, explicit_dir) {
+        // The default account folder may hold one sub-folder per account.
+        cfg.data_dir = litecord_app::account_slots::resolve(&cfg.data_dir);
+    }
     if let Some(db) = &cli.db {
         cfg.database.path = Some(absolute_or_same(db));
     }
     Ok(cfg)
+}
+
+/// Whether the account data folder is the built-in one, where several
+/// accounts can be kept and switched between (see `account_slots`).
+fn default_account_folder(cli: &Cli, cfg: &LitecordConfig, explicit_dir: bool) -> bool {
+    cfg.backend.kind == BackendKind::UserSession
+        && !explicit_dir
+        && cli.config.is_none()
+        && cli.db.is_none()
 }
 
 /// Where the data directory lives. Relative paths used to resolve against
@@ -303,6 +316,15 @@ async fn main() -> std::process::ExitCode {
         &cfg.logging.filter,
         file_logging.then_some(log_file.as_path()),
     );
+    #[cfg(feature = "gui")]
+    let account_slots = {
+        let explicit = cli.data_dir.is_some() || std::env::var_os("LITECORD_DATA_DIR").is_some();
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        default_account_folder(&cli, &cfg, explicit)
+            .then(|| app_data_base(&env).map(|base| base.join("account")))
+            .flatten()
+            .map(|root| litecord_app::account_slots::AccountSlots::new(root, cfg.data_dir.clone()))
+    };
     let command = match cli.command {
         Some(command) => command,
         #[cfg(feature = "gui")]
@@ -340,6 +362,7 @@ async fn main() -> std::process::ExitCode {
             #[cfg(not(feature = "screenshots"))]
             let options = litecord_ui::WindowOptions {
                 omni_open: omni,
+                account_slots,
                 ..Default::default()
             };
             #[cfg(feature = "screenshots")]
@@ -348,6 +371,7 @@ async fn main() -> std::process::ExitCode {
                 destination: litecord_layout_destination(&screen),
                 size: Some([width, 992.0]),
                 omni_open: omni,
+                account_slots,
             };
             #[cfg(not(feature = "screenshots"))]
             let omni_ask: Option<String> = None;
@@ -408,10 +432,26 @@ async fn gui(
             }
         });
     }
+    let slots = options.account_slots.clone();
     let result =
         litecord_ui::run_with_options(app.clone(), tokio::runtime::Handle::current(), options);
     let report = app.shutdown().await;
     tracing::info!(?report, "GUI shutdown complete");
+    // An account switch closes the window; start again on the new folder
+    // (only now: this process held the data folder's lock until shutdown).
+    if slots.is_some_and(|s| s.restart_requested()) {
+        match std::env::current_exe() {
+            Ok(exe) => {
+                if let Err(e) = std::process::Command::new(exe)
+                    .args(std::env::args_os().skip(1))
+                    .spawn()
+                {
+                    tracing::error!(error = %e, "could not restart after switching accounts");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "could not find Litecord to restart"),
+        }
+    }
     result.map_err(|e| litecord_core::Error::internal(format!("native window: {e}")))
 }
 

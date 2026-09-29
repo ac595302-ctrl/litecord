@@ -62,6 +62,22 @@ pub struct OmniCheckin {
 }
 
 /// Quiet hours wrap midnight when `start > end`; equal values disable them.
+/// The local time zone's offset from UTC at `t`, in milliseconds. Quiet
+/// hours and daily schedules are local times; they used to be read as UTC.
+pub(crate) fn local_offset_ms(t: litecord_types::Timestamp) -> i64 {
+    use chrono::{Offset, TimeZone};
+    chrono::DateTime::from_timestamp_millis(t.as_millis())
+        .map(|d| {
+            i64::from(
+                chrono::Local
+                    .offset_from_utc_datetime(&d.naive_utc())
+                    .fix()
+                    .local_minus_utc(),
+            ) * 1000
+        })
+        .unwrap_or(0)
+}
+
 pub fn in_quiet_hours(hour: u8, start: u8, end: u8) -> bool {
     match start.cmp(&end) {
         std::cmp::Ordering::Equal => false,
@@ -731,7 +747,8 @@ impl OmniService {
             return Ok(Skipped("unavailable"));
         }
         let now = self.shared.db.now().as_millis();
-        let hour = ((now / 3_600_000).rem_euclid(24)) as u8;
+        let local = now + local_offset_ms(self.shared.db.now());
+        let hour = ((local / 3_600_000).rem_euclid(24)) as u8;
         if !force && in_quiet_hours(hour, hb.quiet_start_hour, hb.quiet_end_hour) {
             return Ok(Skipped("quiet hours"));
         }
@@ -782,7 +799,11 @@ impl OmniService {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let at = format!("{:02}:{:02} UTC", hour, (now / 60_000).rem_euclid(60));
+        let at = format!(
+            "{:02}:{:02} local time",
+            hour,
+            (local / 60_000).rem_euclid(60)
+        );
         let prompt = litecord_agent::prompts::HeartbeatPrompt {
             at: &at,
             from_revision: last_rev,

@@ -172,7 +172,7 @@ impl Shared {
             .map_err(|_| BackendError::Offline)?;
         if pin.is_some_and(|id| id != user.id) {
             return Err(BackendError::Authentication(
-                "this database belongs to a different account; use a separate data directory"
+                "This Litecord folder belongs to a different Discord account. To use this one, choose Add another account in Settings."
                     .into(),
             ));
         }
@@ -659,7 +659,7 @@ async fn drive(
                             for event in events {
                                 if let DiscordEvent::CurrentUser { user } = &event {
                                     if shared.check_account(user).is_err() {
-                                        let _=sink.send(SourceEnvelope::new(DiscordSource::UserSession,shared.clock.now(),DiscordEvent::SessionChanged{state:SessionState::Error{message:"connected account does not match this database".into()}})).await;
+                                        let _=sink.send(SourceEnvelope::new(DiscordSource::UserSession,shared.clock.now(),DiscordEvent::SessionChanged{state:SessionState::Error{message:"This Litecord folder belongs to a different Discord account. To use this one, choose Add another account in Settings.".into()}})).await;
                                         break 'connections;
                                     }
                                 }

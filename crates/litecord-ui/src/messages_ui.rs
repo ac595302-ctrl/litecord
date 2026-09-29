@@ -764,6 +764,11 @@ impl Workspace {
         let account_read_only = self.snapshot.as_ref().is_some_and(|s| {
             s.diagnostics.backend_mode == litecord_types::capability::BackendMode::UserSession
         });
+        // Whether Settings can turn writes on; otherwise it is configuration.
+        let writes_switchable = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.settings.can_enable_account_writes);
         let mut open_settings = false;
         // The sending identity is always shown; bot and user are never
         // interchangeable.
@@ -773,9 +778,13 @@ impl Workspace {
                 Some(DiscordIdentity::ApplicationBot) => (ph::ROBOT, "Sending as your bot"),
                 Some(DiscordIdentity::UserSocialSdk) => (ph::USER, "Sending as you"),
                 Some(DiscordIdentity::UserSession) => (ph::USER, "Discord account"),
-                None if account_read_only => (
+                None if account_read_only && writes_switchable => (
                     ph::LOCK_SIMPLE,
                     "Sending is off: account writes are disabled · Change in Settings",
+                ),
+                None if account_read_only => (
+                    ph::LOCK_SIMPLE,
+                    "Read-only account: this build does not send messages",
                 ),
                 None => (ph::LOCK_SIMPLE, "Read only here · Open in Discord to reply"),
             };
@@ -787,13 +796,15 @@ impl Workspace {
                         .font(theme::regular(12.0))
                         .color(theme::FAINT),
                 )
-                .sense(if identity.is_none() && account_read_only {
-                    Sense::click()
-                } else {
-                    Sense::hover()
-                }),
+                .sense(
+                    if identity.is_none() && account_read_only && writes_switchable {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    },
+                ),
             );
-            if identity.is_none() && account_read_only && label.clicked() {
+            if identity.is_none() && account_read_only && writes_switchable && label.clicked() {
                 open_settings = true;
             }
             if count > 1800 {

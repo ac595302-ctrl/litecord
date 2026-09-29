@@ -43,8 +43,26 @@ pub trait CandidateExtractor: Send + Sync + std::fmt::Debug {
     fn extract(&self, input: &ExtractionInput<'_>) -> Vec<NewMemory>;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct HeuristicExtractor;
+#[derive(Debug, Clone, Copy)]
+pub struct HeuristicExtractor {
+    /// Offset of the user's time zone from UTC at a given instant, so
+    /// "today" and "tomorrow" mean the user's days, not UTC's.
+    local_offset_ms: fn(Timestamp) -> i64,
+}
+
+impl Default for HeuristicExtractor {
+    fn default() -> Self {
+        Self {
+            local_offset_ms: |_| 0,
+        }
+    }
+}
+
+impl HeuristicExtractor {
+    pub fn with_local_offset(local_offset_ms: fn(Timestamp) -> i64) -> Self {
+        Self { local_offset_ms }
+    }
+}
 
 const COMMITMENT_MARKERS: &[&str] = &[
     "i'll ",
@@ -97,9 +115,11 @@ fn first_sentence_with<'a>(text: &'a str, lower: &str, marker: &str) -> Option<&
     Some(text[start..end].trim())
 }
 
-/// Resolve "today/tomorrow/tonight/<weekday>" relative to `at` (UTC days).
-fn resolve_day(lower: &str, at: Timestamp) -> Option<(Timestamp, &'static str)> {
-    let day_start = at.as_millis().div_euclid(DAY_MS) * DAY_MS;
+/// Resolve "today/tomorrow/tonight/<weekday>" relative to `at`, in a zone
+/// `offset_ms` from UTC (the end of that local day, as a UTC instant).
+fn resolve_day(lower: &str, at: Timestamp, offset_ms: i64) -> Option<(Timestamp, &'static str)> {
+    let local_day_start = (at.as_millis() + offset_ms).div_euclid(DAY_MS) * DAY_MS;
+    let day_start = local_day_start - offset_ms;
     let end_of = |d: i64| Timestamp::from_millis(day_start + d * DAY_MS + DAY_MS - 1);
     let words: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
@@ -112,7 +132,7 @@ fn resolve_day(lower: &str, at: Timestamp) -> Option<(Timestamp, &'static str)> 
             _ => {}
         }
     }
-    let weekday_now = ((day_start.div_euclid(DAY_MS) + 3).rem_euclid(7)) as usize; // Mon=0
+    let weekday_now = ((local_day_start.div_euclid(DAY_MS) + 3).rem_euclid(7)) as usize; // Mon=0
     for w in &words {
         if let Some(idx) = WEEKDAYS.iter().position(|d| d == w) {
             let ahead = (idx + 7 - weekday_now) % 7;
@@ -152,7 +172,11 @@ impl CandidateExtractor for HeuristicExtractor {
             .iter()
             .find_map(|m| first_sentence_with(text, &lower, m))
         {
-            let due = resolve_day(&sentence.to_lowercase(), msg.sent_at);
+            let due = resolve_day(
+                &sentence.to_lowercase(),
+                msg.sent_at,
+                (self.local_offset_ms)(msg.sent_at),
+            );
             let what = truncate(sentence, 200);
             let mut m = NewMemory::new(
                 MemoryKind::Commitment,
@@ -222,7 +246,9 @@ impl CandidateExtractor for HeuristicExtractor {
                 .split(|c: char| !c.is_alphanumeric())
                 .any(|t| t == **w)
         }) {
-            if let Some((at, label)) = resolve_day(&lower, msg.sent_at) {
+            if let Some((at, label)) =
+                resolve_day(&lower, msg.sent_at, (self.local_offset_ms)(msg.sent_at))
+            {
                 let mut m = NewMemory::new(
                     MemoryKind::ImportantDate,
                     format!("{event} {label} (from {})", input.author_name),
@@ -251,6 +277,20 @@ impl CandidateExtractor for HeuristicExtractor {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tomorrow_is_the_users_tomorrow() {
+        const HOUR: i64 = 3_600_000;
+        // 21:00 on day 10 in UTC-5 is 02:00 on day 11 in UTC.
+        let sent = Timestamp::from_millis(11 * DAY_MS + 2 * HOUR);
+        let (due, _) = resolve_day("tomorrow", sent, -5 * HOUR).unwrap();
+        // End of local day 11 = 23:59:59.999 at UTC-5 = day 12 04:59:59.999 UTC.
+        assert_eq!(due.as_millis(), 12 * DAY_MS + 5 * HOUR - 1);
+        // Read as UTC it would have been the end of day 12 UTC.
+        let (utc, _) = resolve_day("tomorrow", sent, 0).unwrap();
+        assert_eq!(utc.as_millis(), 13 * DAY_MS - 1);
+    }
+
     use super::*;
     use litecord_types::ids::{ConversationId, MessageId};
     use litecord_types::memory::MemoryStatus;
@@ -273,7 +313,7 @@ mod tests {
 
     fn run(author: u64, text: &str) -> Vec<NewMemory> {
         let m = msg(author, text);
-        HeuristicExtractor.extract(&ExtractionInput {
+        HeuristicExtractor::default().extract(&ExtractionInput {
             message: &m,
             me: Some(UserId(1000)),
             author_name: "ada",

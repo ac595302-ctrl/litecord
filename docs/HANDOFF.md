@@ -94,9 +94,12 @@ Known, not fixed:
 * macOS has no embedded Discord sign-in page (Windows-only WebView2);
   password sign-in often hits a CAPTCHA. Workaround: Settings → Advanced
   → session credential.
-* Logging out and signing in with a different account fails ("this
-  database belongs to a different account"): the data folder is pinned to
-  one account and the UI has no way to pick another folder.
+* ~~Signing in with a different account failed.~~ Fixed: Settings →
+  Accounts keeps one data folder per account (`account_slots.rs`) and
+  switches by restarting.
+* Account writes can only be enabled with a config file
+  (`[backend] access = "read_write"`); Settings says so rather than
+  offering a switch that is always greyed out.
 * `friends_view` runs two queries per relationship (N+1) on every
   snapshot; fine for hundreds of friends, slow for thousands.
 

@@ -33,6 +33,9 @@ pub struct WindowOptions {
     pub destination: Option<litecord_layout::Destination>,
     /// Start with the Omni panel open.
     pub omni_open: bool,
+    /// Saved account folders (default data folder only): Settings lists
+    /// them and can switch, which closes the window for a restart.
+    pub account_slots: Option<litecord_app::account_slots::AccountSlots>,
     #[cfg(feature = "screenshots")]
     pub screenshot: Option<std::path::PathBuf>,
 }
@@ -65,6 +68,7 @@ pub fn run_with_options(
                 workspace.navigate(destination);
             }
             workspace.omni_open = options.omni_open;
+            workspace.account_slots = options.account_slots;
             #[cfg(feature = "screenshots")]
             {
                 workspace.screenshot_path = options.screenshot;

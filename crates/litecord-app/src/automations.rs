@@ -229,6 +229,18 @@ pub fn schedule_due(
     last_run: Option<Timestamp>,
     now: Timestamp,
 ) -> bool {
+    schedule_due_at(trigger, last_run, now, 0)
+}
+
+/// [`schedule_due`] with daily times and weekdays in a zone `offset_ms`
+/// from UTC. "Daily at 08:00" used to mean 08:00 UTC, so the morning brief
+/// ran at midnight or mid-afternoon depending on where you live.
+pub fn schedule_due_at(
+    trigger: &AutomationTrigger,
+    last_run: Option<Timestamp>,
+    now: Timestamp,
+    offset_ms: i64,
+) -> bool {
     const DAY: i64 = 86_400_000;
     let now_ms = now.as_millis();
     match trigger {
@@ -236,10 +248,11 @@ pub fn schedule_due(
             minute_of_day,
             weekdays,
         } => {
-            let day_start = now_ms.div_euclid(DAY) * DAY;
+            let local = now_ms + offset_ms;
+            let day_start = local.div_euclid(DAY) * DAY - offset_ms;
             let occurrence = day_start + i64::from(*minute_of_day) * 60_000;
             // 1970-01-01 was a Thursday (index 3 with Monday = 0).
-            let weekday = (now_ms.div_euclid(DAY) + 3).rem_euclid(7);
+            let weekday = (local.div_euclid(DAY) + 3).rem_euclid(7);
             let day_ok = *weekdays == 0 || weekdays & (1 << weekday) != 0;
             day_ok
                 && now_ms >= occurrence
@@ -331,7 +344,8 @@ impl OmniService {
     pub async fn automations_tick(&self) -> Result<Vec<AutomationOutcome>> {
         let now = self.db().now();
         let hb = self.config().heartbeat.clone();
-        let hour = ((now.as_millis() / 3_600_000).rem_euclid(24)) as u8;
+        let offset = crate::omni::local_offset_ms(now);
+        let hour = (((now.as_millis() + offset) / 3_600_000).rem_euclid(24)) as u8;
         let quiet = in_quiet_hours(hour, hb.quiet_start_hour, hb.quiet_end_hour);
         let mut out = Vec::new();
         for a in self.db().read(|r| repos::omni::automations(r))? {
@@ -367,7 +381,7 @@ impl OmniService {
                         .write(|tx| repos::omni::set_automation_checked(tx, a.id, current))?;
                 }
                 out.push(outcome);
-            } else if schedule_due(&trigger, a.last_run_at, now) {
+            } else if schedule_due_at(&trigger, a.last_run_at, now, offset) {
                 out.push(self.run(&a, &trigger.describe(), "").await?);
             }
         }
@@ -558,6 +572,21 @@ mod tests {
             "Saturday"
         );
         assert_eq!(t.describe(), "daily at 09:00 UTC on weekdays");
+    }
+
+    #[test]
+    fn daily_time_is_local() {
+        // 08:00 in UTC-5 is 13:00 UTC.
+        let t = AutomationTrigger::Daily {
+            minute_of_day: 8 * 60,
+            weekdays: 0,
+        };
+        let offset = -5 * HOUR;
+        assert!(
+            !schedule_due_at(&t, None, at(THU + 8 * HOUR), offset),
+            "08:00 UTC is 03:00 local"
+        );
+        assert!(schedule_due_at(&t, None, at(THU + 13 * HOUR), offset));
     }
 
     #[test]

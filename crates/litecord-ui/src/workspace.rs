@@ -55,6 +55,7 @@ pub struct Workspace {
     pub selected_task: Option<TaskId>,
     /// Omni slide-over panel (available on every destination).
     pub omni_open: bool,
+    pub account_slots: Option<litecord_app::account_slots::AccountSlots>,
     pub omni_draft: String,
     /// Sign-in inputs (cleared after submit; the key is never kept longer).
     pub omni_code_draft: String,
@@ -153,6 +154,7 @@ impl Workspace {
             selected_memory: None,
             selected_task: None,
             omni_open: false,
+            account_slots: None,
             omni_draft: String::new(),
             omni_code_draft: String::new(),
             omni_key_draft: String::new(),

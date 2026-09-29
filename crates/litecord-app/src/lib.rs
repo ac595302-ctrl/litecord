@@ -6,6 +6,7 @@
 //! [`view`]). A UI depends on this crate only.
 
 mod account_recovery;
+pub mod account_slots;
 mod app;
 pub mod automations;
 pub mod freshness;

@@ -213,7 +213,7 @@ impl AppBuilder {
                 metrics.clone(),
             )
         });
-        let memory = MemoryService::with_heuristics(db.clone());
+        let memory = MemoryService::with_heuristics_local(db.clone(), crate::omni::local_offset_ms);
         let mut executor = DefaultExecutor::new(db.clone(), Some(backend.clone()));
         if let Some(b) = &bot {
             executor = executor.with_bot(b.clone());

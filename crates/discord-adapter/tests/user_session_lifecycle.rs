@@ -107,7 +107,7 @@ async fn failed_persistence_does_not_pin_the_unaccepted_account() {
         .authenticate_session(Secret::new("dummy".into()))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("different account"));
+    assert!(error.to_string().contains("different Discord account"));
 }
 
 fn saved_account(transport: FakeTransport) -> UserSessionBackend {

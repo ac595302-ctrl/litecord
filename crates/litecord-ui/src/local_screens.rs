@@ -154,7 +154,7 @@ fn discord_session_connection(
                     workspace.send(Command::AccountWrites(enabled));
                 }
                 if !settings.can_enable_account_writes {
-                    ui.label(egui::RichText::new("Read-only access is required by configuration.").size(12.0).color(theme::MUTED));
+                    ui.label(egui::RichText::new("This build opens the account read-only. Allowing writes needs a configuration file with [backend] access = \"read_write\" (see docs/PART_B_PLUS_ACCOUNT_WRITES.md).").size(12.0).color(theme::MUTED));
                 }
             }
 
@@ -308,7 +308,68 @@ fn discord_session_connection(
                 workspace.discord_totp_required = false;
                 workspace.send(Command::DiscordSignOut);
             }
+            account_switcher(workspace, ui, &account.display_name, account.user_id.is_some());
         });
+}
+
+/// Saved accounts, one data folder each. Signing in with a second account
+/// on the first account's folder is refused (the data would mix), so this
+/// is how to use another account, or go back to a previous one.
+fn account_switcher(workspace: &mut Workspace, ui: &mut Ui, name: &str, signed_in: bool) {
+    let Some(slots) = workspace.account_slots.clone() else {
+        return;
+    };
+    if signed_in {
+        slots.remember_label(name);
+    }
+    let saved = slots.list();
+    if !signed_in && saved.len() <= 1 {
+        // Nothing to switch to, and adding another empty folder is pointless.
+        return;
+    }
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new("Accounts").strong());
+    ui.label(
+        egui::RichText::new(
+            "Each Discord account keeps its own messages and memory. Switching restarts Litecord.",
+        )
+        .size(12.0)
+        .color(theme::MUTED),
+    );
+    let mut error = None;
+    for slot in saved {
+        ui.horizontal(|ui| {
+            ui.label(if slot.active {
+                format!("{} (open now)", workspace.display(&slot.label))
+            } else {
+                workspace.display(&slot.label)
+            });
+            if !slot.active
+                && ui
+                    .add_enabled(!workspace.busy, egui::Button::new("Switch"))
+                    .clicked()
+            {
+                match slots.switch_to(&slot.dir) {
+                    Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(e) => error = Some(format!("Could not switch accounts: {e}")),
+                }
+            }
+        });
+    }
+    if signed_in
+        && ui
+            .add_enabled(!workspace.busy, egui::Button::new("Add another account"))
+            .on_hover_text("Opens an empty account folder; sign in there")
+            .clicked()
+    {
+        match slots.add_account() {
+            Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => error = Some(format!("Could not add an account: {e}")),
+        }
+    }
+    if error.is_some() {
+        workspace.notice = error;
+    }
 }
 
 fn account_source_label(origin: Option<Origin>) -> &'static str {

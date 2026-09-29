@@ -214,7 +214,19 @@ impl MemoryService {
     /// [`HeuristicExtractor`] — the default and, today, the only extractor
     /// this workspace ships. No LLM required.
     pub fn with_heuristics(db: Database) -> Self {
-        Self::new(db, Arc::new(HeuristicExtractor))
+        Self::new(db, Arc::new(HeuristicExtractor::default()))
+    }
+
+    /// [`MemoryService::with_heuristics`], reading "today"/"tomorrow" in
+    /// the user's time zone.
+    pub fn with_heuristics_local(
+        db: Database,
+        local_offset_ms: fn(litecord_types::Timestamp) -> i64,
+    ) -> Self {
+        Self::new(
+            db,
+            Arc::new(HeuristicExtractor::with_local_offset(local_offset_ms)),
+        )
     }
 
     /// Replace the [`Summarizer`] (default: [`HeuristicSummarizer`]). A

@@ -912,11 +912,17 @@ impl Workspace {
                 "Litecord is offline. Requests can be answered once it reconnects.",
                 false,
             )
-        } else if account {
+        } else if account && s.settings.can_enable_account_writes {
             (
                 "Answering friend requests from Litecord needs account writes, which are off. \
                  You can allow them in Settings (read the warning there first).",
                 true,
+            )
+        } else if account {
+            (
+                "This build opens your account read-only, so friend requests are answered in \
+                 Discord: select a request and choose Open profile in Discord.",
+                false,
             )
         } else {
             (
