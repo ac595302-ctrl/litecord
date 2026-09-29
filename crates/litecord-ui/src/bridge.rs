@@ -108,6 +108,8 @@ pub enum Command {
     DiscordTotp(litecord_core::secrets::Secret<String>),
     /// Sign out of the current Discord user session.
     DiscordSignOut,
+    /// Reconnect with the saved sign-in.
+    DiscordReconnect,
 }
 
 /// Omni panel and settings commands.
@@ -287,11 +289,24 @@ pub(crate) fn snapshot(
     let d = selection.destination;
     // Reload when visible (or nothing to reuse yet); otherwise share the
     // previous value.
+    //
+    // A failed read keeps that view's last good value (and is logged) rather
+    // than failing the whole snapshot: one broken panel used to blank every
+    // screen, and before the first success the window stayed empty.
     macro_rules! view {
         ($field:ident, $what:expr, $load:expr) => {
             match prev {
                 Some(p) if !needs(d, $what) => p.$field.clone(),
-                _ => Arc::new($load),
+                _ => match (|| -> litecord_core::Result<_> { Ok($load) })() {
+                    Ok(v) => Arc::new(v),
+                    Err(e) => match prev {
+                        Some(p) => {
+                            tracing::warn!(view = $what, error = %e, "view refresh failed; keeping the last one");
+                            p.$field.clone()
+                        }
+                        None => return Err(labelled($what, e)),
+                    },
+                },
             }
         };
     }
@@ -311,13 +326,23 @@ pub(crate) fn snapshot(
             Some(id) => match app.conversation_view(id, 200, selection.before) {
                 Ok(chat) => (
                     Some(Arc::new(chat)),
-                    Some(Arc::new(app.conversation_files_view(id, 30, None)?)),
+                    // Files are secondary: never lose the chat over them.
+                    app.conversation_files_view(id, 30, None)
+                        .map_err(|e| tracing::warn!(error = %e, "shared files view failed"))
+                        .ok()
+                        .map(Arc::new),
                 ),
                 Err(e) if e.kind() == litecord_core::error::ErrorKind::NotFound => {
                     selection.conversation = None;
                     (None, None)
                 }
-                Err(e) => return Err(e),
+                Err(e) => match prev.filter(|_| same_conversation) {
+                    Some(p) => {
+                        tracing::warn!(error = %e, "conversation refresh failed; keeping the last one");
+                        (p.chat.clone(), p.files.clone())
+                    }
+                    None => return Err(labelled("this conversation", e)),
+                },
             },
             None => (None, None),
         },
@@ -333,11 +358,13 @@ pub(crate) fn snapshot(
         Some(p) if !needs(d, "contact") && p.selection.contact == selection.contact => {
             p.contact.clone()
         }
-        _ => contact_id
-            .map(|id| app.contact_view(id))
-            .transpose()?
-            .flatten()
-            .map(Arc::new),
+        _ => match contact_id.map(|id| app.contact_view(id)).transpose() {
+            Ok(contact) => contact.flatten().map(Arc::new),
+            Err(e) => {
+                tracing::warn!(error = %e, "contact view failed");
+                prev.and_then(|p| p.contact.clone())
+            }
+        },
     };
     let task_detail = match prev {
         Some(p) if d != Destination::Tasks && p.selection.task == selection.task => {
@@ -362,9 +389,16 @@ pub(crate) fn snapshot(
         layouts: app.layout_profiles_view()?,
         diagnostics: app.diagnostics_view()?,
         account: app.account_view()?,
-        palette: app.command_palette(&selection.palette_query, selection.conversation)?,
-        shortcuts: app.command_shortcuts(selection.conversation)?,
-        omni: Arc::new(app.omni().view(selection.omni_session)?),
+        palette: app
+            .command_palette(&selection.palette_query, selection.conversation)
+            .map_err(|e| labelled("the command palette", e))?,
+        shortcuts: app
+            .command_shortcuts(selection.conversation)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "shortcuts view failed");
+                prev.map(|p| p.shortcuts.clone()).unwrap_or_default()
+            }),
+        omni: view!(omni, "omni", app.omni().view(selection.omni_session)?),
         contact,
         files,
         task_detail,
@@ -372,6 +406,12 @@ pub(crate) fn snapshot(
         conversations,
         chat,
     })
+}
+
+/// Name the part of the workspace that failed, so the notice says more than
+/// a bare database error.
+fn labelled(what: &str, e: litecord_core::Error) -> litecord_core::Error {
+    litecord_core::Error::new(e.kind(), format!("Couldn't load {what}: {e}"))
 }
 
 pub(crate) async fn execute(
@@ -474,6 +514,7 @@ pub(crate) async fn execute(
             c.discord_login_step = Some(litecord_core::ports::AccountLoginStep::Connected);
         }
         Command::DiscordSignOut => app.sign_out().await?,
+        Command::DiscordReconnect => app.reconnect().await?,
         Command::CreateTask(draft) => {
             if let litecord_actions::ProposeOutcome::Executed {
                 result:

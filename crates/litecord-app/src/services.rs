@@ -1212,6 +1212,18 @@ impl LitecordApp {
         Ok(self.inner.backend.complete_totp(code).await?)
     }
 
+    /// Reconnect with the saved sign-in after the connection stopped (network
+    /// loss, reconnect limit, a failed launch check). Errors that need a
+    /// fresh sign-in are reported through the session state as before.
+    pub async fn reconnect(&self) -> Result<()> {
+        self.inner.backend.disconnect().await?;
+        Ok(self
+            .inner
+            .backend
+            .connect(self.inner.ingest.clone())
+            .await?)
+    }
+
     /// Sign out of Discord. Local memory is kept (it is the user's data);
     /// hydration pauses until the next sign-in.
     pub async fn sign_out(&self) -> Result<()> {

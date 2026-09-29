@@ -940,6 +940,19 @@ impl Workspace {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::DIVIDER))
             .show_inside(root, |ui| {
+                if self.snapshot.is_none() {
+                    // Every pane needs the first snapshot; say so instead
+                    // of showing empty panels. Errors appear in the notice.
+                    ui.centered_and_justified(|ui| {
+                        kit::label(
+                            ui,
+                            "Loading your workspace…",
+                            theme::regular(15.0),
+                            theme::SECONDARY,
+                        );
+                    });
+                    return;
+                }
                 let tree = self.profile.shell.project(self.selection.destination);
                 if let Some(t) = tree {
                     self.render_tree(ui, &t, ui.max_rect(), true);

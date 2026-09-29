@@ -370,6 +370,7 @@ impl AppBuilder {
                 ui_activity,
                 features: RwLock::new(features),
                 commands: RwLock::new(commands),
+                ingest,
                 instance_lock: std::sync::Mutex::new(instance_lock),
             }),
         })
@@ -438,6 +439,8 @@ pub(crate) struct AppInner {
     pub ui_activity: Arc<std::sync::atomic::AtomicI64>,
     pub features: RwLock<FeatureRegistry>,
     pub commands: RwLock<CommandRegistry>,
+    /// The backend's event sink, kept so the session can be reconnected.
+    pub ingest: litecord_core::bus::IngestSender,
     /// Released by `shutdown` (or on drop); see [`lock_data_folder`].
     instance_lock: std::sync::Mutex<Option<std::fs::File>>,
 }

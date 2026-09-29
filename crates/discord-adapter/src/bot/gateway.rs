@@ -270,6 +270,12 @@ impl GatewaySession {
         json!({ "op": OP_HEARTBEAT, "d": self.sequence }).to_string()
     }
 
+    /// Forget the session so the next connection identifies fresh (and
+    /// receives a full READY) instead of resuming.
+    pub fn invalidate_session(&mut self) {
+        self.clear_session();
+    }
+
     /// Clears session identity so the next Hello identifies fresh.
     fn clear_session(&mut self) {
         self.session_id = None;

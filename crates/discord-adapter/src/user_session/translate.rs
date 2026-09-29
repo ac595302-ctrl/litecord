@@ -159,20 +159,45 @@ pub fn dispatch(event: &str, raw: &Value) -> Result<Vec<DiscordEvent>, Translate
                     }
                 }
             }
+            // One entry Litecord cannot read must not discard the whole
+            // account snapshot (which used to stop the connection). Skip it
+            // and let hydration fetch that list again.
             if let Some(guilds) = raw.get("guilds").and_then(Value::as_array) {
                 for g in guilds {
-                    out.extend(guild(g)?);
+                    match guild(g) {
+                        Ok(events) => out.extend(events),
+                        Err(error) => {
+                            tracing::warn!(%error, "skipped an unreadable server in READY");
+                            out.push(DiscordEvent::Invalidated {
+                                key: HydrationKey::Guilds,
+                            });
+                        }
+                    }
                 }
             }
             if let Some(channels) = raw.get("private_channels").and_then(Value::as_array) {
                 for c in channels {
-                    out.extend(private_channel(c)?);
+                    match private_channel(c) {
+                        Ok(events) => out.extend(events),
+                        Err(error) => {
+                            tracing::warn!(%error, "skipped an unreadable DM in READY");
+                            out.push(DiscordEvent::Invalidated {
+                                key: HydrationKey::DmSummaries,
+                            });
+                        }
+                    }
                 }
             }
             if let Some(relationships) = raw.get("relationships").and_then(Value::as_array) {
                 for r in relationships {
-                    let (relationship, user) = relationship(r)?;
-                    out.push(DiscordEvent::RelationshipUpserted { relationship, user });
+                    match relationship(r) {
+                        Ok((relationship, user)) => {
+                            out.push(DiscordEvent::RelationshipUpserted { relationship, user })
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "skipped an unreadable friend entry in READY");
+                        }
+                    }
                 }
             }
             out.push(DiscordEvent::SessionChanged {
@@ -258,6 +283,31 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn one_unreadable_entry_does_not_discard_ready() {
+        let events = dispatch(
+            "READY",
+            &json!({
+                "user": {"id":"1","username":"owner"},
+                "guilds": [{"name":"no id"}],
+                "private_channels": [
+                    {"id":"2","type":1,"recipients":[{"id":"3","username":"friend"}]},
+                    {"id":"9","type":99}
+                ],
+                "relationships": [{"type":1}, {"id":"3","type":1}]
+            }),
+        )
+        .unwrap();
+        assert!(events.iter().any(|e| matches!(e, DiscordEvent::ConversationUpserted { conversation } if conversation.id == ConversationId(2))));
+        assert!(events.iter().any(|e| matches!(e, DiscordEvent::RelationshipUpserted { relationship, .. } if relationship.user_id == UserId(3))));
+        assert!(matches!(
+            events.last(),
+            Some(DiscordEvent::SessionChanged {
+                state: SessionState::Ready
+            })
+        ));
+    }
+
     #[test]
     fn partial_edit_requests_refresh_without_erasing_content() {
         assert!(matches!(

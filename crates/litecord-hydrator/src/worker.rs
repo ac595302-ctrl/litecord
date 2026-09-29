@@ -20,6 +20,7 @@ use litecord_core::metrics::Metrics;
 use litecord_core::ports::{BackendError, SocialBackend};
 use litecord_types::ids::GuildId;
 use litecord_types::social::SessionState;
+use litecord_types::Timestamp;
 
 use crate::error::HydrationError;
 use crate::freshness::{FreshnessStore, StalenessPolicy};
@@ -55,7 +56,12 @@ pub struct Hydrator {
     notify: Notify,
     max_concurrent: usize,
     recent_messages_limit: u32,
+    /// When a pause caused by a failed request (not by the session) ends.
+    offline_retry_at: std::sync::Mutex<Option<Timestamp>>,
 }
+
+/// How long hydration waits after a request fails for lack of a connection.
+const OFFLINE_RETRY: litecord_types::DurationMs = litecord_types::DurationMs(15_000);
 
 impl Hydrator {
     pub fn new(
@@ -78,6 +84,7 @@ impl Hydrator {
             notify: Notify::new(),
             max_concurrent: config.max_concurrent_jobs.max(1),
             recent_messages_limit: config.recent_messages_limit,
+            offline_retry_at: std::sync::Mutex::new(None),
         })
     }
 
@@ -207,6 +214,8 @@ impl Hydrator {
     /// and on a `Ready` transition out of a paused state, resume, mark
     /// everything dirty, and re-request the core set.
     pub fn on_session_changed(&self, state: &SessionState) {
+        // The session now decides when to resume.
+        self.set_offline_retry(None);
         match state {
             SessionState::Offline
             | SessionState::Reconnecting
@@ -250,10 +259,37 @@ impl Hydrator {
         self.lock_scheduler().active_len()
     }
 
+    fn set_offline_retry(&self, at: Option<Timestamp>) {
+        match self.offline_retry_at.lock() {
+            Ok(mut slot) => *slot = at,
+            Err(poisoned) => *poisoned.into_inner() = at,
+        }
+    }
+
+    fn offline_retry(&self) -> Option<Timestamp> {
+        match self.offline_retry_at.lock() {
+            Ok(slot) => *slot,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// End a pause caused by a failed request once its wait has passed.
+    ///
+    /// Such a pause used to last until the Discord session reconnected. When
+    /// the session itself stayed up (one REST timeout, say), nothing ever
+    /// reconnected, and DMs and history silently stopped loading.
+    fn resume_after_offline(&self, now: Timestamp) {
+        if self.offline_retry().is_some_and(|at| now >= at) {
+            self.set_offline_retry(None);
+            self.lock_scheduler().resume();
+        }
+    }
+
     /// Run the hydration loop until `token` is cancelled.
     pub async fn run(self: Arc<Self>, token: CancellationToken) -> litecord_core::Result<()> {
         let mut joinset: JoinSet<()> = JoinSet::new();
         loop {
+            self.resume_after_offline(self.clock.now());
             while joinset.len() < self.max_concurrent {
                 let now = self.clock.now();
                 let job = self.lock_scheduler().next_ready(now);
@@ -269,7 +305,12 @@ impl Hydrator {
 
             let sleep_dur = {
                 let now = self.clock.now();
-                self.lock_scheduler().next_wake(now).map(|wake| {
+                let wake = self.lock_scheduler().next_wake(now);
+                let wake = match (wake, self.offline_retry()) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                wake.map(|wake| {
                     let ms = wake.since(now).as_millis().max(10);
                     std::time::Duration::from_millis(ms)
                 })
@@ -342,9 +383,12 @@ impl Hydrator {
         let now = self.clock.now();
         match err {
             BackendError::Offline | BackendError::NotConnected => {
-                let mut sched = self.lock_scheduler();
-                sched.release_offline(job.key);
-                sched.pause();
+                {
+                    let mut sched = self.lock_scheduler();
+                    sched.release_offline(job.key);
+                    sched.pause();
+                }
+                self.set_offline_retry(Some(now.saturating_add(OFFLINE_RETRY)));
             }
             BackendError::Unsupported { .. } | BackendError::PermissionDenied { .. } => {
                 tracing::debug!(key = ?job.key, error = %err, "hydration unavailable; delaying retry");
@@ -790,6 +834,27 @@ mod tests {
         // from the reconnect core set = 4 jobs, plus the GuildChannels fetch
         // that the now-successful Guilds hydration cascades into = 5.
         assert_eq!(n2, 5);
+    }
+
+    #[tokio::test]
+    async fn offline_pause_ends_by_itself_while_the_session_stays_up() {
+        let backend = Arc::new(FakeBackend::new());
+        backend.set_offline(true);
+        let (hydrator, _freshness, clock, _rx) = hydrator_for_test(backend.clone());
+        hydrator.request(HydrationRequest::immediate(
+            HydrationKey::CurrentUser,
+            HydrationReason::Startup,
+        ));
+        hydrator.run_once().await;
+        assert!(hydrator.lock_scheduler().is_paused());
+
+        // No session event arrives; the pause still ends after the wait.
+        hydrator.resume_after_offline(clock.now());
+        assert!(hydrator.lock_scheduler().is_paused(), "not before the wait");
+        hydrator.resume_after_offline(clock.now().saturating_add(OFFLINE_RETRY));
+        assert!(!hydrator.lock_scheduler().is_paused());
+        backend.set_offline(false);
+        assert_eq!(hydrator.run_once().await, 1);
     }
 
     #[tokio::test]

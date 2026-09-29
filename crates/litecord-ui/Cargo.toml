@@ -10,6 +10,7 @@ screenshots = []
 browser-login = ["dep:wry", "dep:url", "dep:tempfile", "dep:getrandom", "dep:zeroize"]
 
 [dependencies]
+tracing.workspace = true
 litecord-app.workspace = true
 litecord-core.workspace = true
 litecord-types.workspace = true

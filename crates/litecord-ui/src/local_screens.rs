@@ -195,6 +195,17 @@ fn discord_session_connection(
                 ui.label(egui::RichText::new(message).color(theme::WARNING));
                 ui.add_space(6.0);
             }
+            if matches!(state, SessionState::Error { .. } | SessionState::Offline) {
+                // Uses the saved sign-in; no password needed.
+                if ui
+                    .add_enabled(!workspace.busy, egui::Button::new("Reconnect"))
+                    .on_hover_text("Connect again with the saved sign-in")
+                    .clicked()
+                {
+                    workspace.send(Command::DiscordReconnect);
+                }
+                ui.add_space(8.0);
+            }
             if !state.is_online() {
                 #[cfg(all(feature = "browser-login", target_os = "windows"))]
                 {

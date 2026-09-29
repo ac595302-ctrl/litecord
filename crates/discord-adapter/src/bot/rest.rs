@@ -174,18 +174,35 @@ pub fn gateway_bot() -> RestRequest {
 /// reversing keeps the order right whatever order an `after=` query uses.
 pub fn parse_messages(v: &Value) -> Result<Vec<Message>, TranslateError> {
     let array = v.as_array().ok_or(TranslateError::Invalid("messages"))?;
-    let mut messages = array
-        .iter()
-        .map(translate::message)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut messages = lenient(array, "message", translate::message);
     messages.sort_by_key(|m| m.id);
     Ok(messages)
+}
+
+/// Translate each entry, skipping (and logging) the ones that fail. One
+/// unexpected entry used to fail the whole list, so a single odd message,
+/// server or channel left that screen empty.
+pub(crate) fn lenient<T>(
+    array: &[Value],
+    what: &'static str,
+    f: impl Fn(&Value) -> Result<T, TranslateError>,
+) -> Vec<T> {
+    array
+        .iter()
+        .filter_map(|raw| match f(raw) {
+            Ok(v) => Some(v),
+            Err(error) => {
+                tracing::warn!(what, %error, "skipped an entry Litecord could not read");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parses a `GET /users/@me/guilds` response body.
 pub fn parse_guilds(v: &Value) -> Result<Vec<Guild>, TranslateError> {
     let array = v.as_array().ok_or(TranslateError::Invalid("guilds"))?;
-    array.iter().map(translate::guild).collect()
+    Ok(lenient(array, "server", translate::guild))
 }
 
 /// Parses a `GET /guilds/{guild.id}/channels` response body, skipping any
@@ -193,13 +210,12 @@ pub fn parse_guilds(v: &Value) -> Result<Vec<Guild>, TranslateError> {
 /// tolerated defensively).
 pub fn parse_channels(v: &Value, guild: GuildId) -> Result<Vec<Channel>, TranslateError> {
     let array = v.as_array().ok_or(TranslateError::Invalid("channels"))?;
-    let mut channels = Vec::with_capacity(array.len());
-    for raw in array {
-        if let Some(c) = translate::channel(raw, guild)? {
-            channels.push(c);
-        }
-    }
-    Ok(channels)
+    Ok(
+        lenient(array, "channel", |raw| translate::channel(raw, guild))
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
 }
 
 /// Parses a `GET /gateway/bot` response body into a connectable gateway URL

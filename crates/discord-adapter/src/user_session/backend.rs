@@ -224,6 +224,9 @@ struct Driver {
 }
 
 /// Account-owner supplied experimental connection with typed access gates.
+/// How long a connection must stay ready before its reconnect budget resets.
+const STABLE_CONNECTION: Duration = Duration::from_secs(120);
+
 /// Waits between attempts to verify the saved credential at launch.
 const VERIFY_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
@@ -551,12 +554,22 @@ async fn drive(
     });
     let mut url = "wss://gateway.discord.gg/?v=10&encoding=json".to_owned();
     let mut backoff = Duration::from_secs(1);
-    // One initial connection plus five automatic reconnects per explicitly
-    // started session. READY does not reset the budget: flapping must stop too.
+    // Six connection attempts in a row, then stop. A connection that stayed
+    // ready for a while restores the budget: Discord routinely asks clients
+    // to reconnect every few hours, and counting those made a long-running
+    // app give up for good. Rapid flapping still stops.
     let mut attempts = 0;
+    let mut ready_since: Option<tokio::time::Instant> = None;
     'connections: loop {
         if cancel.is_cancelled() {
             break;
+        }
+        if ready_since
+            .take()
+            .is_some_and(|t| t.elapsed() >= STABLE_CONNECTION)
+        {
+            attempts = 0;
+            backoff = Duration::from_secs(1);
         }
         if attempts >= 6 {
             shared.suspend(generation, "Automatic reconnect limit reached; connection stopped. Reconnect in Settings when ready.");
@@ -638,7 +651,11 @@ async fn drive(
                                 let _ = refresh_tx.try_send(ids);
                             }
                         }
-                        if let Ok(events) = translate::dispatch(&event, &data) {
+                        let translated = translate::dispatch(&event, &data);
+                        if let Err(error) = &translated {
+                            tracing::warn!(event = %event, error = %error, "skipped an account event Litecord could not read");
+                        }
+                        if let Ok(events) = translated {
                             for event in events {
                                 if let DiscordEvent::CurrentUser { user } = &event {
                                     if shared.check_account(user).is_err() {
@@ -662,35 +679,47 @@ async fn drive(
                                     event,
                                 );
                                 if reliable {
-                                    let committed = tokio::select! {_=cancel.cancelled()=>break 'connections,r=tokio::time::timeout(Duration::from_secs(5),sink.send_committed(envelope))=>matches!(r,Ok(Ok(_)))};
+                                    let committed = tokio::select! {_=cancel.cancelled()=>break 'connections,r=tokio::time::timeout(Duration::from_secs(15),sink.send_committed(envelope))=>matches!(r,Ok(Ok(_)))};
                                     if !committed {
-                                        tracing::error!("account live event could not commit; session stopped for reconciliation");
-                                        let _=sink.try_send(SourceEnvelope::new(DiscordSource::UserSession,shared.clock.now(),DiscordEvent::SessionChanged{state:SessionState::Error{message:"live event could not commit; reconnect to reconcile".into()}}));
-                                        break 'connections;
+                                        // Resuming would skip the lost event. A fresh
+                                        // session sends a full READY, which reconciles.
+                                        tracing::error!("account live event could not commit; reconnecting with a fresh session");
+                                        session.invalidate_session();
+                                        let _ = tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            socket.close(),
+                                        )
+                                        .await;
+                                        tokio::select! {_=cancel.cancelled()=>break 'connections,_=tokio::time::sleep(backoff)=>{}};
+                                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                                        continue 'connections;
                                     }
                                 } else {
                                     let _ = sink.try_send(envelope);
                                 }
                             }
-                        } else {
+                        } else if event == "READY" {
+                            // Without READY there is no account snapshot to show.
+                            // Other unreadable events are skipped (logged above):
+                            // flagging the whole session as failed for one odd
+                            // presence or message made the app look signed out.
                             let _ = sink.try_send(SourceEnvelope::new(
                                 DiscordSource::UserSession,
                                 shared.clock.now(),
                                 DiscordEvent::SessionChanged {
                                     state: SessionState::Error {
                                         message:
-                                            "Discord account payload changed; reconnect required"
+                                            "Discord sent account data Litecord could not read; reconnect in Settings"
                                                 .into(),
                                     },
                                 },
                             ));
-                            if event == "READY" {
-                                break 'connections;
-                            }
+                            break 'connections;
                         }
                     }
                     Output::Ready | Output::Resumed => {
                         backoff = Duration::from_secs(1);
+                        ready_since = Some(tokio::time::Instant::now());
                         if matches!(output, Output::Resumed) {
                             let _ = sink.try_send(SourceEnvelope::new(
                                 DiscordSource::UserSession,
@@ -1309,11 +1338,10 @@ impl SocialBackend for UserSessionBackend {
                 route: "GET /users/@me/relationships",
             })
             .await?;
-        raw.as_array()
-            .ok_or_else(|| BackendError::Sdk("unexpected relationship list".into()))?
-            .iter()
-            .map(|r| translate::relationship(r).map_err(payload_error))
-            .collect()
+        let rows = raw
+            .as_array()
+            .ok_or_else(|| BackendError::Sdk("unexpected relationship list".into()))?;
+        Ok(rest::lenient(rows, "friend entry", translate::relationship))
     }
     async fn guilds(&self) -> BackendResult<Vec<Guild>> {
         let mut out = Vec::new();
@@ -1375,12 +1403,10 @@ impl SocialBackend for UserSessionBackend {
                 route: "GET /users/@me/channels",
             })
             .await?;
-        let mut out = raw
+        let rows = raw
             .as_array()
-            .ok_or_else(|| BackendError::Sdk("unexpected private channel list".into()))?
-            .iter()
-            .map(|r| translate::conversation(r).map_err(payload_error))
-            .collect::<BackendResult<Vec<_>>>()?;
+            .ok_or_else(|| BackendError::Sdk("unexpected private channel list".into()))?;
+        let mut out = rest::lenient(rows, "DM", translate::conversation);
         out.extend(
             self.shared
                 .metadata
@@ -1488,10 +1514,15 @@ impl SocialBackend for UserSessionBackend {
             ))
             .await?;
         let mut messages = rest::parse_messages(&raw).map_err(payload_error)?;
+        // Paging depends on how many rows Discord returned, including any
+        // that were skipped as unreadable.
+        let returned = raw.as_array().map_or(0, Vec::len);
         if let Some(rows) = raw.as_array() {
             for row in rows {
                 if let Some(nonce) = translate::message_nonce(row) {
-                    let message = common::message(row).map_err(payload_error)?;
+                    let Ok(message) = common::message(row) else {
+                        continue;
+                    };
                     if message.conversation_id != req.conversation_id {
                         return Err(BackendError::Sdk("history receipt channel mismatch".into()));
                     }
@@ -1507,7 +1538,7 @@ impl SocialBackend for UserSessionBackend {
                 }
             }
         }
-        let full = messages.len() == req.effective_limit() as usize;
+        let full = returned == req.effective_limit() as usize;
         let n = messages.len();
         if messages
             .iter()
