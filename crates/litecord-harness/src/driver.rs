@@ -92,18 +92,69 @@ pub trait HarnessLauncher: Send + Sync + std::fmt::Debug {
     async fn launch(&self, ctx: &LaunchContext) -> HarnessResult<Arc<dyn HarnessDriver>>;
 }
 
-/// Finds an executable on `PATH` (or returns `explicit` if it exists).
+/// `PATH` plus the usual per-user install folders.
+///
+/// An app opened from Finder (or a desktop shortcut) gets a minimal `PATH`
+/// such as `/usr/bin:/bin:/usr/sbin:/sbin`, without Homebrew, npm or
+/// installer folders, so Codex and OpenCode looked "not installed" unless
+/// Litecord was started from a terminal. Codex is also a Node script, so the
+/// harness itself needs these folders to find `node`.
+pub fn search_path() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let mut extra: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            extra.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            extra.push(PathBuf::from(local).join("Programs").join("opencode"));
+        }
+    } else {
+        extra.extend(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from));
+    }
+    if let Some(home) = &home {
+        for rel in [
+            ".local/bin",
+            ".npm-global/bin",
+            ".opencode/bin",
+            ".bun/bin",
+            ".volta/bin",
+            ".cargo/bin",
+            "bin",
+        ] {
+            extra.push(home.join(rel));
+        }
+        // nvm installs one folder per Node version; prefer the newest.
+        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            versions.sort();
+            extra.extend(versions.into_iter().rev().map(|v| v.join("bin")));
+        }
+    }
+    for dir in extra {
+        if dir.is_dir() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Finds an executable on [`search_path`] (or returns `explicit` if it exists).
 pub fn find_executable(name: &str, explicit: Option<&std::path::Path>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         return p.is_file().then(|| p.to_path_buf());
     }
-    let path = std::env::var_os("PATH")?;
     let exts: &[&str] = if cfg!(windows) {
         &["exe", "cmd", "bat"]
     } else {
         &[""]
     };
-    for dir in std::env::split_paths(&path) {
+    for dir in search_path() {
         for ext in exts {
             let mut candidate = dir.join(name);
             if !ext.is_empty() {

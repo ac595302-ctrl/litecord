@@ -87,9 +87,15 @@ pub fn filtered(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<(Os
     vars.into_iter().filter(|(k, _)| allowed(k)).collect()
 }
 
-/// The sidecar environment for this process.
+/// The sidecar environment for this process, with `PATH` widened to the
+/// folders Litecord searched (see [`crate::driver::search_path`]).
 pub fn child_env() -> Vec<(OsString, OsString)> {
-    filtered(std::env::vars_os())
+    let mut env = filtered(std::env::vars_os());
+    if let Ok(path) = std::env::join_paths(crate::driver::search_path()) {
+        env.retain(|(k, _)| k != "PATH");
+        env.push((OsString::from("PATH"), path));
+    }
+    env
 }
 
 #[cfg(test)]

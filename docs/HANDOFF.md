@@ -72,6 +72,34 @@ target; see `UI_QA.md` for the sampling limits and reproducible checks.
 
 ## How to continue (prioritized)
 
+### Codebase audit — September 29, 2026 (new-main-temp)
+
+Fixed (see the two audit commits for detail):
+
+* Gateway: unreadable non-READY events are skipped, not a session error;
+  READY and REST lists skip single bad entries; reconnect budget resets
+  after 2 minutes stable; a live event that cannot be stored triggers a
+  fresh-session reconnect instead of a permanent stop.
+* Hydration: an offline pause from one failed request ends after 15 s.
+* UI: snapshot views fall back to their last good value; a loading state
+  replaces blank panes; Settings has **Reconnect** (saved sign-in).
+* Startup: the previous run's session state is reset to Connecting, and
+  the window opens on Settings only when no account is saved.
+* Omni: Codex/OpenCode are searched in Homebrew, npm, nvm, bun, volta
+  and ~/.local folders, and the harness PATH includes them (apps opened
+  from Finder have a minimal PATH, and Codex needs `node`).
+
+Known, not fixed:
+
+* macOS has no embedded Discord sign-in page (Windows-only WebView2);
+  password sign-in often hits a CAPTCHA. Workaround: Settings → Advanced
+  → session credential.
+* Logging out and signing in with a different account fails ("this
+  database belongs to a different account"): the data folder is pinned to
+  one account and the UI has no way to pick another folder.
+* `friends_view` runs two queries per relationship (N+1) on every
+  snapshot; fine for hundreds of friends, slow for thousands.
+
 ### Startup, data folder and database reliability — September 29, 2026 (new-main-temp)
 
 Symptoms: sometimes signed in, sometimes not; sometimes demo data; sometimes

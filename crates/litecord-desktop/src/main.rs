@@ -391,9 +391,12 @@ async fn gui(
             return Err(e);
         }
     };
+    // Open Settings when there is no account to show yet. The session is
+    // still connecting at this point on every launch, so its state alone
+    // would send a signed-in user to Settings each time.
     if options.destination.is_none()
         && cfg.backend.kind == BackendKind::UserSession
-        && !app.session_state()?.is_online()
+        && app.account_view()?.user_id.is_none()
     {
         options.destination = Some(litecord_ui::Destination::Settings);
     }

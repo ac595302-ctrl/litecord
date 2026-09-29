@@ -142,6 +142,25 @@ impl AppBuilder {
             None => None,
         };
         db.write(litecord_store::repos::outbound::recover_interrupted)?;
+        // The stored session state is the previous run's. Until this run's
+        // backend reports in, the app is connecting, not "online" (the old
+        // value made the header say Online and skipped the Settings prompt).
+        db.write(|tx| {
+            let connecting =
+                serde_json::to_string(&litecord_types::social::SessionState::Connecting)
+                    .map_err(litecord_store::StoreError::from)?;
+            for identity in [
+                litecord_types::provenance::DiscordIdentity::UserSocialSdk,
+                litecord_types::provenance::DiscordIdentity::UserSession,
+                litecord_types::provenance::DiscordIdentity::ApplicationBot,
+            ] {
+                let key = litecord_store::reducer::session_state_key(identity);
+                if litecord_store::repos::app_state::get(tx, key)?.is_some() {
+                    litecord_store::repos::app_state::set(tx, key, &connecting)?;
+                }
+            }
+            Ok::<_, litecord_store::StoreError>(())
+        })?;
         if backend.source() == litecord_types::provenance::DiscordSource::UserSession {
             if db.read(|r| {
                 litecord_store::repos::settings::get::<bool>(r, "account.writes_enabled")
