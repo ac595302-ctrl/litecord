@@ -44,6 +44,22 @@ pub(crate) struct ReactorCtx {
 const WARM_CONVERSATIONS: usize = 8;
 
 impl ReactorCtx {
+    /// [`Self::handle`], but a panic on one event skips that event. Without
+    /// this, one unexpected payload ended the reactor task, and from then on
+    /// nothing from Discord reached the database until a restart.
+    fn handle_isolated(
+        &self,
+        env: litecord_core::events::SourceEnvelope,
+    ) -> Result<litecord_types::Revision, litecord_core::bus::IngestCommitError> {
+        let kind = env.event.kind();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(env))).unwrap_or_else(
+            |_| {
+                tracing::error!(kind, "event handling panicked; event skipped");
+                Err(litecord_core::bus::IngestCommitError)
+            },
+        )
+    }
+
     fn handle(
         &self,
         env: litecord_core::events::SourceEnvelope,
@@ -135,7 +151,7 @@ pub(crate) async fn event_reactor(
             env = rx.recv_delivery() => env,
         };
         let Some(env) = env else { break };
-        env.reduce(|env| ctx.handle(env));
+        env.reduce(|env| ctx.handle_isolated(env));
         if rx.take_overflow() {
             tracing::warn!("ingest overflow detected; requesting resync");
             ctx.bus.publish(ApplicationEvent::ResyncRequired {
@@ -149,7 +165,7 @@ pub(crate) async fn event_reactor(
     }
     // Drain what is already queued so shutdown does not lose observed state.
     while let Some(env) = rx.try_recv_delivery() {
-        env.reduce(|env| ctx.handle(env));
+        env.reduce(|env| ctx.handle_isolated(env));
     }
     Ok(())
 }

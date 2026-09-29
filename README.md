@@ -34,8 +34,8 @@ the complete pipeline, protocol limits, and submission/run instructions.
 
 ```sh
 cargo test --workspace                       # no credentials needed
-cargo run -p litecord-desktop --features gui -- gui  # synthetic demo
-cargo run -p litecord-desktop --features gui,discord-user-session -- gui  # account mode, opens Settings
+cargo run -p litecord-desktop --features gui -- gui  # your account (sign in from Settings)
+cargo run -p litecord-desktop --features gui -- --backend demo gui  # synthetic demo
 cargo run -p litecord-desktop -- demo --in-memory  # headless synthetic demo
 cargo run -p litecord-desktop -- mcp --data-dir .litecord   # MCP server on stdio
 ```

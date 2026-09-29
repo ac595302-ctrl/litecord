@@ -143,8 +143,11 @@ fn load_config_from(
     cli: &Cli,
     env: Vec<(String, String)>,
 ) -> litecord_core::Result<LitecordConfig> {
-    let desktop_start = cfg!(all(feature = "gui", feature = "discord-user-session"))
-        && (cli.command.is_none() || matches!(cli.command, Some(Command::Gui { .. })));
+    let has_env = |key: &str| env.iter().any(|(k, _)| k == key);
+    // An account build opens the account for every command except `demo`,
+    // so the window, `status`, `omni` and `mcp` all see the same database.
+    let account_build = cfg!(feature = "discord-user-session");
+    let demo_command = matches!(cli.command, Some(Command::Demo { .. }));
     let backend = cli
         .backend
         .map(|b| match b {
@@ -153,21 +156,13 @@ fn load_config_from(
             BackendArg::UserSession => BackendKind::UserSession,
         })
         .or_else(|| {
-            (desktop_start
-                && cli.config.is_none()
-                && !env.iter().any(|(k, _)| k == "LITECORD_BACKEND"))
-            .then_some(BackendKind::UserSession)
+            (account_build && !demo_command && cli.config.is_none() && !has_env("LITECORD_BACKEND"))
+                .then_some(BackendKind::UserSession)
         });
-    let data_dir = cli.data_dir.clone().or_else(|| {
-        (desktop_start
-            && backend == Some(BackendKind::UserSession)
-            && cli.config.is_none()
-            && !env.iter().any(|(k, _)| k == "LITECORD_DATA_DIR"))
-        .then(|| desktop_data_dir(&env))
-        .flatten()
-    });
+    let explicit_dir = cli.data_dir.is_some() || has_env("LITECORD_DATA_DIR");
+    let base = app_data_base(&env);
     let mut loader = ConfigLoader::new().env(env).overrides(ConfigOverrides {
-        data_dir,
+        data_dir: cli.data_dir.clone(),
         database_path: cli.db.clone(),
         backend,
         log_filter: cli.log.clone(),
@@ -175,35 +170,112 @@ fn load_config_from(
     if let Some(path) = &cli.config {
         loader = loader.file(path);
     }
-    loader.load()
+    let mut cfg = loader.load()?;
+    cfg.data_dir = anchor_data_dir(&cfg, cli.config.as_deref(), explicit_dir, base);
+    if let Some(db) = &cli.db {
+        cfg.database.path = Some(absolute_or_same(db));
+    }
+    Ok(cfg)
 }
 
-fn desktop_data_dir(env: &[(String, String)]) -> Option<PathBuf> {
+/// Where the data directory lives. Relative paths used to resolve against
+/// the working directory, which differs between Finder, Explorer, a
+/// terminal and a shortcut, so each launch could open a different database
+/// (and, with it, a different saved sign-in). Now:
+/// * the built-in default is a per-OS app-data folder, split by mode;
+/// * a relative path from `--data-dir` or `LITECORD_DATA_DIR` is relative
+///   to the working directory the user typed it in;
+/// * a relative path from a config file is relative to that file.
+fn anchor_data_dir(
+    cfg: &LitecordConfig,
+    config_file: Option<&std::path::Path>,
+    explicit: bool,
+    base: Option<PathBuf>,
+) -> PathBuf {
+    let dir = &cfg.data_dir;
+    if dir.is_absolute() {
+        return dir.clone();
+    }
+    if explicit {
+        return absolute_or_same(dir);
+    }
+    if let Some(file) = config_file {
+        if *dir != LitecordConfig::default().data_dir {
+            let parent = absolute_or_same(file)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            return parent.join(dir);
+        }
+    }
+    let mode = match cfg.backend.kind {
+        BackendKind::UserSession => "account",
+        BackendKind::Demo | BackendKind::SocialSdk => "demo",
+    };
+    match base {
+        Some(base) => base.join(mode),
+        None => absolute_or_same(dir),
+    }
+}
+
+fn absolute_or_same(path: &std::path::Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Per-OS folder that holds Litecord's data directories.
+fn app_data_base(env: &[(String, String)]) -> Option<PathBuf> {
     let value = |key: &str| {
         env.iter()
-            .find(|(k, _)| k == key)
+            .find(|(k, v)| k == key && !v.is_empty())
             .map(|(_, v)| PathBuf::from(v))
     };
     if cfg!(target_os = "windows") {
         value("LOCALAPPDATA")
             .or_else(|| value("HOME"))
-            .map(|p| p.join("Litecord").join("account"))
+            .map(|p| p.join("Litecord"))
     } else if cfg!(target_os = "macos") {
-        value("HOME").map(|p| p.join("Library/Application Support/Litecord/account"))
+        value("HOME").map(|p| p.join("Library/Application Support/Litecord"))
     } else {
         value("XDG_DATA_HOME")
             .or_else(|| value("HOME").map(|p| p.join(".local/share")))
-            .map(|p| p.join("litecord/account"))
+            .map(|p| p.join("litecord"))
     }
 }
 
-fn init_tracing(filter: &str) {
+fn init_tracing(filter: &str, log_file: Option<&std::path::Path>) {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
     let filter = tracing_subscriber::EnvFilter::try_new(filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    let file = log_file.and_then(open_log_file);
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    let _ = match file {
+        Some(file) => builder
+            .with_ansi(false)
+            .with_writer(std::io::stderr.and(std::sync::Mutex::new(file)))
+            .try_init(),
+        None => builder.with_writer(std::io::stderr).try_init(),
+    };
+    // Panics otherwise vanish when there is no terminal (Finder, Explorer).
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "Litecord hit an internal error");
+        default_hook(info);
+    }));
+}
+
+/// `<data dir>/litecord.log`, started fresh once it passes 5 MB.
+fn open_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > 5 * 1024 * 1024);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(path)
+        .ok()
 }
 
 fn print_json(v: &impl serde::Serialize) {
@@ -223,7 +295,14 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    init_tracing(&cfg.logging.filter);
+    let log_file = cfg.data_dir.join("litecord.log");
+    // `mcp` runs beside the window as Omni's tool server; keep its logs on
+    // stderr so the two processes don't interleave one file.
+    let file_logging = !matches!(cli.command, Some(Command::Mcp { .. }));
+    init_tracing(
+        &cfg.logging.filter,
+        file_logging.then_some(log_file.as_path()),
+    );
     let command = match cli.command {
         Some(command) => command,
         #[cfg(feature = "gui")]
@@ -294,12 +373,24 @@ async fn gui(
     mut options: litecord_ui::WindowOptions,
     omni_ask: Option<String>,
 ) -> litecord_core::Result<()> {
-    let app = with_omni(
-        with_account(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)?,
-        &cfg,
-    )
-    .start()
-    .await?;
+    let started = async {
+        with_omni(
+            with_account(with_bot(LitecordApp::builder(cfg.clone()))?, &cfg)?,
+            &cfg,
+        )
+        .start()
+        .await
+    }
+    .await;
+    let app = match started {
+        Ok(app) => app,
+        Err(e) => {
+            tracing::error!(error = %e, "startup failed");
+            let log = cfg.data_dir.join("litecord.log");
+            let _ = litecord_ui::show_startup_error(&e.to_string(), Some(&log));
+            return Err(e);
+        }
+    };
     if options.destination.is_none()
         && cfg.backend.kind == BackendKind::UserSession
         && !app.session_state()?.is_online()
@@ -756,12 +847,18 @@ fn with_account(
     }
     let path = std::path::absolute(cfg.database_path())
         .map_err(|_| litecord_core::Error::config("cannot resolve database path"))?;
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hash);
-    let secrets = Arc::new(litecord_core::secrets::OsSecretStore::new(&format!(
-        "account.{:016x}",
-        hash.finish()
-    )));
+    // Earlier builds keyed the credential by `DefaultHasher`, whose output
+    // may change between Rust releases, so a rebuilt app could lose the
+    // saved sign-in. FNV-1a of the path is stable; old entries are moved.
+    let mut legacy = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut legacy);
+    let secrets = Arc::new(litecord_core::secrets::OsSecretStore::with_legacy(
+        &format!(
+            "account.v2.{:016x}",
+            fnv1a(path.to_string_lossy().as_bytes())
+        ),
+        &format!("account.{:016x}", legacy.finish()),
+    ));
     let transport =
         discord_adapter::user_session::HttpTransport::user_session_with_access(cfg.backend.access)?;
     Ok(builder.backend(Arc::new(
@@ -772,6 +869,14 @@ fn with_account(
             cfg.backend.access,
         ),
     )))
+}
+
+/// 64-bit FNV-1a: a hash that stays the same across builds and toolchains.
+#[cfg(feature = "discord-user-session")]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 #[cfg(not(feature = "discord-user-session"))]
@@ -785,49 +890,84 @@ fn with_account(
     Ok(builder)
 }
 
-#[cfg(all(test, feature = "gui", feature = "discord-user-session"))]
-mod desktop_start_tests {
+#[cfg(test)]
+mod config_path_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
-    #[test]
-    fn launch_without_arguments_selects_account_and_dedicated_data() {
-        let cli = Cli::try_parse_from(["litecord"]).unwrap();
-        let cfg = load_config_from(
-            &cli,
-            vec![
-                ("HOME".into(), "/owner".into()),
-                ("LOCALAPPDATA".into(), "/local".into()),
-            ],
-        )
-        .unwrap();
-        assert_eq!(cfg.backend.kind, BackendKind::UserSession);
-        assert_ne!(cfg.data_dir, PathBuf::from(".litecord"));
-        assert!(cfg.data_dir.ends_with("account"));
-
-        let cli = Cli::try_parse_from(["litecord", "gui"]).unwrap();
-        let cfg = load_config_from(&cli, vec![("HOME".into(), "/owner".into())]).unwrap();
-        assert_eq!(cfg.backend.kind, BackendKind::UserSession);
-        assert!(cfg.data_dir.ends_with("account"));
+    fn home() -> Vec<(String, String)> {
+        vec![
+            ("HOME".into(), "/owner".into()),
+            ("LOCALAPPDATA".into(), "/local".into()),
+            ("XDG_DATA_HOME".into(), "/xdg".into()),
+        ]
     }
 
     #[test]
-    fn explicit_configuration_still_wins() {
+    fn launch_without_arguments_uses_the_app_data_folder() {
+        let cli = Cli::try_parse_from(["litecord"]).unwrap();
+        let cfg = load_config_from(&cli, home()).unwrap();
+        assert!(cfg.data_dir.is_absolute(), "{}", cfg.data_dir.display());
+        let mode = if cfg!(feature = "discord-user-session") {
+            assert_eq!(cfg.backend.kind, BackendKind::UserSession);
+            "account"
+        } else {
+            "demo"
+        };
+        assert!(cfg.data_dir.ends_with(mode));
+        // The same folder whatever the working directory is.
+        let cli = Cli::try_parse_from(["litecord", "status"]).unwrap();
+        assert_eq!(
+            load_config_from(&cli, home()).unwrap().data_dir,
+            cfg.data_dir
+        );
+    }
+
+    #[test]
+    fn demo_and_account_never_share_a_folder() {
+        let demo = Cli::try_parse_from(["litecord", "--backend", "demo", "status"]).unwrap();
+        let account =
+            Cli::try_parse_from(["litecord", "--backend", "user-session", "status"]).unwrap();
+        let demo = load_config_from(&demo, home()).unwrap();
+        let account = load_config_from(&account, home()).unwrap();
+        assert!(demo.data_dir.ends_with("demo"));
+        assert!(account.data_dir.ends_with("account"));
+        assert_ne!(demo.database_path(), account.database_path());
+    }
+
+    #[test]
+    fn explicit_relative_paths_resolve_against_the_working_directory() {
         let cli = Cli::try_parse_from(["litecord", "--backend", "demo", "--data-dir", "example"])
             .unwrap();
-        let cfg = load_config_from(&cli, vec![]).unwrap();
+        let cfg = load_config_from(&cli, home()).unwrap();
         assert_eq!(cfg.backend.kind, BackendKind::Demo);
-        assert_eq!(cfg.data_dir, PathBuf::from("example"));
-        let cli = Cli::try_parse_from(["litecord"]).unwrap();
-        let cfg = load_config_from(
-            &cli,
-            vec![
-                ("LITECORD_BACKEND".into(), "demo".into()),
-                ("LITECORD_DATA_DIR".into(), "custom".into()),
-            ],
+        assert_eq!(
+            cfg.data_dir,
+            std::env::current_dir().unwrap().join("example")
+        );
+        let mut env = home();
+        env.push(("LITECORD_BACKEND".into(), "demo".into()));
+        env.push(("LITECORD_DATA_DIR".into(), "custom".into()));
+        let cfg = load_config_from(&Cli::try_parse_from(["litecord"]).unwrap(), env).unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Demo);
+        assert_eq!(
+            cfg.data_dir,
+            std::env::current_dir().unwrap().join("custom")
+        );
+    }
+
+    #[test]
+    fn config_file_paths_resolve_against_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("account.toml");
+        std::fs::write(
+            &file,
+            "data_dir = \".litecord-account\"\n[backend]\nkind = \"demo\"\n",
         )
         .unwrap();
-        assert_eq!(cfg.backend.kind, BackendKind::Demo);
-        assert_eq!(cfg.data_dir, PathBuf::from("custom"));
+        let cli = Cli::try_parse_from(["litecord", "--config", file.to_str().unwrap(), "status"])
+            .unwrap();
+        let cfg = load_config_from(&cli, home()).unwrap();
+        assert_eq!(cfg.data_dir, dir.path().join(".litecord-account"));
     }
 }

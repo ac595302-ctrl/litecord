@@ -73,3 +73,64 @@ pub fn run_with_options(
         }),
     )
 }
+
+/// A small window explaining why Litecord could not start.
+///
+/// When the app is opened from Finder or Explorer there is no terminal, so
+/// an error printed to stderr looked like the app silently doing nothing.
+pub fn show_startup_error(
+    message: &str,
+    log_path: Option<&std::path::Path>,
+) -> Result<(), eframe::Error> {
+    let message = message.to_owned();
+    let log = log_path.map(|p| p.display().to_string());
+    eframe::run_native(
+        "Litecord",
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([560.0, 260.0])
+                .with_resizable(false),
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            theme::apply(&cc.egui_ctx);
+            Ok(Box::new(StartupError { message, log }))
+        }),
+    )
+}
+
+struct StartupError {
+    message: String,
+    log: Option<String>,
+}
+
+impl eframe::App for StartupError {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        use eframe::egui;
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.add_space(8.0);
+            ui.heading("Litecord couldn't start");
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(&self.message).color(theme::WARNING));
+            if let Some(log) = &self.log {
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(format!("Details are in {log}"))
+                        .color(theme::MUTED)
+                        .small(),
+                );
+            }
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if ui.button("Copy message").clicked() {
+                    ui.ctx().copy_text(self.message.clone());
+                }
+                if ui.button("Quit").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+    }
+}

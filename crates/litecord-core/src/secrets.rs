@@ -93,6 +93,8 @@ pub struct SecretStoreError;
 #[derive(Debug)]
 pub struct OsSecretStore {
     service: String,
+    /// Namespace an older build saved credentials under; read once and moved.
+    legacy_service: Option<String>,
     lock: std::sync::Mutex<()>,
 }
 
@@ -101,11 +103,31 @@ impl OsSecretStore {
     pub fn new(namespace: &str) -> Self {
         Self {
             service: format!("litecord.{namespace}"),
+            legacy_service: None,
             lock: std::sync::Mutex::new(()),
         }
     }
+    /// Like [`OsSecretStore::new`], but a credential found only under
+    /// `legacy` is moved to `namespace` the first time it is read.
+    pub fn with_legacy(namespace: &str, legacy: &str) -> Self {
+        let mut store = Self::new(namespace);
+        let legacy = format!("litecord.{legacy}");
+        if legacy != store.service {
+            store.legacy_service = Some(legacy);
+        }
+        store
+    }
     fn entry(&self, key: SecretKey) -> Result<keyring::Entry, SecretStoreError> {
         keyring::Entry::new(&self.service, key.as_str()).map_err(|_| SecretStoreError)
+    }
+    fn take_legacy(&self, key: SecretKey) -> Option<String> {
+        let service = self.legacy_service.as_ref()?;
+        let entry = keyring::Entry::new(service, key.as_str()).ok()?;
+        let value = entry.get_password().ok()?;
+        if self.entry(key).ok()?.set_password(&value).is_ok() {
+            let _ = entry.delete_credential();
+        }
+        Some(value)
     }
 }
 
@@ -124,7 +146,7 @@ impl SecretStore for OsSecretStore {
         let _guard = self.lock.lock().map_err(|_| SecretStoreError)?;
         match self.entry(key)?.get_password() {
             Ok(value) => Ok(Some(Secret::new(value))),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring::Error::NoEntry) => Ok(self.take_legacy(key).map(Secret::new)),
             Err(_) => Err(SecretStoreError),
         }
     }

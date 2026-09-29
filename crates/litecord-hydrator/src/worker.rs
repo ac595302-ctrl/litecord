@@ -349,10 +349,12 @@ impl Hydrator {
             BackendError::Unsupported { .. } | BackendError::PermissionDenied { .. } => {
                 tracing::debug!(key = ?job.key, error = %err, "hydration unavailable; delaying retry");
                 let stale_after = litecord_types::DurationMs::from_mins(10);
-                if let Err(e) =
-                    self.freshness
-                        .record_terminal_failure(&job.key, &err.to_string(), now, stale_after)
-                {
+                if let Err(e) = self.freshness.record_terminal_failure(
+                    &job.key,
+                    &err.to_string(),
+                    now,
+                    stale_after,
+                ) {
                     tracing::warn!(error = %e, "record_failure failed");
                 }
                 let _ = self.lock_scheduler().fail(job.key, false, now);

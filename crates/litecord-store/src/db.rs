@@ -168,8 +168,23 @@ impl Database {
         self.inner.clock.now()
     }
 
+    /// A panic while a connection was borrowed poisons its mutex. The
+    /// connection itself is still sound (an unfinished transaction rolls
+    /// back when dropped), so recover instead of failing every later call
+    /// with "database lock poisoned" until the app restarts.
     fn writer(&self) -> StoreResult<MutexGuard<'_, Connection>> {
-        self.inner.writer.lock().map_err(|_| StoreError::Poisoned)
+        Ok(self
+            .inner
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
+    fn readers(&self) -> MutexGuard<'_, Vec<Connection>> {
+        self.inner
+            .readers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Current global revision.
@@ -240,20 +255,11 @@ impl Database {
         E: From<StoreError>,
     {
         let start = Instant::now();
-        let pooled = {
-            let mut readers = self
-                .inner
-                .readers
-                .lock()
-                .map_err(|_| StoreError::Poisoned)?;
-            readers.pop()
-        };
+        let pooled = self.readers().pop();
         let out = match pooled {
             Some(mut conn) => {
                 let result = run_read(&mut conn, self.inner.clock.now(), f);
-                if let Ok(mut readers) = self.inner.readers.lock() {
-                    readers.push(conn);
-                }
+                self.readers().push(conn);
                 result
             }
             None => {

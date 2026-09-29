@@ -98,6 +98,11 @@ impl AppBuilder {
         let cfg = self.cfg;
         cfg.validate()?;
         let metrics = Metrics::new();
+        let instance_lock = if self.in_memory {
+            None
+        } else {
+            Some(lock_data_folder(&cfg.database_path())?)
+        };
         let db = if self.in_memory {
             Database::open_in_memory_with(self.clock.clone(), Some(metrics.clone()))?
         } else {
@@ -151,6 +156,14 @@ impl AppBuilder {
                     return Err(Error::new(ErrorKind::Configuration,"use a separate data directory for a real account; this database contains demo data"));
                 }
                 backend.bind_account(account.user_id)?;
+            }
+        } else if backend.source() == litecord_types::provenance::DiscordSource::Synthetic {
+            // The reverse mix-up: demo data written into a real account's
+            // database would show up as that account's conversations.
+            if let Some(account) = db.read(|r| litecord_store::repos::accounts::current_user(r))? {
+                if account.origin != litecord_types::provenance::Origin::Synthetic {
+                    return Err(Error::new(ErrorKind::Configuration,"this data folder belongs to a real account; the demo needs its own data folder"));
+                }
             }
         }
         drop(_g);
@@ -357,8 +370,53 @@ impl AppBuilder {
                 ui_activity,
                 features: RwLock::new(features),
                 commands: RwLock::new(commands),
+                instance_lock: std::sync::Mutex::new(instance_lock),
             }),
         })
+    }
+}
+
+/// Holds an exclusive lock on `<database>.lock` for the app's lifetime.
+///
+/// Two copies of the app on one database would each run a Discord
+/// connection and background sync against the same tables, which shows up
+/// as "database is locked" errors, duplicated work and sessions that
+/// disconnect each other. The OS releases the lock if the process dies.
+fn lock_data_folder(db: &std::path::Path) -> Result<std::fs::File> {
+    if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::new(
+                ErrorKind::Storage,
+                format!("cannot create the data folder {}: {e}", parent.display()),
+            )
+        })?;
+    }
+    let path = db.with_extension("lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::Storage,
+                format!("cannot open {}: {e}", path.display()),
+            )
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::new(
+            ErrorKind::Configuration,
+            format!(
+                "Litecord is already running with this data folder ({}). Close the other window first.",
+                db.parent().unwrap_or(db).display()
+            ),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => {
+            // Some network filesystems do not support locks; run unlocked.
+            tracing::warn!(error = %e, path = %path.display(), "could not lock the data folder");
+            Ok(file)
+        }
     }
 }
 
@@ -380,6 +438,8 @@ pub(crate) struct AppInner {
     pub ui_activity: Arc<std::sync::atomic::AtomicI64>,
     pub features: RwLock<FeatureRegistry>,
     pub commands: RwLock<CommandRegistry>,
+    /// Released by `shutdown` (or on drop); see [`lock_data_folder`].
+    instance_lock: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 /// Handle to a running Litecord instance. Cheap to clone; all methods are
@@ -458,6 +518,10 @@ impl LitecordApp {
             Ok(n) if n > 0 => tracing::info!(persisted = n, "hydration queue saved"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "could not persist hydration queue"),
+        }
+        // Background work has stopped, so another instance may take over.
+        if let Ok(mut lock) = self.inner.instance_lock.lock() {
+            lock.take();
         }
         report
     }

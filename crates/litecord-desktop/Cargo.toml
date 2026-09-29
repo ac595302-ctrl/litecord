@@ -26,12 +26,15 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
 
 [features]
 default = []
-gui = ["dep:litecord-ui", "omni-codex", "omni-opencode"]
+gui = ["dep:litecord-ui", "omni-codex", "omni-opencode", "discord-user-session"]
 browser-login = ["gui", "discord-user-session", "litecord-ui/browser-login"]
 # Omni harness drivers (the harness binaries themselves are not bundled).
 omni-codex = ["litecord-harness/codex"]

@@ -72,6 +72,46 @@ target; see `UI_QA.md` for the sampling limits and reproducible checks.
 
 ## How to continue (prioritized)
 
+### Startup, data folder and database reliability — September 29, 2026 (new-main-temp)
+
+Symptoms: sometimes signed in, sometimes not; sometimes demo data; sometimes
+nothing loads; database and panic errors. Causes and fixes:
+
+* **Data folder depended on the working directory.** Relative data dirs
+  (`.litecord`, config `data_dir`) resolved against wherever the app was
+  launched from (Finder uses `/`, a terminal uses its folder). Each launch
+  method could open a different database. Now the default is the per-OS app
+  data folder split by mode (`…/Litecord/account`, `…/Litecord/demo`);
+  `--data-dir`/`LITECORD_DATA_DIR` resolve against the working directory;
+  a config file's `data_dir` resolves against the file (`main.rs`
+  `anchor_data_dir`).
+* **Saved sign-in keyed by `DefaultHasher`.** The keychain namespace was a
+  `DefaultHasher` of the database path, which is not stable across Rust
+  releases and changed with the path. Now FNV-1a (`account.v2.*`); a
+  credential under the old name is moved on first read
+  (`OsSecretStore::with_legacy`).
+* **Build features decided the mode.** `--features gui` without
+  `discord-user-session` silently ran the demo. `gui` now includes account
+  mode; demo is `--backend demo` or the `demo` command, and the app refuses
+  to run demo data in a real account's folder (and the reverse, as before).
+* **One network blip at launch meant "reconnect in Settings".** Verifying
+  the saved credential now retries retryable errors (1 s, 2 s, 4 s); only a
+  rejected credential asks for sign-in; network failure says so.
+* **Two instances on one database.** `<db>.lock` is held with
+  `File::try_lock` from start until `shutdown`; a second copy shows
+  "already running".
+* **Poisoned locks.** A panic while the writer or reader pool was borrowed
+  made every later call fail with "database lock poisoned". The mutexes now
+  recover (an unfinished transaction rolls back on drop).
+* **A panic on one event killed the event reactor**, so nothing from
+  Discord was stored afterwards. Each event is now isolated with
+  `catch_unwind`; a panicking event is logged and skipped.
+* **Newer schema.** Opening a database upgraded by a newer build now fails
+  with a clear message instead of running on unknown tables.
+* **Silent failures.** Startup errors open a small window (they only went
+  to stderr, invisible from Finder/Explorer). Logs and panics also go to
+  `<data dir>/litecord.log` (restarted past 5 MB), except for `mcp`.
+
 ### Names, avatars, emoji, friend requests — September 27, 2026 (new-main-temp)
 
 Traced end to end (adapter → reducer → store → views → UI); every fix is in

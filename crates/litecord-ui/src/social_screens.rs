@@ -73,9 +73,9 @@ impl Workspace {
                 .find(|guild| Some(guild.guild.id) == self.selected_guild)
                 .and_then(|guild| {
                     guild.channels.iter().find(|row| {
-                        row.channel.capabilities.contains(
-                            litecord_types::social::ChannelCapabilities::READABLE,
-                        )
+                        row.channel
+                            .capabilities
+                            .contains(litecord_types::social::ChannelCapabilities::READABLE)
                     })
                 })
                 .map(|channel| channel.channel.id);
@@ -94,11 +94,13 @@ impl Workspace {
                         .clicked()
                     {
                         self.selected_channel = Some(row.channel.id);
-                        if row.channel.capabilities.contains(
-                            litecord_types::social::ChannelCapabilities::READABLE,
-                        ) && s.diagnostics
+                        if row
+                            .channel
                             .capabilities
-                            .is_usable(litecord_types::capability::Capability::GuildMessages)
+                            .contains(litecord_types::social::ChannelCapabilities::READABLE)
+                            && s.diagnostics
+                                .capabilities
+                                .is_usable(litecord_types::capability::Capability::GuildMessages)
                         {
                             self.open_conversation(litecord_types::ConversationId(
                                 row.channel.id.get(),
@@ -142,11 +144,14 @@ impl Workspace {
         ui.separator();
         ui.add_space(24.0);
         theme::chip(ui, row.channel.access.as_str(), theme::MUTED);
-        if !row.channel.capabilities.contains(
-            litecord_types::social::ChannelCapabilities::READABLE,
-        ) {
+        if !row
+            .channel
+            .capabilities
+            .contains(litecord_types::social::ChannelCapabilities::READABLE)
+        {
             ui.label("This channel does not contain messages. Choose a text channel to read its history.");
-        } else if s.diagnostics
+        } else if s
+            .diagnostics
             .capabilities
             .is_usable(litecord_types::capability::Capability::GuildMessages)
         {

@@ -89,6 +89,18 @@ pub fn current_version(conn: &Connection) -> StoreResult<u32> {
 /// Apply all pending migrations. Returns the versions applied.
 pub fn run(conn: &mut Connection) -> StoreResult<Vec<u32>> {
     let current = current_version(conn)?;
+    if current > latest_version() {
+        // A newer Litecord already upgraded this database. Running on it
+        // would read tables and values this build does not understand.
+        return Err(StoreError::Migration {
+            version: current,
+            reason: format!(
+                "this database was upgraded by a newer Litecord (schema {current}, this build \
+                 supports {}); run the newer build or use a different data folder",
+                latest_version()
+            ),
+        });
+    }
     let mut applied = Vec::new();
     for m in MIGRATIONS.iter().filter(|m| m.version > current) {
         let _span = tracing::info_span!("migration", version = m.version, name = m.name).entered();
@@ -115,6 +127,19 @@ pub fn run(conn: &mut Connection) -> StoreResult<Vec<u32>> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_a_database_from_a_newer_build() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, 'future', 0)",
+            [latest_version() + 1],
+        )
+        .unwrap();
+        let err = run(&mut conn).unwrap_err().to_string();
+        assert!(err.contains("newer Litecord"), "{err}");
+    }
 
     /// A database created with only migration 1 applied (as a real v1
     /// deployment would have) upgrades cleanly, and existing rows pick up

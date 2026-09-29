@@ -224,6 +224,13 @@ struct Driver {
 }
 
 /// Account-owner supplied experimental connection with typed access gates.
+/// Waits between attempts to verify the saved credential at launch.
+const VERIFY_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
 #[derive(Debug)]
 pub struct UserSessionBackend {
     shared: Arc<Shared>,
@@ -820,26 +827,53 @@ impl SocialBackend for UserSessionBackend {
         };
         // Verify the saved credential before any parallel hydration can read
         // account-scoped data. Failed validation leaves the UI repairable.
-        let verified = match self
-            .shared
-            .transport
-            .request(&token, &rest::current_user())
-            .await
-        {
-            Ok(raw) => common::user(&raw).map_err(payload_error).and_then(|user| {
-                self.shared.check_account(&user)?;
-                Ok(user)
-            }),
-            Err(error) => Err(error),
+        // A network blip at launch (Wi-Fi still joining, a Discord 5xx, a
+        // rate limit) is retried; only a rejected credential asks the user
+        // to sign in again.
+        self.shared.emit(DiscordEvent::SessionChanged {
+            state: SessionState::Connecting,
+        });
+        let mut delays = VERIFY_RETRY_DELAYS.iter();
+        let verified = loop {
+            let attempt = match self
+                .shared
+                .transport
+                .request(&token, &rest::current_user())
+                .await
+            {
+                Ok(raw) => common::user(&raw).map_err(payload_error).and_then(|user| {
+                    self.shared.check_account(&user)?;
+                    Ok(user)
+                }),
+                Err(error) => Err(error),
+            };
+            match (attempt, delays.next()) {
+                (Err(error), Some(delay)) if error.is_retryable() => {
+                    let wait = match &error {
+                        BackendError::RateLimited { retry_after } => {
+                            Duration::from_millis(retry_after.0).max(*delay)
+                        }
+                        _ => *delay,
+                    };
+                    tracing::info!(error = %error, ?wait, "could not verify the saved account; retrying");
+                    tokio::time::sleep(wait.min(Duration::from_secs(30))).await;
+                }
+                (attempt, _) => break attempt,
+            }
         };
         let user = match verified {
             Ok(user) => user,
-            Err(_) => {
+            Err(error) => {
+                let message = if error.is_retryable() {
+                    "Couldn't reach Discord. Check your internet connection, then reconnect in Settings."
+                } else if let BackendError::Authentication(reason) = &error {
+                    reason.as_str()
+                } else {
+                    "saved account credential could not be verified; reconnect in Settings"
+                };
                 self.shared.emit(DiscordEvent::SessionChanged {
                     state: SessionState::Error {
-                        message:
-                            "saved account credential could not be verified; reconnect in Settings"
-                                .into(),
+                        message: message.into(),
                     },
                 });
                 return Ok(());
