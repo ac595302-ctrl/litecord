@@ -207,6 +207,30 @@ pub fn list_recent(
     Ok(out)
 }
 
+/// Most recent conversations that are (or are not, with `guild = false`)
+/// server channels. Lets the DM list be filled from DMs alone, so busy
+/// server channels cannot push every DM past the list limit.
+pub fn list_recent_split(
+    conn: &Connection,
+    guild: bool,
+    limit: u32,
+) -> StoreResult<Vec<ConversationRecord>> {
+    let op = if guild { "=" } else { "<>" };
+    let sql = format!(
+        "SELECT {COLUMNS} FROM conversations
+         WHERE kind {op} 'guild_channel'
+         ORDER BY last_activity_at IS NULL, last_activity_at DESC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![limit], map_row)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Find the DM conversation with `user_id`, if any.
 pub fn find_dm_by_recipient(
     conn: &Connection,
@@ -318,6 +342,37 @@ mod tests {
             rec.conversation.last_activity_at,
             Some(Timestamp::from_millis(100))
         );
+    }
+
+    #[test]
+    fn busy_server_channels_do_not_crowd_out_dms() {
+        let db = Database::open_in_memory().unwrap();
+        db.write(|tx| -> StoreResult<()> {
+            // An old DM, then many channels with newer activity.
+            upsert(
+                tx,
+                &conv(1, ConversationKind::DirectMessage, Some(10)),
+                Origin::Synthetic,
+                Timestamp::from_millis(1),
+            )?;
+            for i in 0..5u64 {
+                let mut c = conv(
+                    100 + i,
+                    ConversationKind::GuildChannel,
+                    Some(1_000 + i as i64),
+                );
+                c.guild_id = None;
+                upsert(tx, &c, Origin::Synthetic, Timestamp::from_millis(1))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let dms = db.read(|r| list_recent_split(r, false, 1)).unwrap();
+        assert_eq!(dms.len(), 1);
+        assert_eq!(dms[0].conversation.id, ConversationId(1));
+        let channels = db.read(|r| list_recent_split(r, true, 2)).unwrap();
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].conversation.id, ConversationId(104));
     }
 
     #[test]

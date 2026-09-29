@@ -759,6 +759,12 @@ impl Workspace {
             .map(|d| d.trim_end_matches('\n').to_owned())
             .unwrap_or_default();
         let count = text.chars().count();
+        // For the account source, "can't send" almost always means the
+        // read-only default, which one Settings switch changes.
+        let account_read_only = self.snapshot.as_ref().is_some_and(|s| {
+            s.diagnostics.backend_mode == litecord_types::capability::BackendMode::UserSession
+        });
+        let mut open_settings = false;
         // The sending identity is always shown; bot and user are never
         // interchangeable.
         ui.add_space(4.0);
@@ -767,15 +773,29 @@ impl Workspace {
                 Some(DiscordIdentity::ApplicationBot) => (ph::ROBOT, "Sending as your bot"),
                 Some(DiscordIdentity::UserSocialSdk) => (ph::USER, "Sending as you"),
                 Some(DiscordIdentity::UserSession) => (ph::USER, "Discord account"),
+                None if account_read_only => (
+                    ph::LOCK_SIMPLE,
+                    "Sending is off: account writes are disabled · Change in Settings",
+                ),
                 None => (ph::LOCK_SIMPLE, "Read only here · Open in Discord to reply"),
             };
             let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
             kit::icon(ui.painter(), r.center(), glyph, 12.0, theme::FAINT);
-            ui.label(
-                egui::RichText::new(who)
-                    .font(theme::regular(12.0))
-                    .color(theme::FAINT),
+            let label = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(who)
+                        .font(theme::regular(12.0))
+                        .color(theme::FAINT),
+                )
+                .sense(if identity.is_none() && account_read_only {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                }),
             );
+            if identity.is_none() && account_read_only && label.clicked() {
+                open_settings = true;
+            }
             if count > 1800 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -790,6 +810,9 @@ impl Workspace {
                 });
             }
         });
+        if open_settings {
+            self.navigate(litecord_layout::Destination::Settings);
+        }
         let can_send = !busy && can_send_here && !text.trim().is_empty() && count <= 2000;
         if can_send && (clicked || submit) {
             if let Some(identity) = identity {

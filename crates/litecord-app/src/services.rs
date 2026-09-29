@@ -190,8 +190,19 @@ impl LitecordApp {
                         .collect(),
                     None => vec![],
                 };
+                // Every DM and group up to `limit`, plus a few recent server
+                // channels (Home's activity feed shows those). Taking one
+                // list across both let active servers crowd out every DM.
+                let mut recent = repos::conversations::list_recent_split(r, false, limit)?;
+                recent.extend(repos::conversations::list_recent_split(r, true, 20)?);
+                recent.sort_by_key(|c| {
+                    (
+                        c.conversation.last_activity_at.is_none(),
+                        std::cmp::Reverse(c.conversation.last_activity_at),
+                    )
+                });
                 let mut rows = Vec::new();
-                for c in repos::conversations::list_recent(r, limit, 0)? {
+                for c in recent {
                     let conv = &c.conversation;
                     let last = match conv.last_message_id {
                         Some(id) => repos::messages::get(r, id)?.filter(|m| !m.deleted),

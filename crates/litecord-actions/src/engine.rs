@@ -83,6 +83,7 @@ impl ActionEngine {
         cfg: &AgentConfig,
         executor: Arc<dyn ActionExecutor>,
     ) -> Result<Self, ActionError> {
+        recover_interrupted(&db)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
@@ -368,6 +369,29 @@ fn claim_for_execution(
         Ok(Ok((p.action, p.actor, p.identity)))
     })?;
     committed.value
+}
+
+/// Actions left `Executing` by a previous run (the app closed or crashed
+/// mid-action). Nothing would ever finish them: they could not be rejected
+/// or approved again and dropped out of the approvals list. Whether Discord
+/// applied them is unknown, so they become `Uncertain`, with the reason in
+/// the audit log.
+fn recover_interrupted(db: &litecord_store::Database) -> Result<(), ActionError> {
+    db.write(|tx| -> Result<(), ActionError> {
+        for p in repos::actions::list(tx, Some(&[ActionStatus::Executing]), 10_000)? {
+            repos::actions::set_status(tx, p.id, ActionStatus::Uncertain, Origin::LocalApplication)?;
+            audit(
+                tx,
+                p.id,
+                &Actor::System,
+                AuditEvent::Failed {
+                    error: "Litecord closed before this action finished; check Discord to see whether it happened".into(),
+                },
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn get(inner: &Inner, id: ActionId) -> Result<Option<ActionProposal>, ActionError> {

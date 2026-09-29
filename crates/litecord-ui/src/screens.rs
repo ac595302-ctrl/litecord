@@ -3,6 +3,21 @@ use eframe::egui::{self, Align2, Rect, Sense, Ui};
 use litecord_layout::{Destination, Orientation};
 use litecord_types::{actions::RelationshipAction, social::ConversationKind};
 
+/// The content margin the other destination panes use.
+fn padded(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 22,
+            right: 22,
+            top: 14,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            add(ui);
+        });
+}
+
 impl Workspace {
     pub fn panel(&mut self, ui: &mut Ui, panel: &str, orientation: Orientation) {
         match panel {
@@ -19,8 +34,9 @@ impl Workspace {
             "settings" => self.settings_screen(ui),
             "server_list" => self.server_list(ui, orientation),
             "channel_list" => self.channels(ui),
-            "server_content" => self.server_content(ui),
-            "voice_room" => self.voice_room(ui),
+            // These two panes drew flush against the pane edge.
+            "server_content" => padded(ui, |ui| self.server_content(ui)),
+            "voice_room" => padded(ui, |ui| self.voice_room(ui)),
             "contextual_sidebar" => self.context_sidebar_v2(ui),
             _ => {
                 ui.heading(self.selection.destination.label());
@@ -244,6 +260,8 @@ impl Workspace {
             .conversations
             .iter()
             .filter(|r| r.title.to_lowercase().contains(&filter))
+            // Messages lists DMs and groups; server channels live in Servers.
+            .filter(|r| r.kind != ConversationKind::GuildChannel)
             .filter(|r| match self.conversation_tab {
                 1 => r.awaiting_reply,
                 2 => r.kind == ConversationKind::GroupDm,

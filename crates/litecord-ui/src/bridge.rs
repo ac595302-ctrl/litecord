@@ -314,7 +314,8 @@ pub(crate) fn snapshot(
     if selection.conversation.is_none() {
         selection.conversation = conversations
             .conversations
-            .first()
+            .iter()
+            .find(|r| r.kind != litecord_types::social::ConversationKind::GuildChannel)
             .map(|r| r.conversation_id);
     }
     let same_conversation = prev.is_some_and(|p| {

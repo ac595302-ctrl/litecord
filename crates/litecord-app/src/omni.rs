@@ -885,11 +885,25 @@ impl OmniService {
             .ok_or_else(|| Error::validation("session is not open in the harness"))
     }
 
+    /// Stop the session's turn. The session is marked idle even when the
+    /// harness cannot be reached (it restarted, or the stop request failed):
+    /// otherwise a lost "turn finished" event left the chat refusing new
+    /// messages ("Omni is still working") with no way out.
     pub async fn interrupt(&self, session_id: i64) -> Result<()> {
-        let ext = self.external_of(session_id)?;
-        let d = self.driver().await?;
-        d.interrupt(&ext).await.map_err(harness_err)?;
-        self.live().running.remove(&session_id);
+        let result = async {
+            let ext = self.external_of(session_id)?;
+            let d = self.driver().await?;
+            d.interrupt(&ext).await.map_err(harness_err)
+        }
+        .await;
+        {
+            let mut live = self.live();
+            live.running.remove(&session_id);
+            live.streaming.remove(&session_id);
+        }
+        if let Err(e) = &result {
+            tracing::info!(error = %e, "Omni stop request failed; session marked idle");
+        }
         self.notify(Some(session_id));
         Ok(())
     }

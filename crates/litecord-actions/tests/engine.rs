@@ -564,3 +564,35 @@ async fn committed_receipt_wins_over_a_concurrent_executor_error() {
         .iter()
         .any(|e| matches!(e.event, AuditEvent::Failed { .. })));
 }
+
+#[tokio::test]
+async fn an_action_interrupted_mid_execution_becomes_uncertain_on_restart() {
+    let h = setup(AgentConfig::default()).await;
+    let action = send_to_conversation(&h.data, "sent while closing");
+    let id = pending_id(
+        h.engine
+            .propose(action, agent(), Revision(1), None)
+            .await
+            .unwrap(),
+    );
+    h.engine.approve(id, None).unwrap();
+    // The app closed after the claim, before the result was recorded.
+    h.db.write(|tx| {
+        repos::actions::set_status(tx, id, ActionStatus::Executing, Origin::UserProvided)
+    })
+    .unwrap();
+
+    let restarted = ActionEngine::new(
+        h.db.clone(),
+        &AgentConfig::default(),
+        Arc::new(DefaultExecutor::new(
+            h.db.clone(),
+            Some(h.backend.clone() as Arc<dyn SocialBackend>),
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.get(id).unwrap().unwrap().status,
+        ActionStatus::Uncertain
+    );
+}

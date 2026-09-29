@@ -89,7 +89,11 @@ impl Workspace {
                     if ui
                         .selectable_label(
                             self.selected_channel == Some(row.channel.id),
-                            format!("# {}", self.display(&row.channel.name)),
+                            format!(
+                                "{} {}",
+                                channel_prefix(row.channel.kind),
+                                self.display(&row.channel.name)
+                            ),
                         )
                         .clicked()
                     {
@@ -135,12 +139,14 @@ impl Workspace {
             .find(|r| Some(r.channel.id) == self.selected_channel);
         let Some(row) = channel else {
             ui.heading("Servers");
-            ui.label(
-                "Choose a channel from the sidebar. Hover over Servers to switch communities.",
-            );
+            ui.label("Choose a channel from the sidebar. Switch servers with the menu above it.");
             return;
         };
-        ui.heading(format!("# {}", self.display(&row.channel.name)));
+        ui.heading(format!(
+            "{} {}",
+            channel_prefix(row.channel.kind),
+            self.display(&row.channel.name)
+        ));
         ui.separator();
         ui.add_space(24.0);
         theme::chip(ui, row.channel.access.as_str(), theme::MUTED);
@@ -501,7 +507,17 @@ impl Workspace {
                 let mut volume = draft.unwrap_or(s.voice.state.output_volume);
                 let response = ui.add_enabled(
                     enabled,
-                    egui::Slider::new(&mut volume, 0.0..=1.0).text("Output"),
+                    egui::Slider::new(&mut volume, 0.0..=1.0)
+                        .text("Output")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .custom_parser(|s| {
+                            s.trim()
+                                .trim_end_matches('%')
+                                .trim()
+                                .parse::<f64>()
+                                .ok()
+                                .map(|p| p / 100.0)
+                        }),
                 );
                 let pointer_down = ui.ctx().input(|input| input.pointer.primary_down());
                 let pointer_adjusting = pointer_down && response.hovered();
@@ -524,5 +540,16 @@ impl Workspace {
                     ui.label(self.display(name));
                 }
             });
+    }
+}
+
+/// `#` only for text-like channels; voice and stage channels get a speaker.
+fn channel_prefix(kind: litecord_types::social::ChannelKind) -> &'static str {
+    use litecord_types::social::ChannelKind as K;
+    match kind {
+        K::Voice | K::Stage => "🔊",
+        K::Forum => "💬",
+        K::Announcement => "📢",
+        _ => "#",
     }
 }
